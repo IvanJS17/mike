@@ -28,6 +28,7 @@ const PUBLIC_TABLES = [
     "document_versions", "documents", "hidden_workflows", "library_folders",
     "project_subfolders", "projects", "tabular_cells",
     "tabular_review_chat_messages", "tabular_review_chats", "tabular_reviews",
+    "tabular_review_rows", "tabular_review_row_sources",
     "user_api_keys", "user_mcp_connector_tools", "user_mcp_connectors",
     "user_mcp_oauth_states", "user_mcp_oauth_tokens",
     "user_mcp_tool_audit_logs", "user_profiles",

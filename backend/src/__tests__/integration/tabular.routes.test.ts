@@ -14,12 +14,14 @@ const {
     filterAccessibleDocumentIds,
     getUserModelSettings,
     loadActiveVersion,
+    streamChatWithTools,
 } = vi.hoisted(() => ({
     ensureReviewAccess: vi.fn(),
     checkProjectAccess: vi.fn(),
     filterAccessibleDocumentIds: vi.fn(),
     getUserModelSettings: vi.fn(),
     loadActiveVersion: vi.fn(),
+    streamChatWithTools: vi.fn(),
 }));
 
 // ---------------------------------------------------------------------------
@@ -119,6 +121,27 @@ vi.mock("../../lib/documentVersions", () => ({
     loadActiveVersion: (...args: unknown[]) => loadActiveVersion(...args),
 }));
 
+// Storage + LLM are mocked so the generation loop actually runs (past its
+// guards) without real IO. downloadFile → null makes markdown extraction a
+// no-op; streamChatWithTools drives the per-column JSON callback. providerForModel
+// stays real so the missing-API-key guard still resolves providers correctly.
+vi.mock("../../lib/storage", () => ({
+    downloadFile: vi.fn(async () => null),
+}));
+
+vi.mock("../../lib/llm", async (importOriginal) => {
+    const actual = (await importOriginal()) as Record<string, unknown>;
+    return {
+        ...actual,
+        completeText: vi.fn(
+            async () =>
+                '{"summary":"Extracted","flag":"green","reasoning":"ok"}',
+        ),
+        streamChatWithTools: (...args: unknown[]) =>
+            streamChatWithTools(...args),
+    };
+});
+
 import { app } from "../../app";
 
 const AUTH = ["Authorization", "Bearer test"] as const;
@@ -145,6 +168,18 @@ describe("tabular.routes", () => {
             api_keys: { claude: "sk-test" },
         });
         loadActiveVersion.mockResolvedValue(null);
+        // Default: the LLM returns one done JSON line for column 0.
+        streamChatWithTools.mockImplementation(
+            async ({
+                callbacks,
+            }: {
+                callbacks?: { onContentDelta?: (t: string) => void };
+            }) => {
+                callbacks?.onContentDelta?.(
+                    '{"column_index":0,"summary":"Extracted","flag":"green","reasoning":"ok"}\n',
+                );
+            },
+        );
     });
 
     // ── GET /tabular-review (overview) ────────────────────────────────────
@@ -832,6 +867,429 @@ describe("tabular.routes", () => {
             expect(res.body).toEqual([
                 { id: "chat-1", title: "T", user_id: "u1" },
             ]);
+        });
+    });
+
+    // ── POST /tabular-review create-path rollback ─────────────────────────
+    describe("POST /tabular-review rollback", () => {
+        it("rolls back (deletes the review) when row creation fails", async () => {
+            supabaseState.tables.tabular_reviews = {
+                data: { id: "r-rollback", title: "Bad", document_ids: ["d1"] },
+                error: null,
+            };
+            supabaseState.tables.documents = {
+                data: [
+                    { id: "d1", filename: "A.pdf", file_type: "pdf", folder_id: null },
+                ],
+                error: null,
+            };
+            // The rows insert fails — createRowsForReview throws, the route must
+            // delete the just-created review and surface the error.
+            supabaseState.tables.tabular_review_rows = {
+                data: null,
+                error: { message: "rows insert failed" },
+            };
+
+            const res = await request(app)
+                .post("/tabular-review")
+                .set(...AUTH)
+                .send({
+                    title: "Bad",
+                    document_ids: ["d1"],
+                    columns_config: [{ index: 0, name: "Col", prompt: "p" }],
+                });
+
+            expect(res.status).toBe(500);
+            expect(res.body.detail).toBe("rows insert failed");
+        });
+
+        it("throws (and rolls back) when the source-document read errors", async () => {
+            supabaseState.tables.tabular_reviews = {
+                data: { id: "r-src", title: "Src", document_ids: ["d1"] },
+                error: null,
+            };
+            // fetchSourceDocuments must no longer swallow this error.
+            supabaseState.tables.documents = {
+                data: null,
+                error: { message: "documents read failed" },
+            };
+
+            const res = await request(app)
+                .post("/tabular-review")
+                .set(...AUTH)
+                .send({
+                    document_ids: ["d1"],
+                    columns_config: [{ index: 0, name: "Col", prompt: "p" }],
+                });
+
+            expect(res.status).toBe(500);
+            expect(res.body.detail).toBe("documents read failed");
+        });
+    });
+
+    // ── GET /:reviewId rows payload (folder rows) ─────────────────────────
+    describe("GET /tabular-review/:reviewId rows", () => {
+        it("returns folder rows with resolved source_document_ids", async () => {
+            supabaseState.tables.tabular_reviews = {
+                data: {
+                    id: "r1",
+                    user_id: "u1",
+                    project_id: "p1",
+                    document_ids: ["d1", "d2"],
+                    columns_config: [{ index: 0, name: "Col", prompt: "p" }],
+                    document_grouping: "folder",
+                },
+                error: null,
+            };
+            supabaseState.tables.tabular_cells = {
+                data: [
+                    {
+                        id: "c1",
+                        row_id: "row-folder",
+                        document_id: null,
+                        column_index: 0,
+                        content: null,
+                        status: "pending",
+                    },
+                ],
+                error: null,
+            };
+            supabaseState.tables.tabular_review_rows = {
+                data: [
+                    {
+                        id: "row-folder",
+                        review_id: "r1",
+                        label: "Contracts",
+                        row_type: "folder",
+                        folder_id: "f1",
+                        document_id: null,
+                        sort_index: 0,
+                    },
+                ],
+                error: null,
+            };
+            supabaseState.tables.tabular_review_row_sources = {
+                data: [
+                    { row_id: "row-folder", document_id: "d1" },
+                    { row_id: "row-folder", document_id: "d2" },
+                ],
+                error: null,
+            };
+            supabaseState.tables.documents = {
+                data: [
+                    { id: "d1", current_version_id: null },
+                    { id: "d2", current_version_id: null },
+                ],
+                error: null,
+            };
+
+            const res = await request(app)
+                .get("/tabular-review/r1")
+                .set(...AUTH);
+
+            expect(res.status).toBe(200);
+            expect(res.body.rows).toEqual([
+                {
+                    id: "row-folder",
+                    review_id: "r1",
+                    label: "Contracts",
+                    row_type: "folder",
+                    folder_id: "f1",
+                    document_id: null,
+                    sort_index: 0,
+                    source_document_ids: ["d1", "d2"],
+                },
+            ]);
+        });
+    });
+
+    // ── POST /:reviewId/generate — folder rows (F1 regression) ────────────
+    describe("POST /tabular-review/:reviewId/generate (folder rows)", () => {
+        it("generates folder-row cells to status done (keyed on row_id)", async () => {
+            supabaseState.tables.tabular_reviews = {
+                data: {
+                    id: "r1",
+                    user_id: "u1",
+                    project_id: null,
+                    columns_config: [{ index: 0, name: "Col", prompt: "p" }],
+                    document_grouping: "folder",
+                },
+                error: null,
+            };
+            // The folder cell carries a row_id and NO document_id — before the
+            // fix it could never be addressed and stayed "pending" forever.
+            supabaseState.tables.tabular_cells = {
+                data: [
+                    {
+                        id: "cell-folder",
+                        row_id: "row-folder",
+                        document_id: null,
+                        column_index: 0,
+                        content: null,
+                        status: "pending",
+                    },
+                ],
+                error: null,
+            };
+            supabaseState.tables.tabular_review_rows = {
+                data: [
+                    {
+                        id: "row-folder",
+                        review_id: "r1",
+                        label: "Contracts",
+                        row_type: "folder",
+                        folder_id: "f1",
+                        document_id: null,
+                        sort_index: 0,
+                    },
+                ],
+                error: null,
+            };
+            supabaseState.tables.tabular_review_row_sources = {
+                data: [
+                    { row_id: "row-folder", document_id: "d1" },
+                    { row_id: "row-folder", document_id: "d2" },
+                ],
+                error: null,
+            };
+            supabaseState.tables.documents = {
+                data: [
+                    { id: "d1", current_version_id: null },
+                    { id: "d2", current_version_id: null },
+                ],
+                error: null,
+            };
+
+            const res = await request(app)
+                .post("/tabular-review/r1/generate")
+                .set(...AUTH);
+
+            expect(res.status).toBe(200);
+            // The SSE stream must emit a "done" cell_update for the folder row,
+            // identified by row_id, with document_id null.
+            const doneLine = res.text
+                .split("\n")
+                .find(
+                    (line) =>
+                        line.includes('"row_id":"row-folder"') &&
+                        line.includes('"status":"done"'),
+                );
+            expect(doneLine).toBeDefined();
+            expect(doneLine).toContain('"document_id":null');
+            // The LLM was actually invoked for the folder row.
+            expect(streamChatWithTools).toHaveBeenCalledTimes(1);
+        });
+    });
+
+    // ── PATCH maintains rows / cells row_id (F4) ──────────────────────────
+    describe("PATCH /tabular-review/:reviewId row maintenance", () => {
+        it("adds cells for a new column keyed on row_id", async () => {
+            supabaseState.tables.tabular_reviews = {
+                data: {
+                    id: "r1",
+                    user_id: "u1",
+                    project_id: null,
+                    document_grouping: "document",
+                    columns_config: [{ index: 0, name: "A", prompt: "p" }],
+                },
+                error: null,
+            };
+            supabaseState.tables.tabular_review_rows = {
+                data: [
+                    {
+                        id: "row-1",
+                        review_id: "r1",
+                        label: "A.pdf",
+                        row_type: "document",
+                        folder_id: null,
+                        document_id: "d1",
+                        sort_index: 0,
+                    },
+                ],
+                error: null,
+            };
+            supabaseState.tables.tabular_review_row_sources = {
+                data: [{ row_id: "row-1", document_id: "d1" }],
+                error: null,
+            };
+            supabaseState.tables.tabular_cells = {
+                data: [{ row_id: "row-1", document_id: "d1", column_index: 0 }],
+                error: null,
+            };
+
+            const res = await request(app)
+                .patch("/tabular-review/r1")
+                .set(...AUTH)
+                .send({
+                    columns_config: [
+                        { index: 0, name: "A", prompt: "p" },
+                        { index: 1, name: "B", prompt: "q" },
+                    ],
+                });
+
+            expect(res.status).toBe(200);
+            const cellInsert = supabaseState.inserts.find(
+                (i) => i.table === "tabular_cells",
+            );
+            // Only the NEW column gets a cell, and it carries row_id + document_id.
+            expect(cellInsert?.payload).toEqual([
+                {
+                    review_id: "r1",
+                    row_id: "row-1",
+                    document_id: "d1",
+                    column_index: 1,
+                    status: "pending",
+                },
+            ]);
+        });
+
+        it("creates a review row when a document is added (no desync)", async () => {
+            supabaseState.tables.tabular_reviews = {
+                data: {
+                    id: "r1",
+                    user_id: "u1",
+                    project_id: null,
+                    document_grouping: "document",
+                    columns_config: [{ index: 0, name: "A", prompt: "p" }],
+                },
+                error: null,
+            };
+            supabaseState.tables.tabular_review_rows = {
+                data: [
+                    {
+                        id: "row-1",
+                        review_id: "r1",
+                        label: "A.pdf",
+                        row_type: "document",
+                        folder_id: null,
+                        document_id: "d1",
+                        sort_index: 0,
+                    },
+                ],
+                error: null,
+            };
+            supabaseState.tables.tabular_review_row_sources = {
+                data: [{ row_id: "row-1", document_id: "d1" }],
+                error: null,
+            };
+            supabaseState.tables.tabular_cells = {
+                data: [{ row_id: "row-1", document_id: "d1", column_index: 0 }],
+                error: null,
+            };
+            supabaseState.tables.documents = {
+                data: [
+                    { id: "d2", filename: "B.pdf", file_type: "pdf", folder_id: null },
+                ],
+                error: null,
+            };
+
+            const res = await request(app)
+                .patch("/tabular-review/r1")
+                .set(...AUTH)
+                .send({ document_ids: ["d1", "d2"] });
+
+            expect(res.status).toBe(200);
+            // The added document must produce a NEW review row — the old code
+            // only ever touched cells, leaving the row tables desynced.
+            const rowInsert = supabaseState.inserts.find(
+                (i) => i.table === "tabular_review_rows",
+            );
+            expect(rowInsert?.payload).toMatchObject({
+                review_id: "r1",
+                row_type: "document",
+                document_id: "d2",
+            });
+        });
+    });
+
+    // ── nested folder labels + Unknown folder fallback ────────────────────
+    describe("POST /tabular-review nested folder labels", () => {
+        it("labels folder rows with the nested path and falls back to Unknown folder", async () => {
+            supabaseState.tables.tabular_reviews = {
+                data: { id: "r1", title: "Nested", document_ids: ["d1", "d2"] },
+                error: null,
+            };
+            supabaseState.tables.documents = {
+                data: [
+                    { id: "d1", filename: "Child.pdf", file_type: "pdf", folder_id: "child" },
+                    { id: "d2", filename: "Ghost.pdf", file_type: "pdf", folder_id: "missing" },
+                ],
+                error: null,
+            };
+            supabaseState.tables.project_subfolders = {
+                data: [
+                    { id: "parent", name: "Parent", parent_folder_id: null },
+                    { id: "child", name: "Child", parent_folder_id: "parent" },
+                ],
+                error: null,
+            };
+            // Row insert echo isn't needed — we assert on the recorded payload.
+            supabaseState.tables.tabular_review_rows = { data: [], error: null };
+
+            const res = await request(app)
+                .post("/tabular-review")
+                .set(...AUTH)
+                .send({
+                    title: "Nested",
+                    project_id: "p1",
+                    document_ids: ["d1", "d2"],
+                    document_grouping: "folder",
+                    columns_config: [{ index: 0, name: "Col", prompt: "p" }],
+                });
+
+            expect(res.status).toBe(201);
+            const rowInsert = supabaseState.inserts.find(
+                (i) => i.table === "tabular_review_rows",
+            );
+            const labels = (rowInsert?.payload as { label: string }[]).map(
+                (r) => r.label,
+            );
+            expect(labels).toContain("Parent / Child");
+            expect(labels).toContain("Unknown folder");
+        });
+    });
+
+    // ── regenerate-cell accepts row_id (folder cells) ─────────────────────
+    describe("POST /tabular-review/:reviewId/regenerate-cell (folder row)", () => {
+        it("regenerates a folder cell addressed by row_id", async () => {
+            supabaseState.tables.tabular_reviews = {
+                data: {
+                    id: "r1",
+                    user_id: "u1",
+                    project_id: null,
+                    columns_config: [{ index: 0, name: "Col", prompt: "p" }],
+                    document_grouping: "folder",
+                },
+                error: null,
+            };
+            supabaseState.tables.tabular_review_rows = {
+                data: {
+                    id: "row-folder",
+                    review_id: "r1",
+                    label: "Contracts",
+                    row_type: "folder",
+                    folder_id: "f1",
+                    document_id: null,
+                    sort_index: 0,
+                },
+                error: null,
+            };
+            supabaseState.tables.tabular_review_row_sources = {
+                data: [{ row_id: "row-folder", document_id: "d1" }],
+                error: null,
+            };
+            supabaseState.tables.documents = {
+                data: [{ id: "d1", current_version_id: null }],
+                error: null,
+            };
+
+            const res = await request(app)
+                .post("/tabular-review/r1/regenerate-cell")
+                .set(...AUTH)
+                .send({ row_id: "row-folder", column_index: 0 });
+
+            expect(res.status).toBe(200);
+            expect(res.body).toMatchObject({ flag: "green" });
         });
     });
 });

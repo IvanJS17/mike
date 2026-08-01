@@ -99,10 +99,14 @@ async function fetchSourceDocuments(
     documentIds: string[],
 ): Promise<SourceDocument[]> {
     if (documentIds.length === 0) return [];
-    const { data } = await db
+    const { data, error } = await db
         .from("documents")
         .select("id, filename, file_type, folder_id, created_at")
         .in("id", documentIds);
+    // A transient read failure here previously returned an empty list, so the
+    // review would be created with zero rows/cells and no error surfaced.
+    // Throw so the create-path rollback (delete review) runs.
+    if (error) throw new Error(error.message);
     const position = new Map(documentIds.map((id, index) => [id, index]));
     return ((data ?? []) as SourceDocument[]).sort(
         (a, b) => (position.get(a.id) ?? 0) - (position.get(b.id) ?? 0),
@@ -114,10 +118,13 @@ async function getFolderPathMap(
     projectId: string | null | undefined,
 ): Promise<Map<string, string>> {
     if (!projectId) return new Map();
-    const { data } = await db
+    const { data, error } = await db
         .from("project_subfolders")
         .select("id, name, parent_folder_id")
         .eq("project_id", projectId);
+    // Surface DB failures instead of silently labelling every folder row
+    // "Unknown folder" — the create-path rollback depends on this throw.
+    if (error) throw new Error(error.message);
     const folders = (data ?? []) as {
         id: string;
         name: string;
@@ -140,24 +147,25 @@ async function getFolderPathMap(
     return paths;
 }
 
-async function createRowsForReview(
-    db: SupabaseDb,
-    reviewId: string,
-    projectId: string | null | undefined,
-    documentIds: string[],
-    columns: Column[],
-    grouping: DocumentGrouping,
-): Promise<ReviewRow[]> {
-    const docs = await fetchSourceDocuments(db, documentIds);
-    const folderPaths = await getFolderPathMap(db, projectId);
-    const inputs: {
-        label: string;
-        row_type: "document" | "folder";
-        folder_id: string | null;
-        document_id: string | null;
-        sourceIds: string[];
-    }[] = [];
+type RowInput = {
+    label: string;
+    row_type: "document" | "folder";
+    folder_id: string | null;
+    document_id: string | null;
+    sourceIds: string[];
+};
 
+// Pure planner: turn a set of source documents into the review rows that should
+// represent them under the chosen grouping. Folder grouping collapses same-
+// folder docs into one folder row; loose docs (and all docs under "document"
+// grouping) become one-document rows. Shared by the create path and PATCH.
+function planRows(
+    docs: SourceDocument[],
+    folderPaths: Map<string, string>,
+    grouping: DocumentGrouping,
+    projectId: string | null | undefined,
+): RowInput[] {
+    const inputs: RowInput[] = [];
     if (grouping === "folder" && projectId) {
         const byFolder = new Map<string, SourceDocument[]>();
         for (const doc of docs) {
@@ -171,7 +179,10 @@ async function createRowsForReview(
                 });
                 continue;
             }
-            byFolder.set(doc.folder_id, [...(byFolder.get(doc.folder_id) ?? []), doc]);
+            byFolder.set(doc.folder_id, [
+                ...(byFolder.get(doc.folder_id) ?? []),
+                doc,
+            ]);
         }
         for (const [folderId, folderDocs] of byFolder) {
             inputs.push({
@@ -193,8 +204,22 @@ async function createRowsForReview(
             });
         }
     }
-
     inputs.sort((a, b) => a.label.localeCompare(b.label));
+    return inputs;
+}
+
+async function createRowsForReview(
+    db: SupabaseDb,
+    reviewId: string,
+    projectId: string | null | undefined,
+    documentIds: string[],
+    columns: Column[],
+    grouping: DocumentGrouping,
+): Promise<ReviewRow[]> {
+    const docs = await fetchSourceDocuments(db, documentIds);
+    const folderPaths = await getFolderPathMap(db, projectId);
+    const inputs = planRows(docs, folderPaths, grouping, projectId);
+
     const { data, error } = await db
         .from("tabular_review_rows")
         .insert(
@@ -245,18 +270,22 @@ async function loadReviewRows(
     db: SupabaseDb,
     reviewId: string,
 ): Promise<ReviewRow[]> {
-    const { data } = await db
+    const { data, error } = await db
         .from("tabular_review_rows")
         .select("*")
         .eq("review_id", reviewId)
         .order("sort_index", { ascending: true });
+    // Don't mask a read failure as "no rows" — a caller (generate/PATCH) would
+    // then act on an empty row set and desync the review.
+    if (error) throw new Error(error.message);
     const rows = (data ?? []) as ReviewRow[];
     if (!rows.length) return rows;
-    const { data: sources } = await db
+    const { data: sources, error: sourcesError } = await db
         .from("tabular_review_row_sources")
         .select("row_id, document_id")
         .in("row_id", rows.map((row) => row.id))
         .order("sort_index", { ascending: true });
+    if (sourcesError) throw new Error(sourcesError.message);
     const byRow = new Map<string, string[]>();
     for (const source of sources ?? []) {
         byRow.set(source.row_id, [
@@ -269,6 +298,50 @@ async function loadReviewRows(
         source_document_ids:
             byRow.get(row.id) ?? (row.document_id ? [row.document_id] : []),
     }));
+}
+
+// A folder row concatenates every source document into ONE LLM call. Without a
+// ceiling, an N-document folder could blow past the model context window (and
+// the per-cell prompt already slices to 120k chars downstream). Cap the joined
+// text here so the size is bounded by the row, not by how many docs it holds.
+const ROW_MARKDOWN_MAX_CHARS = 120_000;
+
+type EnrichedDoc = {
+    id: string;
+    filename: string;
+    storage_path: string | null;
+    file_type: string | null;
+};
+
+// Concatenate the extracted markdown of a row's source documents, bounded by
+// ROW_MARKDOWN_MAX_CHARS. Each document is prefixed with a heading so the model
+// can tell one source from another inside a grouped (folder) row.
+async function buildRowMarkdown(sources: EnrichedDoc[]): Promise<string> {
+    const parts: string[] = [];
+    let used = 0;
+    for (const doc of sources) {
+        if (used >= ROW_MARKDOWN_MAX_CHARS) break;
+        if (!doc.storage_path) continue;
+        const buf = await downloadFile(doc.storage_path);
+        if (!buf) continue;
+        let text = "";
+        try {
+            text = await extractDocumentMarkdown(buf, doc.file_type);
+        } catch (err) {
+            console.error(
+                `[tabular/generate] extraction error doc=${doc.id}`,
+                safeErrorLog(err),
+            );
+            continue;
+        }
+        if (!text) continue;
+        const heading = sources.length > 1 ? `# ${doc.filename}\n\n` : "";
+        const remaining = ROW_MARKDOWN_MAX_CHARS - used;
+        const chunk = (heading + text).slice(0, remaining);
+        parts.push(chunk);
+        used += chunk.length;
+    }
+    return parts.join("\n\n");
 }
 
 function providerLabel(provider: Provider): string {
@@ -688,104 +761,241 @@ tabularRouter.patch("/:reviewId", requireAuth, async (req, res) => {
         Array.isArray(req.body.columns_config) ||
         Array.isArray(req.body.document_ids)
     ) {
-        const { data: existingCells } = await db
-            .from("tabular_cells")
-            .select("document_id,column_index")
-            .eq("review_id", reviewId);
-        const existingKeys = new Set(
-            (existingCells ?? []).map(
-                (cell) => `${cell.document_id}:${cell.column_index}`,
-            ),
-        );
-
-        let documentIds: string[];
-
-        if (Array.isArray(req.body.document_ids)) {
-            // document_ids is the new source of truth — delete removed docs' cells
-            const requestedDocIds = req.body.document_ids as string[];
-            const existingDocIds = (existingCells ?? []).map(
-                (cell) => cell.document_id,
-            );
-            const existingDocIdSet = new Set(existingDocIds);
-            const newDocCandidates = requestedDocIds.filter(
-                (id) => !existingDocIdSet.has(id),
-            );
-            const newDocAllowed = await filterAccessibleDocumentIds(
-                newDocCandidates,
-                userId,
-                userEmail,
-                db,
-            );
-            const newDocAllowedSet = new Set(newDocAllowed);
-            const newDocIds = requestedDocIds.filter(
-                (id) => existingDocIdSet.has(id) || newDocAllowedSet.has(id),
-            );
-            const removedDocIds = existingDocIds.filter(
-                (id) => !newDocIds.includes(id),
+        // Everything below is keyed on rows, not document_id. The pre-folder
+        // code deleted/inserted cells by document_id and never touched
+        // tabular_review_rows / _sources — so any edit desynced grouped
+        // reviews (removed docs lingered in a folder row's source list, added
+        // docs got orphan cells with no row). Reconcile the row tables first,
+        // then ensure one cell per (row × active column).
+        try {
+            const grouping = normalizeGrouping(updatedReview.document_grouping);
+            const existingRows = await loadReviewRows(db, reviewId);
+            const { data: existingCells } = await db
+                .from("tabular_cells")
+                .select("row_id,document_id,column_index")
+                .eq("review_id", reviewId);
+            const existingKeys = new Set(
+                (existingCells ?? [])
+                    .filter((cell) => cell.row_id)
+                    .map((cell) => `${cell.row_id}:${cell.column_index}`),
             );
 
-            if (removedDocIds.length > 0) {
-                const { error: deleteError } = await db
-                    .from("tabular_cells")
-                    .delete()
-                    .eq("review_id", reviewId)
-                    .in("document_id", removedDocIds);
-                if (deleteError)
-                    return void res
-                        .status(500)
-                        .json({ detail: deleteError.message });
+            // Rows we must (re)create cells for: existing minus removed plus
+            // added. Mutated as we reconcile below.
+            let liveRows: { id: string; document_id: string | null }[] =
+                existingRows.map((r) => ({
+                    id: r.id,
+                    document_id: r.document_id,
+                }));
+
+            if (Array.isArray(req.body.document_ids)) {
+                const requestedDocIds = req.body.document_ids as string[];
+                // Document membership spans folder + document rows.
+                const currentDocIds = [
+                    ...new Set(
+                        existingRows.flatMap(
+                            (r) => r.source_document_ids ?? [],
+                        ),
+                    ),
+                ];
+                const currentSet = new Set(currentDocIds);
+                const addCandidates = requestedDocIds.filter(
+                    (id) => !currentSet.has(id),
+                );
+                const addAllowed = new Set(
+                    await filterAccessibleDocumentIds(
+                        addCandidates,
+                        userId,
+                        userEmail,
+                        db,
+                    ),
+                );
+                const newDocIds = requestedDocIds.filter(
+                    (id) => currentSet.has(id) || addAllowed.has(id),
+                );
+                const newDocSet = new Set(newDocIds);
+                const removedSet = new Set(
+                    currentDocIds.filter((id) => !newDocSet.has(id)),
+                );
+
+                // Removals: delete a row whose every source is gone (cascade
+                // wipes its cells + sources); trim just the removed sources
+                // from folder rows that only partially lost documents.
+                if (removedSet.size > 0) {
+                    const rowsToDelete = existingRows
+                        .filter((row) => {
+                            const src = row.source_document_ids ?? [];
+                            return (
+                                src.length > 0 &&
+                                src.every((id) => removedSet.has(id))
+                            );
+                        })
+                        .map((row) => row.id);
+                    if (rowsToDelete.length > 0) {
+                        const { error: delRowErr } = await db
+                            .from("tabular_review_rows")
+                            .delete()
+                            .in("id", rowsToDelete);
+                        if (delRowErr)
+                            return void res
+                                .status(500)
+                                .json({ detail: delRowErr.message });
+                        const deleted = new Set(rowsToDelete);
+                        liveRows = liveRows.filter((r) => !deleted.has(r.id));
+                    }
+                    const survivingRowIds = liveRows.map((r) => r.id);
+                    if (survivingRowIds.length > 0) {
+                        const { error: trimErr } = await db
+                            .from("tabular_review_row_sources")
+                            .delete()
+                            .in("row_id", survivingRowIds)
+                            .in("document_id", [...removedSet]);
+                        if (trimErr)
+                            return void res
+                                .status(500)
+                                .json({ detail: trimErr.message });
+                    }
+                }
+
+                // Additions: plan rows for the newly added docs, merging into
+                // an existing folder row when one already covers that folder.
+                const addedDocIds = newDocIds.filter(
+                    (id) => !currentSet.has(id),
+                );
+                if (addedDocIds.length > 0) {
+                    const projectId =
+                        (updatedReview.project_id as string | null) ?? null;
+                    const addedDocs = await fetchSourceDocuments(
+                        db,
+                        addedDocIds,
+                    );
+                    const folderPaths = await getFolderPathMap(db, projectId);
+                    const planned = planRows(
+                        addedDocs,
+                        folderPaths,
+                        grouping,
+                        projectId,
+                    );
+                    const existingFolderRow = new Map<string, string>();
+                    for (const row of existingRows) {
+                        if (row.row_type === "folder" && row.folder_id)
+                            existingFolderRow.set(row.folder_id, row.id);
+                    }
+                    let nextSort =
+                        existingRows.reduce(
+                            (max, r) => Math.max(max, r.sort_index),
+                            -1,
+                        ) + 1;
+                    for (const input of planned) {
+                        const mergeRowId =
+                            input.row_type === "folder" && input.folder_id
+                                ? existingFolderRow.get(input.folder_id)
+                                : undefined;
+                        if (mergeRowId) {
+                            const { error: srcErr } = await db
+                                .from("tabular_review_row_sources")
+                                .insert(
+                                    input.sourceIds.map((document_id, i) => ({
+                                        row_id: mergeRowId,
+                                        document_id,
+                                        sort_index: i,
+                                    })),
+                                );
+                            if (srcErr)
+                                return void res
+                                    .status(500)
+                                    .json({ detail: srcErr.message });
+                            continue;
+                        }
+                        const { data: rowData, error: rowErr } = await db
+                            .from("tabular_review_rows")
+                            .insert({
+                                review_id: reviewId,
+                                label: input.label,
+                                row_type: input.row_type,
+                                folder_id: input.folder_id,
+                                document_id: input.document_id,
+                                sort_index: nextSort++,
+                            })
+                            .select("*")
+                            .single();
+                        if (rowErr || !rowData)
+                            return void res.status(500).json({
+                                detail: rowErr?.message ?? "Failed to add row",
+                            });
+                        const newRow = rowData as ReviewRow;
+                        if (input.sourceIds.length) {
+                            const { error: srcErr } = await db
+                                .from("tabular_review_row_sources")
+                                .insert(
+                                    input.sourceIds.map((document_id, i) => ({
+                                        row_id: newRow.id,
+                                        document_id,
+                                        sort_index: i,
+                                    })),
+                                );
+                            if (srcErr)
+                                return void res
+                                    .status(500)
+                                    .json({ detail: srcErr.message });
+                        }
+                        liveRows.push({
+                            id: newRow.id,
+                            document_id: newRow.document_id,
+                        });
+                    }
+                }
+
+                persistedDocumentIds = newDocIds;
+                const { error: documentIdsError } = await db
+                    .from("tabular_reviews")
+                    .update({
+                        document_ids: newDocIds,
+                        updated_at: new Date().toISOString(),
+                    })
+                    .eq("id", reviewId);
+                if (documentIdsError)
+                    return void res.status(500).json({
+                        detail: documentIdsError.message,
+                    });
             }
 
-            documentIds = newDocIds;
-        } else {
-            // No document change — derive from existing cells
-            documentIds = [
-                ...new Set(
-                    (existingCells ?? []).map((cell) => cell.document_id),
-                ),
-            ];
-        }
-
-        if (Array.isArray(req.body.document_ids)) {
-            persistedDocumentIds = documentIds;
-            const { error: documentIdsError } = await db
-                .from("tabular_reviews")
-                .update({
-                    document_ids: documentIds,
-                    updated_at: new Date().toISOString(),
-                })
-                .eq("id", reviewId);
-            if (documentIdsError)
-                return void res.status(500).json({
-                    detail: documentIdsError.message,
-                });
-        }
-
-        const activeColumns = Array.isArray(req.body.columns_config)
-            ? req.body.columns_config
-            : (updatedReview.columns_config ?? []);
-        const newCells = documentIds.flatMap((documentId) =>
-            activeColumns
-                .filter(
-                    (column: { index: number }) =>
-                        !existingKeys.has(`${documentId}:${column.index}`),
-                )
-                .map((column: { index: number }) => ({
-                    review_id: reviewId,
-                    document_id: documentId,
-                    column_index: column.index,
-                    status: "pending",
-                })),
-        );
-
-        if (newCells.length > 0) {
-            const { error: insertError } = await db
-                .from("tabular_cells")
-                .insert(newCells);
-            if (insertError)
-                return void res
-                    .status(500)
-                    .json({ detail: insertError.message });
+            // Ensure a pending cell exists for every live row × active column.
+            // Covers new rows AND newly added columns; keyed by row_id so
+            // folder rows (document_id null) get their cells too.
+            const activeColumns = Array.isArray(req.body.columns_config)
+                ? req.body.columns_config
+                : (updatedReview.columns_config ?? []);
+            const newCells = liveRows.flatMap((row) =>
+                activeColumns
+                    .filter(
+                        (column: { index: number }) =>
+                            !existingKeys.has(`${row.id}:${column.index}`),
+                    )
+                    .map((column: { index: number }) => ({
+                        review_id: reviewId,
+                        row_id: row.id,
+                        document_id: row.document_id,
+                        column_index: column.index,
+                        status: "pending",
+                    })),
+            );
+            if (newCells.length > 0) {
+                const { error: insertError } = await db
+                    .from("tabular_cells")
+                    .insert(newCells);
+                if (insertError)
+                    return void res
+                        .status(500)
+                        .json({ detail: insertError.message });
+            }
+        } catch (err) {
+            return void res.status(500).json({
+                detail:
+                    err instanceof Error
+                        ? err.message
+                        : "Failed to update review rows",
+            });
         }
     }
 
@@ -852,12 +1062,16 @@ tabularRouter.post(
         const userId = res.locals.userId as string;
         const userEmail = res.locals.userEmail as string | undefined;
         const { reviewId } = req.params;
-        const { document_id, column_index } = req.body as {
-            document_id: string;
+        // A folder cell has no document_id — the client sends the row_id
+        // instead. Either identifier addresses one cell; a document cell can
+        // still be regenerated by document_id (backward compatible).
+        const { document_id, row_id, column_index } = req.body as {
+            document_id?: string;
+            row_id?: string;
             column_index: number;
         };
 
-        if (!document_id || column_index == null)
+        if ((!document_id && !row_id) || column_index == null)
             return void res
                 .status(400)
                 .json({ detail: "document_id and column_index are required" });
@@ -886,22 +1100,85 @@ tabularRouter.post(
         if (!column)
             return void res.status(400).json({ detail: "Column not found" });
 
-        const docAllowed = await filterAccessibleDocumentIds(
-            [document_id],
-            userId,
-            userEmail,
-            db,
-        );
-        if (docAllowed.length === 0)
-            return void res.status(404).json({ detail: "Document not found" });
-        const { data: doc } = await db
-            .from("documents")
-            .select("id, current_version_id")
-            .eq("id", document_id)
-            .single();
-        if (!doc)
-            return void res.status(404).json({ detail: "Document not found" });
-        const docActive = await loadActiveVersion(document_id, db);
+        // Resolve the source documents + display label for the target cell.
+        let sources: EnrichedDoc[] = [];
+        let label = "Untitled document";
+        if (row_id) {
+            const { data: row, error: rowError } = await db
+                .from("tabular_review_rows")
+                .select("*")
+                .eq("id", row_id)
+                .eq("review_id", reviewId)
+                .single();
+            if (rowError || !row)
+                return void res.status(404).json({ detail: "Row not found" });
+            const { data: srcData } = await db
+                .from("tabular_review_row_sources")
+                .select("document_id, sort_index")
+                .eq("row_id", row_id)
+                .order("sort_index", { ascending: true });
+            let srcIds = ((srcData ?? []) as { document_id: string }[]).map(
+                (s) => s.document_id,
+            );
+            if (!srcIds.length && row.document_id) srcIds = [row.document_id];
+            const allowed = new Set(
+                await filterAccessibleDocumentIds(
+                    srcIds,
+                    userId,
+                    userEmail,
+                    db,
+                ),
+            );
+            const filtered = srcIds.filter((id) => allowed.has(id));
+            if (filtered.length === 0)
+                return void res
+                    .status(404)
+                    .json({ detail: "Document not found" });
+            const { data: docData } = await db
+                .from("documents")
+                .select("id, current_version_id")
+                .in("id", filtered);
+            const docRows = (docData ?? []) as {
+                id: string;
+                current_version_id?: string | null;
+            }[];
+            await attachActiveVersionPaths(db, docRows);
+            sources = docRows as unknown as EnrichedDoc[];
+            label = row.label?.trim() || sources[0]?.filename || label;
+        } else if (document_id) {
+            const docAllowed = await filterAccessibleDocumentIds(
+                [document_id],
+                userId,
+                userEmail,
+                db,
+            );
+            if (docAllowed.length === 0)
+                return void res
+                    .status(404)
+                    .json({ detail: "Document not found" });
+            const { data: doc } = await db
+                .from("documents")
+                .select("id, current_version_id")
+                .eq("id", document_id)
+                .single();
+            if (!doc)
+                return void res
+                    .status(404)
+                    .json({ detail: "Document not found" });
+            const docActive = await loadActiveVersion(document_id, db);
+            if (docActive) {
+                sources = [
+                    {
+                        id: document_id,
+                        filename:
+                            docActive.filename?.trim() || "Untitled document",
+                        storage_path: docActive.storage_path,
+                        file_type: docActive.file_type,
+                    },
+                ];
+                label = docActive.filename?.trim() || label;
+            }
+        }
 
         const { tabular_model, api_keys } = await getUserModelSettings(
             userId,
@@ -915,34 +1192,26 @@ tabularRouter.post(
             });
         }
 
-        await db
-            .from("tabular_cells")
-            .update({ status: "generating", content: null })
-            .eq("review_id", reviewId)
-            .eq("document_id", document_id)
-            .eq("column_index", column_index);
+        // The row_id / document_id branch selects the same one cell either way.
+        const applyTarget = <T extends { eq: (k: string, v: unknown) => T }>(
+            q: T,
+        ): T =>
+            row_id
+                ? q.eq("row_id", row_id)
+                : q.eq("document_id", document_id as string);
 
-        let markdown = "";
-        if (docActive) {
-            const buf = await downloadFile(docActive.storage_path);
-            if (buf) {
-                try {
-                    markdown = await extractDocumentMarkdown(
-                        buf,
-                        docActive.file_type,
-                    );
-                } catch (err) {
-                    console.error(
-                        `[regenerate-cell] extraction error doc=${document_id}`,
-                        err,
-                    );
-                }
-            }
-        }
+        await applyTarget(
+            db
+                .from("tabular_cells")
+                .update({ status: "generating", content: null })
+                .eq("review_id", reviewId),
+        ).eq("column_index", column_index);
+
+        const markdown = await buildRowMarkdown(sources);
 
         const result = await queryTabularCell(
             tabular_model,
-            docActive?.filename?.trim() || "Untitled document",
+            label,
             markdown,
             column.prompt,
             column.format,
@@ -951,21 +1220,21 @@ tabularRouter.post(
         );
 
         if (!result) {
-            await db
-                .from("tabular_cells")
-                .update({ status: "error" })
-                .eq("review_id", reviewId)
-                .eq("document_id", document_id)
-                .eq("column_index", column_index);
+            await applyTarget(
+                db
+                    .from("tabular_cells")
+                    .update({ status: "error" })
+                    .eq("review_id", reviewId),
+            ).eq("column_index", column_index);
             return void res.status(500).json({ detail: "Generation failed" });
         }
 
-        await db
-            .from("tabular_cells")
-            .update({ content: JSON.stringify(result), status: "done" })
-            .eq("review_id", reviewId)
-            .eq("document_id", document_id)
-            .eq("column_index", column_index);
+        await applyTarget(
+            db
+                .from("tabular_cells")
+                .update({ content: JSON.stringify(result), status: "done" })
+                .eq("review_id", reviewId),
+        ).eq("column_index", column_index);
 
         res.json(result);
     },
@@ -1003,40 +1272,94 @@ tabularRouter.post("/:reviewId/generate", requireAuth, async (req, res) => {
         .from("tabular_cells")
         .select("*")
         .eq("review_id", reviewId);
+    // Generation runs per ROW, not per document. A folder row groups several
+    // source documents into one cell, and its cells carry `document_id: null`
+    // + a `row_id` — so keying anything on document_id would silently drop
+    // folder cells (they would stay "pending" forever). Every cell has a
+    // row_id after the folder-rows migration, so key the lookup on it.
     const cellMap = new Map<string, Record<string, unknown>>();
-    for (const cell of cells ?? [])
-        cellMap.set(`${cell.document_id}:${cell.column_index}`, cell);
+    for (const cell of cells ?? []) {
+        const key = (cell.row_id ?? cell.document_id) as string | null;
+        if (key) cellMap.set(`${key}:${cell.column_index}`, cell);
+    }
 
-    const docIds = [...new Set((cells ?? []).map((c) => c.document_id))];
+    // Build the units to generate. Prefer the persisted rows (document + folder
+    // rows); fall back to the legacy document-derived path only when a review
+    // predates rows entirely, so old data still generates.
+    const rows = await loadReviewRows(db, reviewId);
+    type GenUnit = {
+        rowId: string | null;
+        documentId: string | null;
+        label: string;
+        sourceDocIds: string[];
+    };
+    let units: GenUnit[];
+    if (rows.length > 0) {
+        units = rows.map((row) => ({
+            rowId: row.id,
+            documentId: row.document_id,
+            label: row.label,
+            sourceDocIds: row.source_document_ids ?? [],
+        }));
+    } else {
+        // Legacy fallback: one unit per document, keyed on document_id.
+        const legacyDocIds = [
+            ...new Set((cells ?? []).map((c) => c.document_id as string)),
+        ].filter(Boolean);
+        if (legacyDocIds.length > 0) {
+            units = legacyDocIds.map((id) => ({
+                rowId: null,
+                documentId: id,
+                label: id,
+                sourceDocIds: [id],
+            }));
+        } else if (review.project_id) {
+            const { data } = await db
+                .from("documents")
+                .select("id")
+                .eq("project_id", review.project_id)
+                .order("created_at", { ascending: true });
+            units = ((data ?? []) as { id: string }[]).map((d) => ({
+                rowId: null,
+                documentId: d.id,
+                label: d.id,
+                sourceDocIds: [d.id],
+            }));
+        } else {
+            units = [];
+        }
+    }
+
+    // Access-filter and enrich every source document once. attachActiveVersionPaths
+    // resolves storage_path/file_type/filename from the active version.
+    const allSourceIds = [
+        ...new Set(units.flatMap((u) => u.sourceDocIds)),
+    ];
     const allowedDocIds = new Set(
-        await filterAccessibleDocumentIds(docIds, userId, userEmail, db),
+        await filterAccessibleDocumentIds(
+            allSourceIds,
+            userId,
+            userEmail,
+            db,
+        ),
     );
-    let docs: Record<string, unknown>[] = [];
-    if (docIds.length > 0) {
-        const filteredIds = docIds.filter((id) => allowedDocIds.has(id));
-        const { data } =
-            filteredIds.length > 0
-                ? await db
-                      .from("documents")
-                      .select("id, current_version_id")
-                      .in("id", filteredIds)
-                : { data: [] as Record<string, unknown>[] };
-        docs = data ?? [];
-    } else if (review.project_id) {
+    const filteredSourceIds = allSourceIds.filter((id) =>
+        allowedDocIds.has(id),
+    );
+    let enrichedDocs: EnrichedDoc[] = [];
+    if (filteredSourceIds.length > 0) {
         const { data } = await db
             .from("documents")
             .select("id, current_version_id")
-            .eq("project_id", review.project_id)
-            .order("created_at", { ascending: true });
-        docs = data ?? [];
-    }
-    await attachActiveVersionPaths(
-        db,
-        docs as {
+            .in("id", filteredSourceIds);
+        const docRows = (data ?? []) as {
             id: string;
             current_version_id?: string | null;
-        }[],
-    );
+        }[];
+        await attachActiveVersionPaths(db, docRows);
+        enrichedDocs = docRows as unknown as EnrichedDoc[];
+    }
+    const docById = new Map(enrichedDocs.map((d) => [d.id, d]));
 
     const { tabular_model, api_keys } = await getUserModelSettings(userId, db);
     const missingKey = missingModelApiKey(tabular_model, api_keys);
@@ -1057,38 +1380,30 @@ tabularRouter.post("/:reviewId/generate", requireAuth, async (req, res) => {
 
     try {
         await Promise.all(
-            docs.map(async (doc) => {
-                const docId = doc.id as string;
-                let markdown = "";
+            units.map(async (unit) => {
+                // Which cells does this unit address? Row-based when we have a
+                // row_id (document + folder rows), else legacy document_id.
+                const cellKey = unit.rowId ?? unit.documentId;
+                if (!cellKey) return;
+                // A stable SSE identity the frontend can match on: row_id for
+                // grouped/row-based cells, plus document_id for backward compat.
+                const sseId = {
+                    row_id: unit.rowId,
+                    document_id: unit.documentId,
+                };
 
-                const filename =
-                    (typeof doc.filename === "string" && doc.filename.trim()
-                        ? doc.filename.trim()
-                        : "Untitled document");
-                const storagePath =
-                    typeof doc.storage_path === "string" ? doc.storage_path : "";
-                const fileType =
-                    typeof doc.file_type === "string" ? doc.file_type : "";
-                if (storagePath) {
-                    const buf = await downloadFile(storagePath);
-                    if (buf) {
-                        try {
-                            markdown = await extractDocumentMarkdown(
-                                buf,
-                                fileType,
-                            );
-                        } catch (err) {
-                            console.error(
-                                `[tabular/generate] extraction error doc=${docId}`,
-                                err,
-                            );
-                        }
-                    }
-                }
+                const sources = unit.sourceDocIds
+                    .map((id) => docById.get(id))
+                    .filter((d): d is EnrichedDoc => !!d);
+                const label =
+                    unit.label?.trim() ||
+                    sources[0]?.filename ||
+                    "Untitled document";
+                const markdown = await buildRowMarkdown(sources);
 
                 // Filter to only columns that need processing
                 const columnsToProcess = columns.filter((col) => {
-                    const cell = cellMap.get(`${docId}:${col.index}`);
+                    const cell = cellMap.get(`${cellKey}:${col.index}`);
                     return !(cell?.status === "done" && cell?.content);
                 });
                 if (columnsToProcess.length === 0) return;
@@ -1096,9 +1411,9 @@ tabularRouter.post("/:reviewId/generate", requireAuth, async (req, res) => {
                 // Mark all as generating upfront
                 for (const col of columnsToProcess) {
                     write(
-                        `data: ${JSON.stringify({ type: "cell_update", document_id: docId, column_index: col.index, content: null, status: "generating" })}\n\n`,
+                        `data: ${JSON.stringify({ type: "cell_update", ...sseId, column_index: col.index, content: null, status: "generating" })}\n\n`,
                     );
-                    const existingCell = cellMap.get(`${docId}:${col.index}`);
+                    const existingCell = cellMap.get(`${cellKey}:${col.index}`);
                     if (existingCell) {
                         await db
                             .from("tabular_cells")
@@ -1107,7 +1422,8 @@ tabularRouter.post("/:reviewId/generate", requireAuth, async (req, res) => {
                     } else {
                         await db.from("tabular_cells").insert({
                             review_id: reviewId,
-                            document_id: docId,
+                            row_id: unit.rowId,
+                            document_id: unit.documentId,
                             column_index: col.index,
                             status: "generating",
                         });
@@ -1119,29 +1435,35 @@ tabularRouter.post("/:reviewId/generate", requireAuth, async (req, res) => {
                 try {
                     await queryTabularAllColumns(
                         tabular_model,
-                        filename,
+                        label,
                         markdown,
                         columnsToProcess,
                         async (columnIndex, result) => {
                             receivedColumns.add(columnIndex);
-                            await db
+                            let doneUpdate = db
                                 .from("tabular_cells")
                                 .update({
                                     content: JSON.stringify(result),
                                     status: "done",
                                 })
                                 .eq("review_id", reviewId)
-                                .eq("document_id", docId)
                                 .eq("column_index", columnIndex);
+                            doneUpdate = unit.rowId
+                                ? doneUpdate.eq("row_id", unit.rowId)
+                                : doneUpdate.eq(
+                                      "document_id",
+                                      unit.documentId,
+                                  );
+                            await doneUpdate;
                             write(
-                                `data: ${JSON.stringify({ type: "cell_update", document_id: docId, column_index: columnIndex, content: result, status: "done" })}\n\n`,
+                                `data: ${JSON.stringify({ type: "cell_update", ...sseId, column_index: columnIndex, content: result, status: "done" })}\n\n`,
                             );
                         },
                         api_keys,
                     );
                 } catch (err) {
                     console.error(
-                        `[tabular/generate] queryTabularAllColumns error doc=${docId}`,
+                        `[tabular/generate] queryTabularAllColumns error row=${cellKey}`,
                         safeErrorLog(err),
                     );
                 }
@@ -1149,14 +1471,17 @@ tabularRouter.post("/:reviewId/generate", requireAuth, async (req, res) => {
                 // Mark any columns the LLM didn't return as error
                 for (const col of columnsToProcess) {
                     if (!receivedColumns.has(col.index)) {
-                        await db
+                        let errUpdate = db
                             .from("tabular_cells")
                             .update({ status: "error" })
                             .eq("review_id", reviewId)
-                            .eq("document_id", docId)
                             .eq("column_index", col.index);
+                        errUpdate = unit.rowId
+                            ? errUpdate.eq("row_id", unit.rowId)
+                            : errUpdate.eq("document_id", unit.documentId);
+                        await errUpdate;
                         write(
-                            `data: ${JSON.stringify({ type: "cell_update", document_id: docId, column_index: col.index, content: null, status: "error" })}\n\n`,
+                            `data: ${JSON.stringify({ type: "cell_update", ...sseId, column_index: col.index, content: null, status: "error" })}\n\n`,
                         );
                     }
                 }
