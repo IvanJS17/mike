@@ -36,6 +36,7 @@ import type {
     Project,
     TabularCell,
     TabularReview,
+    TabularReviewRow,
     Workflow,
 } from "../shared/types";
 import { AddColumnModal } from "./AddColumnModal";
@@ -56,7 +57,7 @@ import {
 } from "@/app/lib/modelAvailability";
 import { TRSidePanel } from "./TRSidePanel";
 import { TRTable } from "./TRTable";
-import type { TRTableHandle } from "./TRTable";
+import type { TRTableHandle, TableRow } from "./TRTable";
 import { TRChatPanel } from "./TRChatPanel";
 import { TabularReviewDetailsModal } from "./TabularReviewDetailsModal";
 import { exportTabularReviewToExcel } from "./exportToExcel";
@@ -70,12 +71,26 @@ interface Props {
     projectId?: string;
 }
 
+// Match a cell to a row: row_id first (folder cells carry no document_id), then
+// document_id so optimistic/legacy cells still line up. Shared by every cell
+// mutation path so folder-grouped reviews update the same cells they render.
+function cellMatchesRow(
+    cell: Pick<TabularCell, "row_id" | "document_id">,
+    row: { rowId: string | null; documentId: string | null },
+): boolean {
+    return (
+        (row.rowId != null && cell.row_id === row.rowId) ||
+        (row.documentId != null && cell.document_id === row.documentId)
+    );
+}
+
 export function TRView({ reviewId, projectId }: Props) {
     const { setSidebarOpen } = useSidebar();
     const [review, setReview] = useState<TabularReview | null>(null);
     const [project, setProject] = useState<Project | null>(null);
     const [cells, setCells] = useState<TabularCell[]>([]);
     const [documents, setDocuments] = useState<Document[]>([]);
+    const [reviewRows, setReviewRows] = useState<TabularReviewRow[]>([]);
     const [columns, setColumns] = useState<ColumnConfig[]>([]);
     const [loading, setLoading] = useState(true);
     const [generating, setGenerating] = useState(false);
@@ -133,6 +148,26 @@ export function TRView({ reviewId, projectId }: Props) {
     const apiKeys = profile?.apiKeys;
     const tabularModel = profile?.tabularModel ?? "gemini-3-flash-preview";
 
+    // One rendered row per persisted review row (document or folder). Folder
+    // rows group several documents into a single row (documentId null). Reviews
+    // created before the folder-rows feature have no rows payload, so fall back
+    // to a one-row-per-document view.
+    const tableRows: TableRow[] = reviewRows.length
+        ? reviewRows.map((r) => ({
+              id: r.id,
+              label: r.label,
+              documentId: r.document_id,
+              rowId: r.id,
+              rowType: r.row_type,
+          }))
+        : documents.map((d) => ({
+              id: d.id,
+              label: d.filename,
+              documentId: d.id,
+              rowId: null,
+              rowType: "document" as const,
+          }));
+
     useEffect(() => {
         const params = new URLSearchParams(window.location.search);
         if (chatOpen) {
@@ -161,12 +196,15 @@ export function TRView({ reviewId, projectId }: Props) {
 
     useEffect(() => {
         const fetches: Promise<unknown>[] = [
-            getTabularReview(reviewId).then(({ review, cells, documents }) => {
-                setReview(review);
-                setCells(cells);
-                setDocuments(documents);
-                setColumns(review.columns_config || []);
-            }),
+            getTabularReview(reviewId).then(
+                ({ review, cells, documents, rows }) => {
+                    setReview(review);
+                    setCells(cells);
+                    setDocuments(documents);
+                    setReviewRows(rows ?? []);
+                    setColumns(review.columns_config || []);
+                },
+            ),
         ];
         if (projectId) {
             fetches.push(
@@ -219,6 +257,27 @@ export function TRView({ reviewId, projectId }: Props) {
             columns_config: columns,
         });
         setDocuments((prev) => [...prev, ...toAdd]);
+        // The table renders from rows; when a review already has a rows payload,
+        // optimistically append a document row per added doc so it shows up
+        // before the next reload reconciles the server-assigned row ids. (A
+        // legacy review with no rows renders straight from `documents`.)
+        setReviewRows((prev) =>
+            prev.length === 0
+                ? prev
+                : [
+                      ...prev,
+                      ...toAdd.map((doc, i) => ({
+                          id: doc.id,
+                          review_id: reviewId,
+                          label: doc.filename,
+                          row_type: "document" as const,
+                          folder_id: null,
+                          document_id: doc.id,
+                          sort_index: prev.length + i,
+                          source_document_ids: [doc.id],
+                      })),
+                  ],
+        );
         if (columns.length > 0) {
             setCells((prev) => [
                 ...prev,
@@ -264,15 +323,26 @@ export function TRView({ reviewId, projectId }: Props) {
         }
     }
 
-    async function handleRegenerateCell(docId: string, colIndex: number) {
+    async function handleRegenerateCell(cell: TabularCell) {
         if (apiKeys && !isModelAvailable(tabularModel, apiKeys)) {
             setApiKeyModalProvider(getModelProvider(tabularModel));
             return;
         }
 
+        const { row_id: rowId, document_id: docId, column_index: colIndex } =
+            cell;
+        // Identify this one cell by row_id (folder cells have no document_id)
+        // or document_id — the same predicate the table uses to render it.
+        const matches = (c: TabularCell) =>
+            c.column_index === colIndex &&
+            cellMatchesRow(c, {
+                rowId: rowId ?? null,
+                documentId: docId,
+            });
+
         setCells((prev) =>
             prev.map((c) =>
-                c.document_id === docId && c.column_index === colIndex
+                matches(c)
                     ? { ...c, status: "generating" as const, content: null }
                     : c,
             ),
@@ -287,10 +357,11 @@ export function TRView({ reviewId, projectId }: Props) {
                 reviewId,
                 docId,
                 colIndex,
+                rowId,
             );
             setCells((prev) =>
                 prev.map((c) =>
-                    c.document_id === docId && c.column_index === colIndex
+                    matches(c)
                         ? { ...c, status: "done" as const, content: result }
                         : c,
                 ),
@@ -304,9 +375,7 @@ export function TRView({ reviewId, projectId }: Props) {
             console.error("Regeneration failed", err);
             setCells((prev) =>
                 prev.map((c) =>
-                    c.document_id === docId && c.column_index === colIndex
-                        ? { ...c, status: "error" as const }
-                        : c,
+                    matches(c) ? { ...c, status: "error" as const } : c,
                 ),
             );
             setExpandedCell((prev) =>
@@ -346,14 +415,16 @@ export function TRView({ reviewId, projectId }: Props) {
             }
             if (!response.body) throw new Error("No body");
 
-            // Optimistically set empty/pending/error cells to generating (skip done cells)
+            // Optimistically set empty/pending/error cells to generating (skip
+            // done cells). Iterate rows, not documents, so folder-grouped cells
+            // (document_id null, keyed by row_id) get marked too.
             setCells((prev) =>
-                documents.flatMap((doc) =>
+                tableRows.flatMap((row) =>
                     columns.map((col) => {
                         const existing = prev.find(
                             (c) =>
-                                c.document_id === doc.id &&
-                                c.column_index === col.index,
+                                c.column_index === col.index &&
+                                cellMatchesRow(c, row),
                         );
                         if (existing?.status === "done" && existing?.content) {
                             return existing;
@@ -365,9 +436,10 @@ export function TRView({ reviewId, projectId }: Props) {
                                   content: null,
                               }
                             : {
-                                  id: `${doc.id}-${col.index}`,
+                                  id: `${row.id}-${col.index}`,
                                   review_id: reviewId,
-                                  document_id: doc.id,
+                                  row_id: row.rowId,
+                                  document_id: row.documentId,
                                   column_index: col.index,
                                   content: null,
                                   status: "generating" as const,
@@ -395,10 +467,16 @@ export function TRView({ reviewId, projectId }: Props) {
                     try {
                         const data = JSON.parse(dataStr);
                         if (data.type === "cell_update") {
+                            // Backend emits row_id (+ document_id for legacy
+                            // compatibility). Prefer row_id so folder cells
+                            // update; fall back to document_id otherwise.
                             setCells((prev) =>
                                 prev.map((c) =>
-                                    c.document_id === data.document_id &&
-                                    c.column_index === data.column_index
+                                    c.column_index === data.column_index &&
+                                    cellMatchesRow(c, {
+                                        rowId: data.row_id ?? null,
+                                        documentId: data.document_id ?? null,
+                                    })
                                         ? {
                                               ...c,
                                               content: data.content,
@@ -521,10 +599,22 @@ export function TRView({ reviewId, projectId }: Props) {
         if (idsToDelete.length === 0) return;
         const previousDocuments = documents;
         const previousCells = cells;
+        const previousRows = reviewRows;
         const remaining = documents.filter((d) => !idsToDelete.includes(d.id));
         setDocuments(remaining);
+        setReviewRows((prev) =>
+            prev.filter(
+                (r) =>
+                    r.document_id == null ||
+                    !idsToDelete.includes(r.document_id),
+            ),
+        );
         setCells((prev) =>
-            prev.filter((c) => !idsToDelete.includes(c.document_id)),
+            prev.filter(
+                (c) =>
+                    c.document_id == null ||
+                    !idsToDelete.includes(c.document_id),
+            ),
         );
         setSelectedDocIds([]);
         setActionsOpen(false);
@@ -535,6 +625,7 @@ export function TRView({ reviewId, projectId }: Props) {
             });
         } catch (err) {
             setDocuments(previousDocuments);
+            setReviewRows(previousRows);
             setCells(previousCells);
             setSelectedDocIds(idsToDelete);
             console.error("Failed to delete tabular review documents", err);
@@ -545,7 +636,7 @@ export function TRView({ reviewId, projectId }: Props) {
         if (docIds.length === 0) return;
         setCells((prev) =>
             prev.map((c) =>
-                docIds.includes(c.document_id)
+                c.document_id != null && docIds.includes(c.document_id)
                     ? { ...c, content: null, status: "pending" }
                     : c,
             ),
@@ -674,6 +765,9 @@ export function TRView({ reviewId, projectId }: Props) {
     const filteredDocuments = q
         ? documents.filter((d) => d.filename.toLowerCase().includes(q))
         : documents;
+    const filteredTableRows = q
+        ? tableRows.filter((r) => r.label.toLowerCase().includes(q))
+        : tableRows;
 
     return (
         <div className="flex h-full overflow-hidden">
@@ -975,6 +1069,7 @@ export function TRView({ reviewId, projectId }: Props) {
                                 loading={loading}
                                 columns={columns}
                                 documents={filteredDocuments}
+                                rows={filteredTableRows}
                                 cells={cells}
                                 highlightedCell={highlightedCell}
                                 savingColumn={savingColumn}
@@ -1033,9 +1128,23 @@ export function TRView({ reviewId, projectId }: Props) {
             {/* Cell detail side panel */}
             {expandedCell &&
                 (() => {
-                    const expandedDoc = documents.find(
-                        (d) => d.id === expandedCell.document_id,
-                    );
+                    // Folder cells have no document_id — fall back to the row's
+                    // first source document so the citation/PDF panel still has
+                    // a document to show (a documented v1 limitation: a folder
+                    // cell surfaces one representative source).
+                    const expandedDoc =
+                        documents.find(
+                            (d) => d.id === expandedCell.document_id,
+                        ) ??
+                        (() => {
+                            const row = reviewRows.find(
+                                (r) => r.id === expandedCell.row_id,
+                            );
+                            const firstSrc = row?.source_document_ids?.[0];
+                            return firstSrc
+                                ? documents.find((d) => d.id === firstSrc)
+                                : undefined;
+                        })();
                     const expandedCol = columns.find(
                         (c) => c.index === expandedCell.column_index,
                     );
@@ -1064,10 +1173,7 @@ export function TRView({ reviewId, projectId }: Props) {
                                 }
                             }}
                             onRegenerate={() =>
-                                handleRegenerateCell(
-                                    expandedCell.document_id,
-                                    expandedCell.column_index,
-                                )
+                                handleRegenerateCell(expandedCell)
                             }
                             displayDocument={expandedCellCitation !== undefined}
                             citationQuote={expandedCellCitation?.quote}

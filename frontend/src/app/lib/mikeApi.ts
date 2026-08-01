@@ -1080,7 +1080,6 @@ export async function updateTabularReview(
         columns_config?: { index: number; name: string; prompt: string }[];
         document_ids?: string[];
         project_id?: string | null;
-        document_grouping?: "document" | "folder";
         shared_with?: string[];
     },
 ): Promise<TabularReview> {
@@ -1266,20 +1265,24 @@ export async function renameTabularChat(
 
 export async function regenerateTabularCell(
     reviewId: string,
-    documentId: string,
+    documentId: string | null,
     columnIndex: number,
+    rowId?: string | null,
 ): Promise<{
     summary: string;
     flag: "green" | "grey" | "yellow" | "red";
     reasoning: string;
 }> {
+    // A folder cell has no document_id — address it by row_id instead. The
+    // backend accepts either identifier and resolves the same cell.
     return apiRequest(`/tabular-review/${reviewId}/regenerate-cell`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            document_id: documentId,
-            column_index: columnIndex,
-        }),
+        body: JSON.stringify(
+            rowId
+                ? { row_id: rowId, column_index: columnIndex }
+                : { document_id: documentId, column_index: columnIndex },
+        ),
     });
 }
 

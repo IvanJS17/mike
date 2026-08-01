@@ -45,10 +45,23 @@ export interface TRTableHandle {
     scrollToCell: (colIdx: number, rowIdx: number) => void;
 }
 
+// One rendered table row. A folder-grouped review turns several documents into
+// a single folder row (rowType "folder", documentId null); a document review
+// renders one row per document. `rowId` is the persisted tabular_review_rows id
+// (null only in the legacy fallback where a review predates rows entirely).
+export interface TableRow {
+    id: string;
+    label: string;
+    documentId: string | null;
+    rowId: string | null;
+    rowType: "document" | "folder";
+}
+
 interface Props {
     loading: boolean;
     columns: ColumnConfig[];
     documents: Document[];
+    rows: TableRow[];
     cells: TabularCell[];
     savingColumn: boolean;
     savingColumnsConfig: boolean;
@@ -77,6 +90,7 @@ export const TRTable = forwardRef<TRTableHandle, Props>(function TRTable(
         loading,
         columns,
         documents,
+        rows,
         cells,
         savingColumn,
         savingColumnsConfig,
@@ -140,23 +154,35 @@ export const TRTable = forwardRef<TRTableHandle, Props>(function TRTable(
         },
     }));
 
-    function getCell(docId: string, colIdx: number) {
+    // Match a cell to a row by row_id first (folder cells have no document_id),
+    // falling back to document_id so optimistic/legacy cells still render.
+    function getCell(row: TableRow, colIdx: number) {
         return cells.find(
-            (c) => c.document_id === docId && c.column_index === colIdx,
+            (c) =>
+                c.column_index === colIdx &&
+                ((row.rowId != null && c.row_id === row.rowId) ||
+                    (row.documentId != null &&
+                        c.document_id === row.documentId)),
         );
     }
 
+    // Bulk selection + actions operate on document ids; folder rows have no
+    // single document, so only document rows are individually selectable.
+    const selectableDocIds = rows
+        .map((r) => r.documentId)
+        .filter((id): id is string => !!id);
     const allSelected =
-        documents.length > 0 &&
-        documents.every((d) => selectedDocIds.includes(d.id));
+        selectableDocIds.length > 0 &&
+        selectableDocIds.every((id) => selectedDocIds.includes(id));
     const someSelected =
-        !allSelected && documents.some((d) => selectedDocIds.includes(d.id));
+        !allSelected &&
+        selectableDocIds.some((id) => selectedDocIds.includes(id));
 
     function toggleAll() {
         if (allSelected) {
             onSelectionChange([]);
         } else {
-            onSelectionChange(documents.map((d) => d.id));
+            onSelectionChange(selectableDocIds);
         }
     }
 
@@ -362,8 +388,10 @@ export const TRTable = forwardRef<TRTableHandle, Props>(function TRTable(
                         <div className="flex-1 border-b border-gray-200 min-h-8 min-w-8" />
                     </div>
                     ))}
-                    {documents.map((doc, docIdx) => {
-                    const isSelected = selectedDocIds.includes(doc.id);
+                    {rows.map((row, docIdx) => {
+                    const isSelected =
+                        row.documentId != null &&
+                        selectedDocIds.includes(row.documentId);
                     const rowBg = isSelected
                         ? APP_SURFACE_ACTIVE_CLASS
                         : APP_SURFACE_HOVER_CLASS;
@@ -372,28 +400,40 @@ export const TRTable = forwardRef<TRTableHandle, Props>(function TRTable(
                         : TR_STICKY_CELL_BG;
                     return (
                         <div
-                            key={doc.id}
+                            key={row.id}
                             className={`group flex transition-colors ${rowBg}`}
                             style={{ minWidth: totalContentWidth }}
                         >
                             <div
                                 className={`sticky left-0 z-[60] ${DOC_COL_W} border-b border-r border-gray-200 py-2 pl-4 pr-2 text-xs text-gray-800 flex items-center transition-colors ${stickyRowBg} ${isSelected ? "" : APP_SURFACE_GROUP_HOVER_CLASS}`}
                             >
-                                <input
-                                    type="checkbox"
-                                    checked={selectedDocIds.includes(doc.id)}
-                                    onChange={() => toggleDoc(doc.id)}
-                                    className={TABLE_CHECKBOX_CLASS}
-                                />
+                                {row.documentId != null ? (
+                                    <input
+                                        type="checkbox"
+                                        checked={selectedDocIds.includes(
+                                            row.documentId,
+                                        )}
+                                        onChange={() =>
+                                            toggleDoc(row.documentId as string)
+                                        }
+                                        className={TABLE_CHECKBOX_CLASS}
+                                    />
+                                ) : (
+                                    // Folder row: no single document to select.
+                                    <span
+                                        className={`${TABLE_CHECKBOX_CLASS} invisible`}
+                                        aria-hidden
+                                    />
+                                )}
                                 <span
                                     className="line-clamp-1"
-                                    title={doc.filename}
+                                    title={row.label}
                                 >
-                                    {doc.filename}
+                                    {row.label}
                                 </span>
                             </div>
                             {columns.map((col) => {
-                                const cell = getCell(doc.id, col.index);
+                                const cell = getCell(row, col.index);
                                 const colPos = sortedColumns.findIndex(
                                     (c) => c.index === col.index,
                                 );
