@@ -1,9 +1,32 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// Mock only the two module-internal seams that would otherwise require a live
+// MCP server and Supabase: the SDK's `auth()` driver and `loadConnector`. Their
+// vi.fn()s are created via vi.hoisted so the (hoisted) vi.mock factories below
+// can reference them without a temporal-dead-zone error.
+const { authMock, loadConnectorMock } = vi.hoisted(() => ({
+    authMock: vi.fn(),
+    loadConnectorMock: vi.fn(),
+}));
+
+vi.mock("@modelcontextprotocol/sdk/client/auth.js", () => ({
+    auth: (...args: unknown[]) => authMock(...args),
+}));
+
+vi.mock("./client", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("./client")>();
+    return {
+        ...actual,
+        loadConnector: (...args: unknown[]) => loadConnectorMock(...args),
+    };
+});
+
 import {
     DbMcpOAuthProvider,
     McpOAuthRequiredError,
     isGoogleOAuthHost,
     providerAuthorizationParams,
+    startUserMcpConnectorOAuth,
 } from "./oauth";
 import type { ConnectorRow, Db } from "./types";
 
@@ -54,6 +77,20 @@ describe("isGoogleOAuthHost", () => {
             isGoogleOAuthHost("https://googleapis.com.evil.test/mcp"),
         ).toBe(false);
         expect(isGoogleOAuthHost("not a url")).toBe(false);
+    });
+
+    it("matches the absolute (trailing-dot) form of a Google host", () => {
+        // `https://googleapis.com./x` names the same host as
+        // `googleapis.com`; `URL` keeps the trailing dot, so without stripping
+        // it the offline-access params would be silently skipped.
+        expect(isGoogleOAuthHost("https://googleapis.com./x")).toBe(true);
+        expect(
+            isGoogleOAuthHost("https://drivemcp.googleapis.com./mcp"),
+        ).toBe(true);
+    });
+
+    it("still rejects a look-alike host that carries a trailing dot", () => {
+        expect(isGoogleOAuthHost("https://notgoogleapis.com./x")).toBe(false);
     });
 });
 
@@ -128,5 +165,87 @@ describe("DbMcpOAuthProvider.redirectToAuthorization", () => {
             provider.redirectToAuthorization(new URL(AUTH_URL)),
         ).rejects.toBeInstanceOf(McpOAuthRequiredError);
         expect(provider.lastAuthorizeUrl).toBeNull();
+    });
+});
+
+// Records every `.from(table).delete().eq(column, value)` chain so a test can
+// assert exactly which rows the provider invalidated, without a real database.
+type RecordedDelete = { table: string; column: string; value: unknown };
+
+function makeRecordingDb(deletes: RecordedDelete[]): Db {
+    return {
+        from(table: string) {
+            return {
+                delete() {
+                    return {
+                        eq(column: string, value: unknown) {
+                            deletes.push({ table, column, value });
+                            return Promise.resolve({ error: null });
+                        },
+                    };
+                },
+            };
+        },
+    } as unknown as Db;
+}
+
+describe("startUserMcpConnectorOAuth", () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it("invalidates the stale token row when an interactive redirect is required", async () => {
+        // The exact broken-fleet state this PR targets: the SDK cannot complete
+        // from stored credentials (expired access token, no usable refresh
+        // token), so it reaches the authorization-redirect branch.
+        const connector = makeConnector(
+            "https://drivemcp.googleapis.com/mcp/v1",
+        );
+        loadConnectorMock.mockResolvedValue(connector);
+        authMock.mockImplementation(async (provider: DbMcpOAuthProvider) => {
+            await provider.redirectToAuthorization(new URL(AUTH_URL));
+            return "REDIRECT";
+        });
+        const deletes: RecordedDelete[] = [];
+        const db = makeRecordingDb(deletes);
+
+        const result = await startUserMcpConnectorOAuth(
+            "user-1",
+            connector.id,
+            "https://app.test/callback",
+            db,
+        );
+
+        expect(result.alreadyAuthorized).toBe(false);
+        expect(result.authorizationUrl).toContain("access_type=offline");
+        // Without this delete `oauthConnected` (!!encrypted_access_token) would
+        // stay true on a dead token and the frontend poll would resolve on a
+        // phantom success, closing the consent popup mid-flow.
+        expect(deletes).toContainEqual({
+            table: "user_mcp_oauth_tokens",
+            column: "connector_id",
+            value: connector.id,
+        });
+    });
+
+    it("does not touch stored tokens when the connector is already authorized", async () => {
+        const connector = makeConnector("https://mcp.example.com/mcp");
+        loadConnectorMock.mockResolvedValue(connector);
+        authMock.mockResolvedValue("AUTHORIZED");
+        const deletes: RecordedDelete[] = [];
+        const db = makeRecordingDb(deletes);
+
+        const result = await startUserMcpConnectorOAuth(
+            "user-1",
+            connector.id,
+            "https://app.test/callback",
+            db,
+        );
+
+        expect(result).toEqual({
+            authorizationUrl: null,
+            alreadyAuthorized: true,
+        });
+        expect(deletes).toHaveLength(0);
     });
 });
