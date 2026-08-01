@@ -1,3 +1,5 @@
+-- Migration date: 2026-08-01
+
 -- Support one tabular-review row per project folder, with multiple source documents.
 alter table public.tabular_reviews
   add column if not exists document_grouping text not null default 'document'
@@ -42,7 +44,12 @@ select distinct on (cell.review_id, cell.document_id)
   coalesce(document.filename, 'Untitled document'),
   'document',
   cell.document_id,
-  row_number() over (partition by cell.review_id order by cell.document_id) - 1
+  -- Order legacy rows by filename (matching the create path, which sorts rows
+  -- by label) rather than by opaque document_id; document_id breaks ties.
+  row_number() over (
+    partition by cell.review_id
+    order by coalesce(document.filename, 'Untitled document'), cell.document_id
+  ) - 1
 from public.tabular_cells cell
 join public.documents document on document.id = cell.document_id
 where cell.row_id is null
