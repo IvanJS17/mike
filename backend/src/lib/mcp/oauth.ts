@@ -266,25 +266,35 @@ function discoveryResource(state: OAuthDiscoveryState) {
         : null;
 }
 
+function originOf(url: string | null | undefined): string | null {
+    if (!url) return null;
+    try {
+        return new URL(url).origin;
+    } catch {
+        return null;
+    }
+}
+
 async function patchOAuthTokenRow(
     connectorId: string,
     patch: Record<string, unknown>,
     db: Db,
 ) {
-    const existing = await loadOAuthToken(connectorId, db);
-    const row = {
-        ...patch,
-        updated_at: new Date().toISOString(),
-    };
-    const { error } = existing
-        ? await db
-              .from("user_mcp_oauth_tokens")
-              .update(row)
-              .eq("connector_id", connectorId)
-        : await db.from("user_mcp_oauth_tokens").insert({
-              connector_id: connectorId,
-              ...row,
-          });
+    // Atomic upsert instead of read-then-write. The previous SELECT-then
+    // INSERT/UPDATE had a check-then-act race: two concurrent OAuth flows for
+    // the same connector could both observe "no row", both INSERT, and the
+    // second would violate unique(connector_id) (schema.sql). PostgREST's
+    // on-conflict upsert collapses that into a single statement — INSERT when
+    // the row is new, UPDATE of exactly the payload columns on conflict — which
+    // preserves the same partial-patch semantics without the race.
+    const { error } = await db.from("user_mcp_oauth_tokens").upsert(
+        {
+            connector_id: connectorId,
+            ...patch,
+            updated_at: new Date().toISOString(),
+        },
+        { onConflict: "connector_id" },
+    );
     if (error) throw error;
 }
 
@@ -344,7 +354,7 @@ async function storeOAuthToken(
     if (connectorError) throw connectorError;
 }
 
-async function refreshOAuthAccessToken(row: OAuthTokenRow, db: Db) {
+export async function refreshOAuthAccessToken(row: OAuthTokenRow, db: Db) {
     const refreshToken = decryptString(
         row.encrypted_refresh_token,
         row.refresh_token_iv,
@@ -365,8 +375,12 @@ async function refreshOAuthAccessToken(row: OAuthTokenRow, db: Db) {
     });
     if (clientSecret) body.set("client_secret", clientSecret);
     if (row.resource) body.set("resource", row.resource);
-    await validateRemoteMcpUrl(row.token_endpoint);
-    const response = await fetch(row.token_endpoint, {
+    // guardedFetch re-validates the persisted token_endpoint (SSRF/blocked-host
+    // check) AND forces redirect:"manual" before hitting the network — matching
+    // every other outbound call in this module. Because this POST now carries a
+    // live refresh token + client secret, a silently-followed 3xx could forward
+    // those credentials to an unvalidated Location; redirect:"manual" stops that.
+    const response = await guardedFetch(row.token_endpoint, {
         method: "POST",
         headers: {
             Accept: "application/json",
@@ -582,18 +596,62 @@ export class DbMcpOAuthProvider implements OAuthClientProvider {
 
     async saveDiscoveryState(state: OAuthDiscoveryState) {
         this.lastDiscoveryState = state;
-        const tokenEndpoint = discoveryTokenEndpoint(state);
-        await validateRemoteMcpUrl(state.authorizationServerUrl);
-        await validateRemoteMcpUrl(tokenEndpoint);
 
-        const resource = discoveryResource(state);
-        if (resource) await validateRemoteMcpUrl(resource);
+        // validateRemoteMcpUrl RETURNS a sanitized URL (userinfo + fragment
+        // stripped) — persist that, never the raw input. Otherwise a discovery
+        // response of `https://user:pass@host/token` would be stored verbatim
+        // and later fetched credentials-and-all. [F6]
+        const authorizationServer = await validateRemoteMcpUrl(
+            state.authorizationServerUrl,
+        );
+        const tokenEndpoint = await validateRemoteMcpUrl(
+            discoveryTokenEndpoint(state),
+        );
+
+        // Bind the token endpoint to the authorization server's origin. Refresh
+        // POSTs carry the refresh token + client secret, and the generic
+        // public-HTTPS check has no issuer/AS binding — so a hostile discovery
+        // response could otherwise point the token endpoint at any public host.
+        // Requiring same-origin closes that. [F1]
+        if (originOf(tokenEndpoint) !== originOf(authorizationServer)) {
+            throw new Error(
+                "OAuth token endpoint must share the authorization server's origin.",
+            );
+        }
+
+        const rawResource = discoveryResource(state);
+        const resource = rawResource
+            ? await validateRemoteMcpUrl(rawResource)
+            : null;
+
+        // Re-discovery must not silently repoint the token endpoint UNDER a live
+        // refresh token. The provider has no discoveryState() cache, so every
+        // runMcpOAuth re-discovers; if the advertised authorization server has
+        // changed origin since we stored credentials, treat it as a different
+        // issuer and clear the token/secret columns to force a fresh
+        // authorization — rather than PATCHing a new token_endpoint that would
+        // then receive the OLD server's refresh token + decrypted client
+        // secret. [F1]
+        const existing = await loadOAuthToken(this.connector.id, this.db);
+        const authorizationServerChanged =
+            !!existing?.authorization_server &&
+            originOf(existing.authorization_server) !==
+                originOf(authorizationServer);
 
         const patch: Record<string, unknown> = {
-            authorization_server: state.authorizationServerUrl,
+            authorization_server: authorizationServer,
             token_endpoint: tokenEndpoint,
         };
         if (resource) patch.resource = resource;
+        if (authorizationServerChanged) {
+            Object.assign(
+                patch,
+                tokenSecretPatch("access_token", null),
+                tokenSecretPatch("refresh_token", null),
+                tokenSecretPatch("client_secret", null),
+                { client_id: null, expires_at: null },
+            );
+        }
 
         await patchOAuthTokenRow(this.connector.id, patch, this.db);
     }
@@ -663,6 +721,22 @@ export class DbMcpOAuthProvider implements OAuthClientProvider {
                 .from("user_mcp_oauth_states")
                 .delete()
                 .eq("state_hash", stateHash(this.stateToken));
+            return;
+        }
+        if (scope === "discovery") {
+            // The SDK calls invalidateCredentials("discovery") when cached
+            // discovery metadata is stale. Honor it by clearing the three
+            // persisted metadata columns so the next flow re-discovers from
+            // scratch instead of reusing an endpoint we no longer trust.
+            await this.db
+                .from("user_mcp_oauth_tokens")
+                .update({
+                    authorization_server: null,
+                    token_endpoint: null,
+                    resource: null,
+                    updated_at: new Date().toISOString(),
+                })
+                .eq("connector_id", this.connector.id);
             return;
         }
         if (scope === "tokens" || scope === "all") {
