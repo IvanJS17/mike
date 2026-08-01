@@ -13,7 +13,7 @@ import {
 import { completeText } from "../lib/llm";
 import { getUserApiKeys, getUserModelSettings } from "../lib/userSettings";
 import { checkProjectAccess } from "../lib/access";
-import { errFields, logger, type Logger } from "../lib/logger";
+import { errFields, logger } from "../lib/logger";
 
 export const chatRouter = Router();
 
@@ -415,7 +415,7 @@ chatRouter.post("/:chatId/generate-title", requireAuth, async (req, res) => {
 
         res.json({ title });
     } catch (err) {
-        const log = (res.locals.log as Logger | undefined) ?? logger;
+        const log = res.locals.log ?? logger;
         log.error({ route: "generate-title", ...errFields(err) }, "title generation failed");
         res.status(500).json({ detail: "Failed to generate title" });
     }
@@ -502,7 +502,7 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             .select("id, title")
             .single();
         if (error || !newChat) {
-            const log = (res.locals.log as Logger | undefined) ?? logger;
+            const log = res.locals.log ?? logger;
             log.error(
                 { route: "chat/stream", supabase_error: error?.message },
                 "failed to create chat",
@@ -600,7 +600,7 @@ chatRouter.post("/", requireAuth, async (req, res) => {
                 .eq("id", chatId);
         }
     } catch (err) {
-        const log = (res.locals.log as Logger | undefined) ?? logger;
+        const log = res.locals.log ?? logger;
         log.error({ route: "chat/stream", ...errFields(err) }, "stream error");
         try {
             write(
