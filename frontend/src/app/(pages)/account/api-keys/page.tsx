@@ -15,29 +15,7 @@ import {
     accountGlassInputClassName,
 } from "../accountStyles";
 import { AccountSection } from "../AccountSection";
-
-const MODEL_API_KEY_FIELDS = [
-    {
-        provider: "claude",
-        label: "Anthropic (Claude) API Key",
-        placeholder: "sk-ant-...",
-    },
-    {
-        provider: "gemini",
-        label: "Google (Gemini) API Key",
-        placeholder: "AI...",
-    },
-    {
-        provider: "openai",
-        label: "OpenAI API Key",
-        placeholder: "sk-...",
-    },
-    {
-        provider: "openrouter",
-        label: "OpenRouter API Key",
-        placeholder: "sk-or-...",
-    },
-] as const;
+import { MODEL_API_KEY_FIELDS } from "./modelApiKeyFields";
 
 const OTHER_API_KEY_FIELDS = [
     {

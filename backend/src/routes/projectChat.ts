@@ -26,6 +26,15 @@ import {
     type ChatMessage,
 } from "../lib/chat";
 import {
+    parseModelRoute,
+    routesEqual,
+    type ModelRoute,
+} from "../lib/llm/routes";
+import {
+    pinnedRouteFromChatRow,
+    resolveModelRouteForUser,
+} from "../lib/llm/governedRoutes";
+import {
     getUserModelSettings,
 } from "../lib/userSettings";
 import { checkProjectAccess } from "../lib/access";
@@ -61,6 +70,13 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     const parsedModel = parseOptionalModel(body.model);
     if (!parsedModel.ok) {
         return void res.status(400).json({ detail: parsedModel.detail });
+    }
+    const parsedRoute =
+        body.route === undefined
+            ? ({ ok: true, value: undefined } as const)
+            : parseModelRoute(body.route);
+    if (!parsedRoute.ok) {
+        return void res.status(400).json({ detail: parsedRoute.detail });
     }
     const parsedDisplayedDoc = parseOptionalDisplayedDoc(body.displayed_doc);
     if (!parsedDisplayedDoc.ok) {
@@ -104,22 +120,97 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
 
     let chatId = chat_id ?? null;
     let chatTitle: string | null = null;
+    let resolvedRoute: ModelRoute | null = null;
+    let routeCredentialSecret: string | undefined;
 
     if (chatId) {
         const { data: existing } = await db
             .from("chats")
-            .select("id, title, project_id")
+            .select(
+                "id, title, project_id, model_provider, model, credential_ref",
+            )
             .eq("id", chatId)
             .single();
         const canUse = !!existing && existing.project_id === projectId;
-        if (!canUse) chatId = null;
-        else chatTitle = existing!.title;
+        if (!canUse)
+            return void res.status(404).json({ detail: "Chat not found" });
+        chatTitle = existing!.title;
+        const pinnedRoute = pinnedRouteFromChatRow(
+            existing as Record<string, unknown>,
+        );
+        if (!pinnedRoute) {
+            return void res.status(409).json({
+                code: "chat_route_required",
+                detail: "This chat has no pinned model route",
+            });
+        }
+        if (
+            parsedRoute.value &&
+            !routesEqual(parsedRoute.value, pinnedRoute)
+        ) {
+            return void res.status(409).json({
+                code: "chat_route_mismatch",
+                detail: "The requested model route does not match the pinned chat route",
+            });
+        }
+        if (parsedModel.value && parsedModel.value !== pinnedRoute.model) {
+            return void res.status(409).json({
+                code: "chat_route_mismatch",
+                detail: "The requested model does not match the pinned chat route",
+            });
+        }
+        const routeResolution = await resolveModelRouteForUser(
+            userId,
+            pinnedRoute,
+            db,
+        );
+        if (!routeResolution.ok) {
+            return void res.status(409).json({
+                code: "pinned_credential_unavailable",
+                detail: "The pinned model credential is unavailable",
+            });
+        }
+        resolvedRoute = routeResolution.route;
+        routeCredentialSecret = routeResolution.credentialSecret;
     }
 
     if (!chatId) {
+        if (!parsedRoute.value) {
+            return void res.status(400).json({
+                detail: "route is required when creating a chat",
+            });
+        }
+        if (
+            parsedModel.value &&
+            parsedModel.value !== parsedRoute.value.model
+        ) {
+            return void res.status(409).json({
+                code: "chat_route_mismatch",
+                detail: "The requested model does not match the chat route",
+            });
+        }
+        const routeResolution = await resolveModelRouteForUser(
+            userId,
+            parsedRoute.value,
+            db,
+        );
+        if (!routeResolution.ok) {
+            return void res.status(422).json({
+                code: routeResolution.code,
+                detail: routeResolution.detail,
+            });
+        }
+        resolvedRoute = routeResolution.route;
+        routeCredentialSecret = routeResolution.credentialSecret;
         const { data: newChat, error } = await db
             .from("chats")
-            .insert({ user_id: userId, project_id: projectId })
+            .insert({
+                user_id: userId,
+                project_id: projectId,
+                model_provider: resolvedRoute.provider,
+                model: resolvedRoute.model,
+                credential_ref: resolvedRoute.credential_ref,
+            })
             .select("id, title")
             .single();
         if (error || !newChat)
@@ -232,6 +323,13 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     );
 
     const workflowStore = await buildWorkflowStore(userId, userEmail, db);
+    if (!resolvedRoute) {
+        return void res.status(409).json({
+            code: "chat_route_required",
+            detail: "This chat has no pinned model route",
+        });
+    }
+    const pinnedRoute = resolvedRoute;
 
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
@@ -259,7 +357,9 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
             extraTools: PROJECT_EXTRA_TOOLS,
             workflowStore,
             includeResearchTools: legalResearchUs,
-            model,
+            model: pinnedRoute.model,
+            route: pinnedRoute,
+            credentialSecret: routeCredentialSecret,
             apiKeys,
             signal: streamAbort.signal,
             projectId,

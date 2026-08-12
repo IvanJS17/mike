@@ -26,6 +26,8 @@ import {
     deleteDocument,
     getChat,
     getProject,
+    modelRouteFromChat,
+    type ModelRoute,
     uploadProjectDocument,
     createProjectFolder,
     renameProjectFolder,
@@ -221,6 +223,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
     const [project, setProject] = useState<Project | null>(null);
     const [chatTitle, setChatTitle] = useState<string | null>(null);
     const [chatOwnerId, setChatOwnerId] = useState<string | null>(null);
+    const [chatRoute, setChatRoute] = useState<ModelRoute | null>(null);
     const [ownerOnlyAction, setOwnerOnlyAction] = useState<string | null>(null);
     const [chatLoaded, setChatLoaded] = useState(false);
     const [creatingChat, setCreatingChat] = useState(false);
@@ -282,6 +285,10 @@ export default function ProjectAssistantChatPage({ params }: Props) {
             ? initialMessages[0]
             : null,
     );
+    const createdChat = chats?.find((chat) => chat.id === chatId);
+    const createdChatRoute = createdChat
+        ? modelRouteFromChat(createdChat)
+        : null;
 
     const hasLoaded = useRef(false);
     const hasAutoSent = useRef(false);
@@ -375,6 +382,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
             .then(({ chat, messages: loaded }) => {
                 setChatTitle(chat.title);
                 setChatOwnerId(chat.user_id ?? null);
+                setChatRoute(modelRouteFromChat(chat));
                 if (loaded.length > 0) setMessages(loaded);
             })
             .catch(() => router.replace(`/projects/${projectId}/assistant`))
@@ -1396,6 +1404,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                 onSubmit={handleSubmit}
                                 onCancel={cancel}
                                 isLoading={isResponseLoading}
+                                route={chatRoute ?? createdChatRoute}
                                 hideAddDocButton
                                 projectId={projectId}
                                 onDocumentsUploaded={(documents) =>

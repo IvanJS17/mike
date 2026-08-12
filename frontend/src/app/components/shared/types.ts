@@ -78,6 +78,9 @@ export interface Chat {
   user_id: string;
   creator_display_name?: string | null;
   title: string | null;
+  model_provider?: import("@/app/lib/mikeApi").GovernedLlmProvider | null;
+  model?: string | null;
+  credential_ref?: string | null;
   created_at: string;
 }
 
@@ -313,7 +316,7 @@ export interface Message {
   content: string;
   files?: { filename: string; document_id?: string }[];
   workflow?: { id: string; title: string };
-  model?: string;
+
   citations?: Citation[];
   citationStatus?: "started" | "partial" | "final";
   events?: AssistantEvent[];

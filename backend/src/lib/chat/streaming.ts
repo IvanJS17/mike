@@ -4,6 +4,7 @@ import {
   DEFAULT_MAIN_MODEL,
   type LlmMessage,
   type OpenAIToolSchema,
+  type ModelRoute,
 } from "../llm";
 import { safeErrorMessage } from "../safeError";
 import { createServerSupabase } from "../supabase";
@@ -159,6 +160,8 @@ export async function runLLMStream(params: {
   tabularStore?: TabularCellStore;
   buildCitations?: (fullText: string) => unknown[];
   model?: string;
+  route?: ModelRoute;
+  credentialSecret?: string;
   apiKeys?: import("../llm").UserApiKeys;
   signal?: AbortSignal;
   /**
@@ -189,6 +192,8 @@ export async function runLLMStream(params: {
     tabularStore,
     buildCitations,
     model,
+    route,
+    credentialSecret,
     apiKeys,
     signal,
     projectId,
@@ -337,12 +342,14 @@ export async function runLLMStream(params: {
     }
   };
 
-  const selectedModel = resolveModel(model, DEFAULT_MAIN_MODEL);
+  const selectedModel = route?.model ?? resolveModel(model, DEFAULT_MAIN_MODEL);
 
   try {
     throwIfAborted(signal);
     await streamChatWithTools({
       model: selectedModel,
+      route,
+      credentialSecret,
       systemPrompt,
       messages: chatMessages,
       tools: activeTools as OpenAIToolSchema[],

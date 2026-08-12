@@ -1,18 +1,22 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useAssistantChat } from "@/app/hooks/useAssistantChat";
 import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
 import { ChatView } from "@/app/components/assistant/ChatView";
-import { getChat } from "@/app/lib/mikeApi";
+import {
+    getChat,
+    modelRouteFromChat,
+    type ModelRoute,
+} from "@/app/lib/mikeApi";
 
 export default function AssistantChatPage() {
     const router = useRouter();
     const params = useParams();
     const id = params.id as string;
 
-    const { setCurrentChatId, newChatMessages, setNewChatMessages } =
+    const { chats, setCurrentChatId, newChatMessages, setNewChatMessages } =
         useChatHistoryContext();
 
     const initialMessages = newChatMessages ?? [];
@@ -21,6 +25,11 @@ export default function AssistantChatPage() {
 
     const hasAutoSent = useRef(false);
     const hasLoaded = useRef(false);
+    const [route, setRoute] = useState<ModelRoute | null>(null);
+    const createdChat = chats?.find((chat) => chat.id === id);
+    const createdChatRoute = createdChat
+        ? modelRouteFromChat(createdChat)
+        : null;
 
     useEffect(() => {
         setCurrentChatId(id);
@@ -35,7 +44,8 @@ export default function AssistantChatPage() {
         hasLoaded.current = true;
 
         getChat(id)
-            .then(({ messages: loaded }) => {
+            .then(({ chat, messages: loaded }) => {
+                setRoute(modelRouteFromChat(chat));
                 if (loaded.length > 0) {
                     setMessages(loaded);
                 } else {
@@ -66,6 +76,7 @@ export default function AssistantChatPage() {
             isResponseLoading={isResponseLoading}
             handleChat={handleChat}
             cancel={cancel}
+            route={route ?? createdChatRoute}
         />
     );
 }

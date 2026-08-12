@@ -281,6 +281,9 @@ export type ApiKeyProvider =
     | "gemini"
     | "openai"
     | "openrouter"
+    | "deepseek"
+    | "opencode-zen"
+    | "opencode-go"
     | "courtlistener";
 export type ApiKeySource = "user" | "env" | null;
 export type ApiKeyState = Record<
@@ -310,6 +313,43 @@ export async function getOllamaModels(): Promise<OllamaModelOption[]> {
         "/models/ollama",
     );
     return models;
+}
+
+export type GovernedLlmProvider = Exclude<ApiKeyProvider, "courtlistener">;
+
+export interface ModelRoute {
+    provider: GovernedLlmProvider;
+    model: string;
+    credential_ref: string;
+}
+
+export function modelRouteFromChat(chat: Chat): ModelRoute | null {
+    if (!chat.model_provider || !chat.model || !chat.credential_ref) return null;
+    return {
+        provider: chat.model_provider,
+        model: chat.model,
+        credential_ref: chat.credential_ref,
+    };
+}
+
+export interface CatalogRoute extends ModelRoute {
+    source: "live" | "curated";
+    availability: "catalog";
+    catalog_available: true;
+}
+
+export interface ModelCatalog {
+    routes: CatalogRoute[];
+    catalogs: {
+        provider: GovernedLlmProvider;
+        credential_ref: string;
+        source: "live" | "curated";
+        catalog_available: boolean;
+    }[];
+}
+
+export async function getModelCatalog(): Promise<ModelCatalog> {
+    return apiRequest<ModelCatalog>("/models/catalog");
 }
 
 export async function saveApiKey(
@@ -864,13 +904,14 @@ export async function downloadDocumentsZip(
 // Chat
 // ---------------------------------------------------------------------------
 
-export async function createChat(payload?: {
+export async function createChat(payload: {
+    route: ModelRoute;
     project_id?: string;
 }): Promise<{ id: string }> {
     return apiRequest<{ id: string }>("/chat/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload ?? {}),
+        body: JSON.stringify(payload),
     });
 }
 
@@ -973,7 +1014,6 @@ export async function streamChat(payload: {
     }[];
     chat_id?: string;
     project_id?: string;
-    model?: string;
     ask_inputs_response?: {
         responses: (
             | {
@@ -1018,7 +1058,6 @@ export async function streamProjectChat(payload: {
     projectId: string;
     messages: StreamChatMessage[];
     chat_id?: string;
-    model?: string;
     displayed_doc?: { filename: string; document_id: string };
     attached_documents?: { filename: string; document_id: string }[];
     ask_inputs_response?: {

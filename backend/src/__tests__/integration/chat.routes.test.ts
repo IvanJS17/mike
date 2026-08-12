@@ -3,8 +3,9 @@ import request from "supertest";
 
 // Hoisted mock fn so the vi.mock factory below (which is itself hoisted above
 // the imports) can reference it. Lets each test drive the stream outcome.
-const { runLLMStream } = vi.hoisted(() => ({
+const { runLLMStream, resolveModelRouteForUser } = vi.hoisted(() => ({
     runLLMStream: vi.fn(),
+    resolveModelRouteForUser: vi.fn(),
 }));
 
 // A permissive, chainable Supabase stub. Every query-builder method returns the
@@ -85,9 +86,22 @@ vi.mock("../../lib/userSettings", () => ({
     getUserApiKeys: vi.fn(async () => ({})),
 }));
 
+vi.mock("../../lib/llm/governedRoutes", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../lib/llm/governedRoutes")>()),
+    resolveModelRouteForUser: (...args: unknown[]) =>
+        resolveModelRouteForUser(...args),
+}));
+
 import { app } from "../../app";
 
-const VALID_BODY = { messages: [{ role: "user", content: "hello" }] };
+const VALID_BODY = {
+    route: {
+        provider: "deepseek",
+        model: "deepseek-chat",
+        credential_ref: "deepseek:v1",
+    },
+    messages: [{ role: "user", content: "hello" }],
+};
 
 describe("POST /chat — streaming endpoint", () => {
     beforeEach(() => {
@@ -97,6 +111,13 @@ describe("POST /chat — streaming endpoint", () => {
             events: [],
             citations: [],
         });
+        resolveModelRouteForUser.mockImplementation(
+            async (_userId: string, route: unknown) => ({
+                ok: true,
+                route,
+                credentialSecret: "server-only-secret",
+            }),
+        );
     });
 
     it("streams SSE with a chat_id event on the happy path", async () => {

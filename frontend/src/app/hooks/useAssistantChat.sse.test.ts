@@ -19,6 +19,8 @@ import {
 } from "vitest";
 import type { Message } from "@/app/components/shared/types";
 
+const saveChatMock = vi.hoisted(() => vi.fn().mockResolvedValue("new-chat"));
+
 const { getSessionMock } = vi.hoisted(() => ({
     getSessionMock: vi.fn(),
 }));
@@ -33,7 +35,7 @@ vi.mock("@/app/contexts/ChatHistoryContext", () => ({
         replaceChatId: vi.fn(),
         loadChats: vi.fn().mockResolvedValue(undefined),
         setCurrentChatId: vi.fn(),
-        saveChat: vi.fn().mockResolvedValue("new-chat"),
+        saveChat: saveChatMock,
         setNewChatMessages: vi.fn(),
     }),
 }));
@@ -95,6 +97,20 @@ afterEach(() => {
 });
 
 describe("useAssistantChat SSE parsing", () => {
+    it("keeps the initial view unchanged when governed chat creation is cancelled", async () => {
+        saveChatMock.mockResolvedValueOnce(null);
+        const { result } = renderHook(() => useAssistantChat());
+
+        let returned: string | null = "sentinel";
+        await act(async () => {
+            returned = await result.current.handleNewChat(userMessage());
+        });
+
+        expect(returned).toBeNull();
+        expect(result.current.messages).toEqual([]);
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
     it("reassembles an event split across chunk boundaries", async () => {
         const { assistant, result } = await sendAndGetAssistant([
             'data: {"type":"content_delta","te',

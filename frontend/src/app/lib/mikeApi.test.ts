@@ -56,6 +56,7 @@ import {
     getDocumentUrl,
     getLibrary,
     getMcpConnector,
+    getModelCatalog,
     getOllamaModels,
     getProject,
     getProjectPeople,
@@ -589,14 +590,13 @@ describe("mapTRMessages", () => {
 // ---------------------------------------------------------------------------
 
 describe("streamChat", () => {
-    it("POSTs with the SSE accept header and forwards the signal outside the body", async () => {
+    it("POSTs a pinned chat turn without a client-selected model", async () => {
         fetchMock.mockResolvedValue(streamResponse([]));
         const controller = new AbortController();
 
         await streamChat({
             messages: [{ role: "user", content: "hi" }],
             chat_id: "c1",
-            model: "gemini-3-flash-preview",
             signal: controller.signal,
         });
 
@@ -613,7 +613,6 @@ describe("streamChat", () => {
         expect(JSON.parse(init.body as string)).toEqual({
             messages: [{ role: "user", content: "hi" }],
             chat_id: "c1",
-            model: "gemini-3-flash-preview",
         });
     });
 
@@ -1073,17 +1072,43 @@ describe("query and payload defaults", () => {
         );
     });
 
-    it("createChat defaults to an empty JSON object body", async () => {
+    it("createChat pins the exact governed route", async () => {
         fetchMock.mockResolvedValue(jsonResponse({ id: "c1" }));
+        const route = {
+            provider: "deepseek",
+            model: "deepseek-chat",
+            credential_ref: "deepseek:v2",
+        } as const;
 
-        await createChat();
-        expect(lastFetchCall().init.body).toBe("{}");
+        await createChat({ route });
+        expect(JSON.parse(lastFetchCall().init.body as string)).toEqual({ route });
         fetchMock.mockResolvedValue(jsonResponse({ id: "c2" }));
 
-        await createChat({ project_id: "p1" });
+        await createChat({ project_id: "p1", route });
         expect(JSON.parse(lastFetchCall().init.body as string)).toEqual({
             project_id: "p1",
+            route,
         });
+    });
+
+    it("loads the authenticated governed model catalog", async () => {
+        const catalog = {
+            routes: [
+                {
+                    provider: "deepseek",
+                    model: "deepseek-chat",
+                    credential_ref: "deepseek:v2",
+                    source: "curated",
+                    availability: "catalog",
+                    catalog_available: true,
+                },
+            ],
+            catalogs: [],
+        } as const;
+        fetchMock.mockResolvedValue(jsonResponse(catalog));
+
+        await expect(getModelCatalog()).resolves.toEqual(catalog);
+        expect(lastFetchCall().url).toBe("http://localhost:3001/models/catalog");
     });
 
     it("listChats without options hits the bare /chat route", async () => {
