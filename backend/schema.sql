@@ -65,14 +65,49 @@ create trigger on_auth_user_created
 create table if not exists public.user_api_keys (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
-  provider text not null check (provider in ('claude', 'gemini', 'openai', 'openrouter', 'courtlistener')),
+  provider text not null check (provider in ('claude', 'gemini', 'openai', 'openrouter', 'deepseek', 'opencode-zen', 'opencode-go', 'courtlistener')),
   encrypted_key text not null,
   iv text not null,
   auth_tag text not null,
+  version integer not null default 1,
+  credential_ref text not null,
+  enabled boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique(user_id, provider)
+  unique(user_id, provider),
+  unique(user_id, credential_ref)
 );
+
+create or replace function public.assign_user_api_key_credential_ref()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if TG_OP = 'INSERT' then
+    new.version := 1;
+  elsif new.enabled and (
+    not old.enabled
+    or new.encrypted_key is distinct from old.encrypted_key
+    or new.iv is distinct from old.iv
+    or new.auth_tag is distinct from old.auth_tag
+  ) then
+    new.version := old.version + 1;
+  else
+    new.version := old.version;
+  end if;
+
+  new.credential_ref := new.provider || ':v' || new.version::text;
+  return new;
+end;
+$$;
+
+drop trigger if exists assign_user_api_key_credential_ref
+  on public.user_api_keys;
+create trigger assign_user_api_key_credential_ref
+  before insert or update on public.user_api_keys
+  for each row
+  execute function public.assign_user_api_key_credential_ref();
 
 create index if not exists idx_user_api_keys_user
   on public.user_api_keys(user_id);
@@ -502,6 +537,14 @@ create table if not exists public.chats (
   project_id uuid references public.projects(id) on delete cascade,
   user_id text not null,
   title text,
+  model_provider text,
+  model text,
+  credential_ref text,
+  constraint chats_model_route_consistent check (
+    (model_provider is null and model is null and credential_ref is null)
+    or
+    (model_provider is not null and model is not null and credential_ref is not null)
+  ),
   created_at timestamptz not null default now()
 );
 

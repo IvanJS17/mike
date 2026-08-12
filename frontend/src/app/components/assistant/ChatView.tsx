@@ -21,6 +21,7 @@ import type {
 } from "../shared/types";
 import { useSidebar } from "@/app/contexts/SidebarContext";
 import { invalidateDocxBytes } from "@/app/hooks/useFetchDocxBytes";
+import type { ModelRoute } from "@/app/lib/mikeApi";
 
 interface Props {
     chatId?: string | null;
@@ -37,6 +38,7 @@ interface Props {
         },
     ) => Promise<string | null>;
     cancel: () => void;
+    route?: ModelRoute | null;
 }
 
 const ASSISTANT_PANEL_TRANSITION_MS = 500;
@@ -58,6 +60,7 @@ export function ChatView({
     isResponseLoading,
     handleChat,
     cancel,
+    route,
 }: Props) {
     const [tabs, setTabs] = useState<AssistantSidePanelTab[]>([]);
     const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -822,6 +825,7 @@ export function ChatView({
                                     onSubmit={handleChat}
                                     onCancel={cancel}
                                     isLoading={isResponseLoading}
+                                    route={route}
                                 />
                             )}
                         </div>

@@ -326,8 +326,6 @@ export function useAssistantChat({
         workflow: currentMessage.workflow,
       }));
 
-      const model = message.model;
-
       const displayedDoc = opts?.displayedDoc ?? null;
 
       // Pull the user's attachments from the just-submitted message.
@@ -347,7 +345,6 @@ export function useAssistantChat({
             projectId,
             messages: apiMessages,
             chat_id: chatId,
-            model,
             displayed_doc: displayedDoc
               ? {
                   filename: displayedDoc.filename,
@@ -362,7 +359,6 @@ export function useAssistantChat({
         : streamChat({
             messages: apiMessages,
             chat_id: chatId,
-            model,
             ask_inputs_response: opts?.askInputsResponse,
             signal: controller.signal,
           }));
@@ -1304,11 +1300,10 @@ export function useAssistantChat({
   ): Promise<string | null> => {
     if (!message.content.trim()) return null;
 
-    setMessages([message]);
-    setNewChatMessages([message]);
-
     const newChatId = await saveChat(projectId);
     if (newChatId) {
+      setMessages([message]);
+      setNewChatMessages([message]);
       setChatId(newChatId);
       setCurrentChatId(newChatId);
     }

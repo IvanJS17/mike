@@ -32,20 +32,13 @@ import {
     slashCommandQuery,
     workflowSlashCommand,
 } from "./workflowSlashCommands";
-import { ApiKeyMissingPopup } from "../popups/ApiKeyMissingPopup";
-import { ModelToggle } from "./ModelToggle";
-import { useSelectedModel } from "@/app/hooks/useSelectedModel";
-import { useUserProfile } from "@/app/contexts/UserProfileContext";
-import {
-    getModelProvider,
-    isModelAvailable,
-    type ModelProvider,
-} from "@/app/lib/modelAvailability";
+import { GovernedModelRouteSelect } from "./GovernedModelRouteSelect";
 import type { Document, Message, Workflow } from "../shared/types";
 import type { DirectoryTab } from "../shared/useDirectoryData";
 import { cn } from "@/app/lib/utils";
 import {
     listWorkflows,
+    type ModelRoute,
     uploadProjectDocument,
     uploadStandaloneDocument,
 } from "@/app/lib/mikeApi";
@@ -72,6 +65,7 @@ interface Props {
     projectName?: string;
     projectCmNumber?: string | null;
     projectId?: string;
+    route?: ModelRoute | null;
     onDocumentsUploaded?: (documents: Document[]) => void;
 }
 
@@ -85,6 +79,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
         projectName,
         projectCmNumber,
         projectId,
+        route,
         onDocumentsUploaded,
     }: Props,
     ref,
@@ -95,9 +90,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
         id: string;
         title: string;
     } | null>(null);
-    const [model, setModel] = useSelectedModel();
-    const { profile } = useUserProfile();
-    const apiKeys = profile?.apiKeys;
+
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const controlsRef = useRef<HTMLDivElement>(null);
     const [compactControls, setCompactControls] = useState(false);
@@ -105,8 +98,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
     const [docSelectorInitialTab, setDocSelectorInitialTab] =
         useState<DirectoryTab>("files");
     const [workflowModalOpen, setWorkflowModalOpen] = useState(false);
-    const [apiKeyModalProvider, setApiKeyModalProvider] =
-        useState<ModelProvider | null>(null);
+
     const [isDraggingFiles, setIsDraggingFiles] = useState(false);
     const [uploadingFilenames, setUploadingFilenames] = useState<string[]>([]);
     const [uploadWarning, setUploadWarning] = useState<string | null>(null);
@@ -306,10 +298,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
         workflow: { id: string; title: string } | null,
     ) => {
         if (!query || isLoading) return;
-        if (apiKeys && !isModelAvailable(model, apiKeys)) {
-            setApiKeyModalProvider(getModelProvider(model));
-            return;
-        }
+
         setValue("");
         if (textareaRef.current) {
             textareaRef.current.style.height = "auto";
@@ -327,7 +316,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             content: query,
             files: files.length > 0 ? files : undefined,
             workflow: workflow ?? undefined,
-            model,
+
         });
     };
 
@@ -555,11 +544,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
                         </div>
 
                         <div className="flex items-center gap-1">
-                            <ModelToggle
-                                value={model}
-                                onChange={setModel}
-                                apiKeys={apiKeys}
-                            />
+                            {route && (
+                                <GovernedModelRouteSelect
+                                    value={route}
+                                    onChange={() => {}}
+                                    locked
+                                />
+                            )}
                             <button
                                 type="button"
                                 aria-label={
@@ -618,11 +609,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
                 projectName={projectName}
                 projectCmNumber={projectCmNumber}
             />
-            <ApiKeyMissingPopup
-                open={apiKeyModalProvider !== null}
-                provider={apiKeyModalProvider}
-                onClose={() => setApiKeyModalProvider(null)}
-            />
+
             <UploadOverlay
                 open={isDraggingFiles}
                 warning={uploadWarning}

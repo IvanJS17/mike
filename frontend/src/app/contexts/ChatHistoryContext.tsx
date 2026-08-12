@@ -6,6 +6,7 @@ import {
     useContext,
     useEffect,
     useMemo,
+    useRef,
     useState,
     type ReactNode,
 } from "react";
@@ -16,7 +17,9 @@ import {
     listChats,
     renameChat,
 } from "@/app/lib/mikeApi";
+import type { ModelRoute } from "@/app/lib/mikeApi";
 import type { Chat, Message } from "@/app/components/shared/types";
+import { ChatRouteCreationModal } from "@/app/components/assistant/ChatRouteCreationModal";
 
 interface ChatHistoryContextType {
     chats: Chat[] | null;
@@ -53,6 +56,12 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
     const [newChatMessages, setNewChatMessages] = useState<Message[] | null>(
         null,
     );
+    const [routeModalOpen, setRouteModalOpen] = useState(false);
+    const [creatingChat, setCreatingChat] = useState(false);
+    const pendingCreationRef = useRef<{
+        projectId?: string;
+        resolve: (chatId: string | null) => void;
+    } | null>(null);
 
     const loadChats = useCallback(async () => {
         if (!user) {
@@ -116,27 +125,53 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
         [],
     );
 
-    const saveChat = useCallback(
-        async (projectId?: string): Promise<string | null> => {
+    const saveChat = useCallback((projectId?: string): Promise<string | null> => {
+        if (pendingCreationRef.current) return Promise.resolve(null);
+        return new Promise((resolve) => {
+            pendingCreationRef.current = { projectId, resolve };
+            setRouteModalOpen(true);
+        });
+    }, []);
+
+    const finishPendingCreation = useCallback((chatId: string | null) => {
+        const pending = pendingCreationRef.current;
+        pendingCreationRef.current = null;
+        setRouteModalOpen(false);
+        pending?.resolve(chatId);
+    }, []);
+
+    const confirmChatCreation = useCallback(
+        async (route: ModelRoute) => {
+            const pending = pendingCreationRef.current;
+            if (!pending) return;
+            setCreatingChat(true);
             try {
-                const { id } = await createChat(
-                    projectId ? { project_id: projectId } : undefined,
-                );
+                const { id } = await createChat({
+                    route,
+                    ...(pending.projectId
+                        ? { project_id: pending.projectId }
+                        : {}),
+                });
                 const now = new Date().toISOString();
                 const newChat: Chat = {
                     id,
-                    project_id: projectId ?? null,
+                    project_id: pending.projectId ?? null,
                     user_id: user?.id ?? "",
                     title: null,
+                    model_provider: route.provider,
+                    model: route.model,
+                    credential_ref: route.credential_ref,
                     created_at: now,
                 };
                 setChats((prev) => [newChat, ...(prev ?? [])]);
-                return id;
+                finishPendingCreation(id);
             } catch {
-                return null;
+                finishPendingCreation(null);
+            } finally {
+                setCreatingChat(false);
             }
         },
-        [user],
+        [finishPendingCreation, user],
     );
 
     const renameChatFn = useCallback(
@@ -200,6 +235,14 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
     return (
         <ChatHistoryContext.Provider value={value}>
             {children}
+            {routeModalOpen && (
+                <ChatRouteCreationModal
+                    open
+                    creating={creatingChat}
+                    onConfirm={(route) => void confirmChatCreation(route)}
+                    onCancel={() => finishPendingCreation(null)}
+                />
+            )}
         </ChatHistoryContext.Provider>
     );
 }

@@ -2,6 +2,8 @@
 // Callers always speak OpenAI-style tools + { role, content } messages; each
 // provider translates internally.
 
+import type { ModelRoute } from "./routes";
+
 export type Provider = "claude" | "gemini" | "openai" | "ollama";
 
 export type OpenAIToolSchema = {
@@ -41,11 +43,16 @@ export type UserApiKeys = {
     gemini?: string | null;
     openai?: string | null;
     openrouter?: string | null;
+    deepseek?: string | null;
+    "opencode-zen"?: string | null;
+    "opencode-go"?: string | null;
     courtlistener?: string | null;
 };
 
 export type StreamChatParams = {
     model: string;
+    route?: ModelRoute;
+    credentialSecret?: string;
     systemPrompt: string;
     messages: LlmMessage[];
     tools?: OpenAIToolSchema[];

@@ -6,11 +6,13 @@ const {
     checkProjectAccess,
     buildMessages,
     buildProjectDocContext,
+    resolveModelRouteForUser,
 } = vi.hoisted(() => ({
     runLLMStream: vi.fn(),
     checkProjectAccess: vi.fn(),
     buildMessages: vi.fn(),
     buildProjectDocContext: vi.fn(),
+    resolveModelRouteForUser: vi.fn(),
 }));
 
 function makeQuery() {
@@ -84,6 +86,12 @@ vi.mock("../../lib/userSettings", () => ({
     getUserApiKeys: vi.fn(async () => ({})),
 }));
 
+vi.mock("../../lib/llm/governedRoutes", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../lib/llm/governedRoutes")>()),
+    resolveModelRouteForUser: (...args: unknown[]) =>
+        resolveModelRouteForUser(...args),
+}));
+
 vi.mock("../../lib/access", () => ({
     checkProjectAccess: (...args: unknown[]) => checkProjectAccess(...args),
     ensureDocAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
@@ -96,7 +104,14 @@ import { app } from "../../app";
 import { spotlight } from "../../lib/chat";
 import { createServerSupabase } from "../../lib/supabase";
 
-const VALID_BODY = { messages: [{ role: "user", content: "hello" }] };
+const VALID_BODY = {
+    route: {
+        provider: "deepseek",
+        model: "deepseek-chat",
+        credential_ref: "deepseek:v1",
+    },
+    messages: [{ role: "user", content: "hello" }],
+};
 
 describe("POST /projects/:projectId/chat", () => {
     beforeEach(() => {
@@ -117,6 +132,13 @@ describe("POST /projects/:projectId/chat", () => {
             isOwner: true,
             project: { id: "p1", user_id: "u1", shared_with: null },
         });
+        resolveModelRouteForUser.mockImplementation(
+            async (_userId: string, route: unknown) => ({
+                ok: true,
+                route,
+                credentialSecret: "server-only-secret",
+            }),
+        );
     });
 
     it("returns 404 and never streams when project access is denied", async () => {
@@ -167,6 +189,11 @@ describe("POST /projects/:projectId/chat", () => {
                     },
                 ],
                 model: " custom-model ",
+                route: {
+                    provider: "openrouter",
+                    model: " custom-model ",
+                    credential_ref: "openrouter:v1",
+                },
                 displayed_doc: {
                     filename: " displayed.pdf ",
                     document_id: " displayed-document ",
