@@ -24,6 +24,7 @@ import {
 } from "../lib/documentVersions";
 import { ensureDocAccess } from "../lib/access";
 import { singleFileUpload } from "../lib/upload";
+import { validateUploadContent } from "../lib/fileValidation";
 import {
   ALLOWED_DOCUMENT_TYPES,
   ALLOWED_DOCUMENT_TYPES_LABEL,
@@ -1322,7 +1323,15 @@ export async function handleDocumentUpload(
         detail: `Unsupported file type: ${suffix}. Allowed: ${ALLOWED_DOCUMENT_TYPES_LABEL}`,
       });
 
+  // W1.9: verify the real content matches the declared extension before
+  // accepting the upload (blocks executables disguised as documents).
   const content = file.buffer;
+  const contentValidation = validateUploadContent(
+    suffix,
+    new Uint8Array(content.buffer, content.byteOffset, content.byteLength),
+  );
+  if (contentValidation)
+    return void res.status(415).json({ detail: contentValidation });
   const { data: doc, error: insertErr } = await db
     .from("documents")
     .insert({
@@ -1348,9 +1357,12 @@ export async function handleDocumentUpload(
       .status(500)
       .json({ detail: "Failed to create document record" });
 
+  let key = "";
+  let pdfStoragePath: string | null = null;
+
   try {
     const docId = doc.id as string;
-    const key = storageKey(userId, docId, filename);
+    key = storageKey(userId, docId, filename);
     const contentType = contentTypeForDocumentType(suffix);
     await uploadFile(
       key,
@@ -1368,7 +1380,6 @@ export async function handleDocumentUpload(
     const pageCount = suffix === "pdf" ? await countPdfPages(rawBuf) : null;
 
     // Convert Office files → PDF for display. PDFs are their own rendition.
-    let pdfStoragePath: string | null = null;
     if (shouldConvertToPdf(suffix)) {
       try {
         const pdfBuf = await docxToPdf(content);
@@ -1448,6 +1459,10 @@ export async function handleDocumentUpload(
       : updated;
     return void res.status(201).json(responseDoc);
   } catch (e) {
+    // W1.9: clean up the partial upload so revoked/failed files never linger.
+    await deleteFile(key).catch(() => {});
+    if (pdfStoragePath && pdfStoragePath !== key)
+      await deleteFile(pdfStoragePath).catch(() => {});
     await db.from("documents").update({ status: "error" }).eq("id", doc.id);
     return void res
       .status(500)
