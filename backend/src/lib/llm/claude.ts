@@ -7,7 +7,6 @@ import type {
   NormalizedToolResult,
 } from "./types";
 import { toClaudeTools } from "./tools";
-import { createRawLlmStreamRecorder, logRawLlmStream } from "./rawStreamLog";
 
 type ContentBlock =
   | { type: "text"; text: string }
@@ -119,11 +118,7 @@ export async function streamClaude(
 
   const messages: NativeMessage[] = toNativeMessages(params.messages);
   let fullText = "";
-  const rawStreamRecorder = createRawLlmStreamRecorder({
-    provider: "claude",
-    model,
-  });
-
+  
   try {
     for (let iter = 0; iter < maxIter; iter++) {
       throwIfAborted(params.abortSignal);
@@ -155,38 +150,14 @@ export async function streamClaude(
       });
 
       stream.on("streamEvent", (event) => {
-        logRawLlmStream({
-          provider: "claude",
-          model,
-          iteration: iter,
-          label: "streamEvent",
-          payload: event,
-        });
-        rawStreamRecorder?.record({
-          iteration: iter,
-          label: "streamEvent",
-          payload: event,
-        });
-        const failureMessage = claudeStreamFailureMessage(event);
+                        const failureMessage = claudeStreamFailureMessage(event);
         if (failureMessage) {
           streamFailureMessage = failureMessage;
           stream.abort();
         }
       });
       stream.on("error", (error) => {
-        logRawLlmStream({
-          provider: "claude",
-          model,
-          iteration: iter,
-          label: "error",
-          payload: error,
-        });
-        rawStreamRecorder?.record({
-          iteration: iter,
-          label: "error",
-          payload: error,
-        });
-      });
+                      });
 
       stream.on("text", (delta) => {
         callbacks.onContentDelta?.(delta);
@@ -257,11 +228,9 @@ export async function streamClaude(
       });
     }
 
-    await rawStreamRecorder?.flush("completed");
-    return { fullText };
+        return { fullText };
   } catch (error) {
-    await rawStreamRecorder?.flush("error", error);
-    throw error;
+        throw error;
   }
 }
 

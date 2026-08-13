@@ -6,7 +6,6 @@ import type {
   StreamChatParams,
   StreamChatResult,
 } from "./types";
-import { createRawLlmStreamRecorder, logRawLlmStream } from "./rawStreamLog";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const MAX_OUTPUT_TOKENS = 16384;
@@ -223,11 +222,7 @@ export async function streamOpenAI(
   let previousResponseId: string | undefined;
   let fullText = "";
   let needsCourtlistenerCitationReminder = false;
-  const rawStreamRecorder = createRawLlmStreamRecorder({
-    provider: "openai",
-    model,
-  });
-
+  
   try {
     for (let iter = 0; iter < maxIter; iter++) {
       throwIfAborted(params.abortSignal);
@@ -260,36 +255,12 @@ export async function streamOpenAI(
         if (done) break;
 
         const decoded = decoder.decode(value, { stream: true });
-        logRawLlmStream({
-          provider: "openai",
-          model,
-          iteration: iter,
-          label: "sse_chunk",
-          payload: decoded,
-        });
-        rawStreamRecorder?.record({
-          iteration: iter,
-          label: "sse_chunk",
-          payload: decoded,
-        });
-        buffer += decoded;
+                        buffer += decoded;
         const extracted = extractSseJson(buffer);
         buffer = extracted.rest;
 
         for (const event of extracted.events as ResponseStreamEvent[]) {
-          logRawLlmStream({
-            provider: "openai",
-            model,
-            iteration: iter,
-            label: "sse_event",
-            payload: event,
-          });
-          rawStreamRecorder?.record({
-            iteration: iter,
-            label: "sse_event",
-            payload: event,
-          });
-
+                    
           const failureMessage = openAIStreamFailureMessage(event);
           if (failureMessage) {
             throw new Error(failureMessage);
@@ -357,11 +328,9 @@ export async function streamOpenAI(
       }));
     }
 
-    await rawStreamRecorder?.flush("completed");
-    return { fullText };
+        return { fullText };
   } catch (error) {
-    await rawStreamRecorder?.flush("error", error);
-    throw error;
+        throw error;
   }
 }
 

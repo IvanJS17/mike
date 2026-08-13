@@ -5,7 +5,6 @@ import type {
   NormalizedToolCall,
 } from "./types";
 import { toGeminiTools } from "./tools";
-import { createRawLlmStreamRecorder, logRawLlmStream } from "./rawStreamLog";
 
 type GeminiPart = {
   text?: string;
@@ -175,11 +174,7 @@ export async function streamGemini(
 
   const contents: GeminiContent[] = toNativeContents(params.messages);
   let fullText = "";
-  const rawStreamRecorder = createRawLlmStreamRecorder({
-    provider: "gemini",
-    model,
-  });
-
+  
   try {
     for (let iter = 0; iter < maxIter; iter++) {
       throwIfAborted(params.abortSignal);
@@ -229,19 +224,7 @@ export async function streamGemini(
             abortPromise,
           ]);
           if (done) break;
-          logRawLlmStream({
-            provider: "gemini",
-            model,
-            iteration: iter,
-            label: "chunk",
-            payload: chunk,
-          });
-          rawStreamRecorder?.record({
-            iteration: iter,
-            label: "chunk",
-            payload: chunk,
-          });
-          const failureMessage = geminiStreamFailureMessage(chunk);
+                              const failureMessage = geminiStreamFailureMessage(chunk);
           if (failureMessage) throw new Error(failureMessage);
 
           const parts =
@@ -320,11 +303,9 @@ export async function streamGemini(
       });
     }
 
-    await rawStreamRecorder?.flush("completed");
-    return { fullText };
+        return { fullText };
   } catch (error) {
-    await rawStreamRecorder?.flush("error", error);
-    throw error;
+        throw error;
   }
 }
 
