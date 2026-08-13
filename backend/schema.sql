@@ -22,7 +22,7 @@ create table if not exists public.user_profiles (
   title_model text,
   tabular_model text not null default 'gemini-3-flash-preview',
   quote_model text,
-  mfa_on_login boolean not null default false,
+  mfa_on_login boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

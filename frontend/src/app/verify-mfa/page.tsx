@@ -17,6 +17,12 @@ type MfaFactor = {
     id: string;
     friendly_name?: string | null;
     factor_type: string;
+    status?: string;
+};
+
+type EnrollmentState = {
+    factorId: string;
+    qrCode: string;
 };
 
 const authGlassCardClassName =
@@ -31,11 +37,20 @@ export default function VerifyMfaPage() {
     const [code, setCode] = useState("");
     const [loading, setLoading] = useState(true);
     const [verifying, setVerifying] = useState(false);
+    const [enrollmentStartLoading, setEnrollmentStartLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [enrollment, setEnrollment] = useState<EnrollmentState | null>(null);
 
     const nextPath = safeNextPath(searchParams.get("next"));
+    const hasFactors = factors.length > 0;
+    const hasChallengeFactor = hasFactors || enrollment !== null;
+    const requiresEnrollment = factors.length === 0;
     const canVerify =
-        !loading && !verifying && !!selectedFactorId && code.trim().length === 6;
+        !loading &&
+        !verifying &&
+        !enrollmentStartLoading &&
+        !!selectedFactorId &&
+        code.trim().length === 6;
 
     useEffect(() => {
         if (authLoading) return;
@@ -63,12 +78,17 @@ export default function VerifyMfaPage() {
                 if (cancelled) return;
                 if (factorError) throw factorError;
 
-                const verified = (data.totp ?? []) as MfaFactor[];
+                const verified = (data.totp ?? [])
+                    .filter(
+                        (factor) =>
+                            typeof factor === "object" && factor.status === "verified",
+                    ) as MfaFactor[];
                 setFactors(verified);
                 setSelectedFactorId(verified[0]?.id ?? "");
-                if (verified.length === 0) {
+
+                if (!verified.length) {
                     setError(
-                        "No verified authenticator factor is available for this account.",
+                        "No verified authenticator factor is available for this account. Enroll one to continue.",
                     );
                 }
             } catch (loadError) {
@@ -90,20 +110,57 @@ export default function VerifyMfaPage() {
         };
     }, [authLoading, nextPath, router, user]);
 
+    async function enrollAuthenticator() {
+        setEnrollmentStartLoading(true);
+        setError(null);
+
+        const { data, error: enrollError } = await supabase.auth.mfa.enroll({
+            factorType: "totp",
+            friendlyName: "Mike Authenticator",
+        });
+
+        if (enrollError) {
+            setEnrollmentStartLoading(false);
+            setError(enrollError.message);
+            return;
+        }
+
+        const factorId = data?.id ?? "";
+        if (!factorId) {
+            setEnrollmentStartLoading(false);
+            setError("Unable to initialize authenticator setup.");
+            return;
+        }
+
+        setEnrollment({
+            factorId,
+            qrCode: data?.totp?.qr_code ?? "",
+        });
+        setSelectedFactorId(factorId);
+        setEnrollmentStartLoading(false);
+    }
+
     async function verify() {
         if (!canVerify) return;
 
         setVerifying(true);
         setError(null);
-        const { error: verifyError } =
+
+        let verifyError = null as null | string;
+
+        const { error: directVerifyError } =
             await supabase.auth.mfa.challengeAndVerify({
                 factorId: selectedFactorId,
                 code: code.trim(),
             });
+        if (directVerifyError) {
+            verifyError = directVerifyError.message;
+        }
+
         setVerifying(false);
 
         if (verifyError) {
-            setError(verifyError.message);
+            setError(verifyError);
             return;
         }
 
@@ -125,11 +182,14 @@ export default function VerifyMfaPage() {
             <div className={`w-full max-w-md ${authGlassCardClassName}`}>
                 <div className="mb-8 space-y-2">
                     <h1 className="text-2xl font-serif">
-                        Verify your identity
+                        {enrollment
+                            ? "Set up authenticator"
+                            : "Verify your identity"}
                     </h1>
                     <p className="text-sm text-gray-500">
-                        Enter the six-digit code from your authenticator app to
-                        continue.
+                        {enrollment
+                            ? "Scan the QR code in your authenticator app and enter the code."
+                            : "Enter the six-digit code from your authenticator app to continue."}
                     </p>
                 </div>
 
@@ -139,14 +199,41 @@ export default function VerifyMfaPage() {
                             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                             Loading authenticator...
                         </div>
-                    ) : factors.length === 0 ? (
-                        <p className="rounded-lg bg-gray-100 px-3 py-2 text-sm text-gray-600">
-                            No verified authenticator factor is available for
-                            this session.
-                        </p>
+                    ) : requiresEnrollment && !enrollment ? (
+                        <div className="space-y-4">
+                            <p className="rounded-lg bg-gray-100 px-3 py-2 text-sm text-gray-600">
+                                {error}
+                            </p>
+                            <PillButton
+                                tone="black"
+                                size="normal"
+                                type="button"
+                                onClick={() => void enrollAuthenticator()}
+                                disabled={enrollmentStartLoading}
+                            >
+                                {enrollmentStartLoading ? (
+                                    <span className="inline-flex items-center gap-1.5">
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                        Preparing...
+                                    </span>
+                                ) : (
+                                    "Set up authenticator"
+                                )}
+                            </PillButton>
+                        </div>
                     ) : (
                         <>
-                            {factors.length > 1 && (
+                            {enrollment?.qrCode ? (
+                                <div className="rounded-xl border border-gray-100 bg-white p-4 text-center">
+                                    <img
+                                        src={enrollment.qrCode}
+                                        alt="Authenticator QR code"
+                                        className="mx-auto max-w-full"
+                                    />
+                                </div>
+                            ) : null}
+
+                            {hasChallengeFactor && factors.length > 1 ? (
                                 <select
                                     value={selectedFactorId}
                                     onChange={(event) =>
@@ -154,17 +241,20 @@ export default function VerifyMfaPage() {
                                     }
                                     className="h-9 w-full rounded-lg border border-transparent bg-gray-100 px-3 text-sm text-gray-900 shadow-none outline-none focus-visible:border-gray-200 focus-visible:ring-2 focus-visible:ring-gray-300/45"
                                 >
-                                    {factors.map((factor) => (
-                                        <option
-                                            key={factor.id}
-                                            value={factor.id}
-                                        >
-                                            {factor.friendly_name ||
-                                                "Authenticator app"}
-                                        </option>
-                                    ))}
+                                    {factors.length
+                                        ? factors.map((factor) => (
+                                              <option
+                                                  key={factor.id}
+                                                  value={factor.id}
+                                              >
+                                                  {factor.friendly_name ||
+                                                      "Authenticator app"}
+                                              </option>
+                                          ))
+                                        : null}
                                 </select>
-                            )}
+                            ) : null}
+
                             <VerificationCodeInput
                                 value={code}
                                 onChange={setCode}
@@ -176,7 +266,11 @@ export default function VerifyMfaPage() {
                         </>
                     )}
 
-                    {error && <p className="text-sm text-red-600">{error}</p>}
+                    {!requiresEnrollment || enrollment
+                        ? error
+                            ? <p className="text-sm text-red-600">{error}</p>
+                            : null
+                        : null}
 
                     <div className="flex items-center justify-end gap-2 pt-4">
                         <button

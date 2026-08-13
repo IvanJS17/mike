@@ -387,6 +387,26 @@ function readBooleanBodyField(
     return { ok: true, value: raw[field] };
 }
 
+function readInviteBody(
+    body: unknown,
+): { ok: true; email: string } | { ok: false; detail: string } {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return { ok: false, detail: "Expected a JSON object" };
+    }
+
+    const raw = body as Record<string, unknown>;
+    const invalidField = Object.keys(raw).find((key) => key !== "email");
+    if (invalidField) {
+        return { ok: false, detail: `Unsupported field: ${invalidField}` };
+    }
+
+    if (typeof raw.email !== "string" || !raw.email.trim()) {
+        return { ok: false, detail: "email is required" };
+    }
+
+    return { ok: true, email: raw.email.trim() };
+}
+
 async function userHasVerifiedTotpFactor(
     db: ReturnType<typeof createServerSupabase>,
     userId: string,
@@ -490,6 +510,21 @@ userRouter.get("/lookup", requireAuth, async (req, res) => {
         email: user?.email ?? email.trim().toLowerCase(),
         display_name: user?.display_name ?? null,
     });
+});
+
+// POST /user/invite
+userRouter.post("/invite", requireAuth, async (req, res) => {
+    const parsed = readInviteBody(req.body);
+    if (!parsed.ok) return void res.status(400).json({ detail: parsed.detail });
+
+    const db = createServerSupabase();
+    const { error } = await db.auth.admin.inviteUserByEmail(
+        parsed.email,
+        { redirectTo: frontendUrl("/accept-invite") },
+    );
+    if (error) return void res.status(500).json({ detail: error.message });
+
+    res.status(200).json({ ok: true });
 });
 
 // GET /user/profile
