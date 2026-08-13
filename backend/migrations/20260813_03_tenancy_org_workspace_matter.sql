@@ -143,10 +143,10 @@ as $$
   limit 1;
 $$;
 
-grant execute on function public.organization_role(uuid) to anon, authenticated;
-grant execute on function public.is_organization_member(uuid) to anon, authenticated;
-grant execute on function public.is_workspace_admin(uuid) to anon, authenticated;
-grant execute on function public.matter_role(uuid) to anon, authenticated;
+grant execute on function public.organization_role(uuid) to authenticated;
+grant execute on function public.is_organization_member(uuid) to authenticated;
+grant execute on function public.is_workspace_admin(uuid) to authenticated;
+grant execute on function public.matter_role(uuid) to authenticated;
 
 
 -- ---------------------------------------------------------------------------
