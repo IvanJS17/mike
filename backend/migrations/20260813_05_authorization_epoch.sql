@@ -20,4 +20,5 @@ as $$
   where id = p_org;
 $$;
 
+revoke execute on function public.bump_authorization_epoch(uuid) from public, anon, authenticated;
 grant execute on function public.bump_authorization_epoch(uuid) to service_role;
