@@ -1148,7 +1148,8 @@ create table if not exists public.organizations (
   name text not null,
   created_by uuid not null references auth.users(id) on delete cascade,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  authorization_epoch bigint not null default 0
 );
 
 alter table public.organizations enable row level security;
@@ -1432,3 +1433,18 @@ alter table public.tabular_reviews enable row level security;
 alter table public.tabular_cells enable row level security;
 alter table public.tabular_review_chats enable row level security;
 alter table public.tabular_review_chat_messages enable row level security;
+
+-- W1.7: monotonic authorization epoch bump (called via RPC on membership
+-- revocation; atomic increment).
+create or replace function public.bump_authorization_epoch(p_org uuid)
+returns void
+language sql
+security definer
+set search_path = public
+as $$
+  update public.organizations
+  set authorization_epoch = authorization_epoch + 1
+  where id = p_org;
+$$;
+
+grant execute on function public.bump_authorization_epoch(uuid) to service_role;
