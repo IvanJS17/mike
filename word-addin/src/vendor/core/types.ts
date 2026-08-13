@@ -211,93 +211,6 @@ export type AssistantEvent =
       error?: string;
       isStreaming?: boolean;
     }
-  | {
-      type: "courtlistener_search_case_law";
-      query: string;
-      result_count?: number;
-      error?: string;
-      isStreaming?: boolean;
-    }
-  | {
-      type: "courtlistener_get_cases";
-      cluster_ids: number[];
-      case_count?: number;
-      opinion_count?: number;
-      cases?: {
-        cluster_id: number;
-        case_name: string | null;
-        citation: string | null;
-        dateFiled?: string | null;
-        url?: string | null;
-      }[];
-      error?: string;
-      isStreaming?: boolean;
-    }
-  | {
-      type: "courtlistener_find_in_case";
-      cluster_id: number | null;
-      query: string;
-      total_matches?: number;
-      case_name?: string | null;
-      citation?: string | null;
-      searches?: {
-        cluster_id: number | null;
-        query: string;
-        total_matches?: number;
-        case_name?: string | null;
-        citation?: string | null;
-        error?: string;
-      }[];
-      error?: string;
-      isStreaming?: boolean;
-    }
-  | {
-      type: "courtlistener_read_case";
-      cluster_id: number | null;
-      case_name?: string | null;
-      citation?: string | null;
-      opinion_count?: number;
-      error?: string;
-      isStreaming?: boolean;
-    }
-  | {
-      type: "courtlistener_verify_citations";
-      citation_count?: number;
-      match_count?: number;
-      error?: string;
-      isStreaming?: boolean;
-    }
-  | {
-      type: "case_citation";
-      cluster_id: number | null;
-      case_name: string | null;
-      citation: string | null;
-      url: string;
-      pdfUrl?: string | null;
-      dateFiled?: string | null;
-      case?: Extract<AssistantEvent, { type: "case_opinions" }>["case"];
-    }
-  | {
-      type: "case_opinions";
-      cluster_id: number;
-      case: {
-        id: number | null;
-        caseName?: string | null;
-        dateFiled?: string | null;
-        citations?: string[];
-        url?: string | null;
-        pdfUrl?: string | null;
-        opinions: {
-          opinionId: number | null;
-          apiUrl?: string | null;
-          type: string | null;
-          author: string | null;
-          url: string | null;
-          text?: string | null;
-          html?: string | null;
-        }[];
-      };
-    }
   | { type: "content"; text: string; isStreaming?: boolean };
 
 export type CaseCitationQuote = {
@@ -402,8 +315,8 @@ export type CaseCitation = {
 
 /**
  * A citation emitted by the assistant. Document citations have doc/page
- * anchors. Case citations anchor to a CourtListener cluster and include a
- * quoted opinion passage.
+ * anchors. Case-shaped citations (legacy CourtListener format) carry no
+ * source metadata while CourtListener is disabled and are never verified.
  */
 export type Citation =
   | DocumentCitation
@@ -526,9 +439,9 @@ export function formatCitationPage(a: Citation): string {
 
 /**
  * Aggregate verification status of a citation, or `undefined` when unknown.
- * Case-law citations are existence-verified upstream (CourtListener) and are
- * never re-marked here, so this always returns `undefined` for them — callers
- * must not present a document quote with an `undefined` status as trusted.
+ * Case-shaped citations are never verified (CourtListener is disabled), so
+ * this always returns `undefined` for them — callers must not present a
+ * document quote with an `undefined` status as trusted.
  */
 export function citationVerificationStatus(
   a: Citation,

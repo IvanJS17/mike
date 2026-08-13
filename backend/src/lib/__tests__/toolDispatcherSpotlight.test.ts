@@ -73,7 +73,6 @@ async function dispatchDocumentTool(
         turnReadState,
         undefined,
         undefined,
-        undefined,
         NONCE,
     );
 }
@@ -83,10 +82,7 @@ function firstToolContent(result: Awaited<ReturnType<typeof runToolCalls>>) {
 }
 
 function expectFencedFilename(content: string) {
-    expect(content).toContain(spotlight(FILENAME, NONCE));
-    expect(content).not.toContain(
-        `[Citation requirement for doc-0 ("${FILENAME}")]`,
-    );
+    expect(content).toContain(`Document filename: ${spotlight(FILENAME, NONCE)}`);
 }
 
 describe("document tool spotlighting", () => {

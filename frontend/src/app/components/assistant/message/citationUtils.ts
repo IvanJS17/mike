@@ -20,17 +20,3 @@ export function preprocessCitations(
         return tokens.length > 0 ? tokens.join("") : full;
     });
 }
-
-// ---------------------------------------------------------------------------
-// Markdown renderer (shared config)
-// ---------------------------------------------------------------------------
-
-export function internalCaseHref(
-    value: string | number | null | undefined,
-): string | null {
-    if (typeof value === "number") return `us-case-${value}`;
-    if (!value) return null;
-    const match = value.match(/^us-case-(\d+)$/);
-    return match ? `us-case-${match[1]}` : null;
-}
-

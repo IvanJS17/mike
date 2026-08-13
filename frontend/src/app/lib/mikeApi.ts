@@ -230,7 +230,6 @@ export interface UserProfile {
     titleModel: string;
     tabularModel: string;
     mfaOnLogin: boolean;
-    legalResearchUs: boolean;
     apiKeyStatus: ApiKeyStatus;
 }
 
@@ -257,7 +256,6 @@ export async function updateUserProfile(payload: {
     organisation?: string | null;
     titleModel?: string;
     tabularModel?: string;
-    legalResearchUs?: boolean;
 }): Promise<UserProfile> {
     return apiRequest<UserProfile>("/user/profile", {
         method: "PATCH",
@@ -283,8 +281,7 @@ export type ApiKeyProvider =
     | "openrouter"
     | "deepseek"
     | "opencode-zen"
-    | "opencode-go"
-    | "courtlistener";
+    | "opencode-go";
 export type ApiKeySource = "user" | "env" | null;
 export type ApiKeyState = Record<
     ApiKeyProvider,
@@ -315,7 +312,7 @@ export async function getOllamaModels(): Promise<OllamaModelOption[]> {
     return models;
 }
 
-export type GovernedLlmProvider = Exclude<ApiKeyProvider, "courtlistener">;
+export type GovernedLlmProvider = ApiKeyProvider;
 
 export interface ModelRoute {
     provider: GovernedLlmProvider;
@@ -977,32 +974,6 @@ export async function generateChatTitle(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message }),
     });
-}
-
-export type CaseLawOpinion = {
-    opinionId: number | null;
-    apiUrl?: string | null;
-    type: string | null;
-    author: string | null;
-    url: string | null;
-    text?: string | null;
-    html?: string | null;
-};
-
-export async function getCourtlistenerOpinions(
-    clusterId: number,
-): Promise<CaseLawOpinion[]> {
-    const result = await apiRequest<{ opinions: CaseLawOpinion[] }>(
-        "/case-law/case-opinions",
-        {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                clusterId,
-            }),
-        },
-    );
-    return result.opinions;
 }
 
 export async function streamChat(payload: {

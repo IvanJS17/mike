@@ -14,7 +14,6 @@ const emptySources = {
   gemini: null,
   openai: null,
   openrouter: null,
-  courtlistener: null,
 };
 
 const noneConfigured = {
@@ -22,7 +21,6 @@ const noneConfigured = {
   gemini: false,
   openai: false,
   openrouter: false,
-  courtlistener: false,
   sources: emptySources,
 };
 

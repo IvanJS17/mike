@@ -1,5 +1,3 @@
-import { COURTLISTENER_SYSTEM_PROMPT } from "./tools/courtlistenerTools";
-
 const SYSTEM_PROMPT_BEFORE_RESEARCH = `You are Mike, an AI legal assistant for lawyers and legal professionals. Help analyze documents, answer legal questions, and draft legal documents.
 
 CORE RULES:
@@ -92,15 +90,10 @@ GENERAL GUIDANCE:
 `;
 
 /**
- * Assemble the chat system prompt. When `includeResearchTools` is true the
- * CourtListener (US case-law) research instructions are spliced in; when
- * false they are omitted entirely so the model is not told about tools it
- * does not have.
+ * Assemble the chat system prompt.
  */
-export function buildSystemPrompt(includeResearchTools = true): string {
-  return includeResearchTools
-    ? `${SYSTEM_PROMPT_BEFORE_RESEARCH}\n\n${COURTLISTENER_SYSTEM_PROMPT}\n${SYSTEM_PROMPT_AFTER_RESEARCH}`
-    : `${SYSTEM_PROMPT_BEFORE_RESEARCH}\n\n${SYSTEM_PROMPT_AFTER_RESEARCH}`;
+export function buildSystemPrompt(): string {
+  return `${SYSTEM_PROMPT_BEFORE_RESEARCH}\n\n${SYSTEM_PROMPT_AFTER_RESEARCH}`;
 }
 
-export const SYSTEM_PROMPT = buildSystemPrompt(true);
+export const SYSTEM_PROMPT = buildSystemPrompt();

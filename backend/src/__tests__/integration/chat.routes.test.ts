@@ -223,7 +223,7 @@ describe("POST /chat — streaming endpoint", () => {
         expect(res.status).toBe(200);
         const call = vi.mocked(chatLib.buildMessages).mock.calls[0];
         const systemPromptExtra = call[2] as string;
-        const nonce = call[5] as string;
+        const nonce = call[4] as string;
         // The Word document body enters the system prompt only inside the
         // untrusted-content fence, and that fence carries the SAME nonce the
         // rest of the request uses — one nonce per request, no second fence.

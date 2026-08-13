@@ -357,28 +357,16 @@ describe("createCitation", () => {
         const [parsed] = parseCitations(
             citationsBlock('[{"ref": 2, "cluster_id": 55, "quote": "held"}]'),
         );
-        const cases = new Map([
-            [
-                55,
-                {
-                    caseName: "Smith v. Jones",
-                    citations: ["123 U.S. 456", "alt cite"],
-                    url: "https://example.test/case",
-                    pdfUrl: null,
-                    dateFiled: "1990-01-02",
-                },
-            ],
-        ]);
-        expect(createCitation(parsed, docIndex, cases)).toMatchObject({
+        expect(createCitation(parsed, docIndex)).toMatchObject({
             type: "citation_data",
             kind: "case",
             ref: 2,
             cluster_id: 55,
-            case_name: "Smith v. Jones",
-            citation: "123 U.S. 456",
-            url: "https://example.test/case",
+            case_name: null,
+            citation: null,
+            url: null,
             pdfUrl: null,
-            dateFiled: "1990-01-02",
+            dateFiled: null,
         });
     });
 

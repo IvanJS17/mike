@@ -13,11 +13,6 @@ import {
   type McpToolEvent,
 } from "../mcpConnectors";
 import {
-  COURTLISTENER_TOOLS,
-  type CaseCitationEvent,
-  type CourtlistenerToolEvent,
-} from "./tools/courtlistenerTools";
-import {
   type DocStore,
   type DocIndex,
   type TabularCellStore,
@@ -37,7 +32,6 @@ import {
 } from "./citations";
 import {
   runToolCalls,
-  type CourtlistenerTurnState,
 } from "./tools/toolDispatcher";
 import {
   readDocumentContent,
@@ -99,10 +93,7 @@ export type AssistantEvent =
       download_url: string;
       annotations: EditAnnotation[];
     }
-  | CaseCitationEvent
-  | CourtlistenerToolEvent
   | McpToolEvent
-  | { type: "case_opinions"; cluster_id: number; case: unknown }
   | { type: "content"; text: string }
   | { type: "error"; message: string };
 
@@ -155,7 +146,6 @@ export async function runLLMStream(params: {
   db: ReturnType<typeof createServerSupabase>;
   write: (s: string) => void;
   extraTools?: unknown[];
-  includeResearchTools?: boolean;
   workflowStore?: WorkflowStore;
   tabularStore?: TabularCellStore;
   buildCitations?: (fullText: string) => unknown[];
@@ -187,7 +177,6 @@ export async function runLLMStream(params: {
     db,
     write,
     extraTools,
-    includeResearchTools = true,
     workflowStore,
     tabularStore,
     buildCitations,
@@ -199,9 +188,8 @@ export async function runLLMStream(params: {
     projectId,
     nonce,
   } = params;
-  const researchTools = includeResearchTools ? COURTLISTENER_TOOLS : [];
   const mcpTools = await buildUserMcpTools(userId, db);
-  const baseTools = [...TOOLS, ...researchTools, ...WORKFLOW_TOOLS];
+  const baseTools = [...TOOLS, ...WORKFLOW_TOOLS];
   const activeTools = extraTools?.length
     ? [...baseTools, ...mcpTools, ...extraTools]
     : [...baseTools, ...mcpTools];
@@ -229,9 +217,6 @@ export async function runLLMStream(params: {
   // one assistant response. The guard is invalidated when edit_document
   // changes that document so a post-edit verification read can still happen.
   const turnReadState: TurnReadState = new Map();
-  const courtlistenerTurnState: CourtlistenerTurnState = {
-      casesByClusterId: new Map(),
-    };
   let fullText = "";
   let iterText = "";
   let iterVisibleText = "";
@@ -259,7 +244,6 @@ export async function runLLMStream(params: {
       createCitation(
         c,
         docIndex,
-        courtlistenerTurnState.casesByClusterId,
       ),
     );
     emitCitationStreamSnapshot("partial", citations);
@@ -412,8 +396,6 @@ export async function runLLMStream(params: {
           workflowsApplied,
           docsEdited,
           askInputsEvents,
-          courtlistenerEvents,
-          caseCitationEvents,
           mcpEvents,
         } = await runToolCalls(
           toolCalls,
@@ -427,7 +409,6 @@ export async function runLLMStream(params: {
           turnEditState,
           turnReadState,
           projectId,
-          courtlistenerTurnState,
           apiKeys,
           nonce,
         );
@@ -487,13 +468,7 @@ export async function runLLMStream(params: {
           write(`data: ${JSON.stringify(askInputsEvent)}\n\n`);
           events.push(askInputsEvent);
         }
-        for (const event of courtlistenerEvents) {
-          events.push(event);
-        }
         for (const event of mcpEvents) {
-          events.push(event);
-        }
-        for (const event of caseCitationEvents) {
           events.push(event);
         }
 
@@ -552,7 +527,6 @@ export async function runLLMStream(params: {
       createCitation(
         c,
         docIndex,
-        courtlistenerTurnState.casesByClusterId,
       ),
     );
     // Server-side document-quote verification. Fetch each document's extracted

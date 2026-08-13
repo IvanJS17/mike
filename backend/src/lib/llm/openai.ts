@@ -9,17 +9,6 @@ import type {
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const MAX_OUTPUT_TOKENS = 16384;
-const COURTLISTENER_CITATION_REMINDER_TOOL_NAMES = new Set([
-  "courtlistener_find_in_case",
-  "courtlistener_read_case",
-]);
-const COURTLISTENER_CITATION_REMINDER = `COURTLISTENER CITATION REMINDER:
-If your final answer relies on any CourtListener case, every such case reference must have BOTH a clickable markdown case link and an inline [N] marker.
-Include the clickable case link only the first time you cite that case; later references to the same case should reuse the existing inline [N] marker without repeating the link unless clarity requires it.
-Assign new refs in first-use order as much as possible: [1], then [2], then [3]. Reuse an existing ref when citing the same case/passage again, even if that means a later sentence cites [3] and then [1] again.
-End the response with a <CITATIONS> block containing one matching case entry per [N] marker:
-{"ref": N, "cluster_id": 123, "quotes": [{"opinion_id": 456, "quote": "exact verbatim opinion text"}]}.
-Do not use doc_id, page, top-level quote, case_name, or citation fields for CourtListener case entries.`;
 
 type ResponseInputItem =
   | { role: "user" | "assistant"; content: string }
@@ -150,16 +139,6 @@ function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) throw abortError();
 }
 
-function responseInstructions(systemPrompt: string, includeReminder: boolean) {
-  return includeReminder
-    ? `${systemPrompt}\n\n${COURTLISTENER_CITATION_REMINDER}`
-    : systemPrompt;
-}
-
-function shouldAppendCourtlistenerCitationReminder(call: NormalizedToolCall) {
-  return COURTLISTENER_CITATION_REMINDER_TOOL_NAMES.has(call.name);
-}
-
 async function createResponse(params: {
   model: string;
   input: ResponseInputItem[];
@@ -221,17 +200,13 @@ export async function streamOpenAI(
   let input = toResponseInput(params.messages);
   let previousResponseId: string | undefined;
   let fullText = "";
-  let needsCourtlistenerCitationReminder = false;
   
   try {
     for (let iter = 0; iter < maxIter; iter++) {
       throwIfAborted(params.abortSignal);
       const response = await createResponse({
         model,
-        instructions: responseInstructions(
-          systemPrompt,
-          needsCourtlistenerCitationReminder,
-        ),
+        instructions: systemPrompt,
         input,
         tools: responseTools,
         stream: true,
@@ -313,10 +288,6 @@ export async function streamOpenAI(
 
       if (!toolCalls.length || !runTools) {
         break;
-      }
-
-      if (toolCalls.some(shouldAppendCourtlistenerCitationReminder)) {
-        needsCourtlistenerCitationReminder = true;
       }
 
       const results = await runTools(toolCalls);

@@ -205,7 +205,7 @@ describe("verifyDocumentCitationAnnotation", () => {
     expect(ann.verified).toBe(false);
   });
 
-  it("leaves case-law annotations untouched (no CourtListener regression)", async () => {
+  it("leaves case-law annotations untouched", async () => {
     const caseAnn = {
       type: "citation_data",
       kind: "case",

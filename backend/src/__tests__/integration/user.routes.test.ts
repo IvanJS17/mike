@@ -174,7 +174,6 @@ function profileRow(overrides: Record<string, unknown> = {}) {
         title_model: null,
         tabular_model: "gemini-3-flash-preview",
         mfa_on_login: false,
-        legal_research_us: true,
         ...overrides,
     };
 }
@@ -229,7 +228,6 @@ describe("user.routes", () => {
                 organisation: "Acme",
                 messageCreditsUsed: 3,
                 tier: "Pro",
-                legalResearchUs: true,
                 mfaOnLogin: false,
                 apiKeyStatus: STATUS,
             });

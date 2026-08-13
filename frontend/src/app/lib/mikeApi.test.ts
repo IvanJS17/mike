@@ -52,7 +52,6 @@ import {
     generateTabularColumnPrompt,
     getApiKeyStatus,
     getChat,
-    getCourtlistenerOpinions,
     getDocumentUrl,
     getLibrary,
     getMcpConnector,
@@ -1639,24 +1638,6 @@ describe("unwrapping and blob wrappers", () => {
 
         await expect(getOllamaModels()).resolves.toEqual(models);
         expect(lastFetchCall().url).toBe("http://localhost:3001/models/ollama");
-    });
-
-    it("getCourtlistenerOpinions posts the cluster id and unwraps opinions", async () => {
-        const opinions = [
-            {
-                opinionId: 7,
-                type: "majority",
-                author: "Judge X",
-                url: "https://example.test/op/7",
-            },
-        ];
-        fetchMock.mockResolvedValue(jsonResponse({ opinions }));
-
-        await expect(getCourtlistenerOpinions(123)).resolves.toEqual(opinions);
-        const { url, init } = lastFetchCall();
-        expect(url).toBe("http://localhost:3001/case-law/case-opinions");
-        expect(init.method).toBe("POST");
-        expect(JSON.parse(init.body as string)).toEqual({ clusterId: 123 });
     });
 
     it("exportChatData and exportTabularReviewsData hit their export routes", async () => {

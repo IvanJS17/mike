@@ -16,7 +16,6 @@ import {
     buildCancelledAssistantMessage,
     isAbortError,
     runLLMStream,
-    stripTransientAssistantEvents,
     TABULAR_TOOLS,
     type ChatMessage,
     type TabularCellStore,
@@ -1673,7 +1672,6 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
             db,
             write,
             extraTools: TABULAR_TOOLS,
-            includeResearchTools: false,
             tabularStore,
             buildCitations: (text) =>
                 extractTabularAnnotations(text, tabularStore),
@@ -1682,7 +1680,7 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
             signal: streamAbort.signal,
         });
 
-        const persistedEvents = stripTransientAssistantEvents(events);
+        const persistedEvents = events;
         const annotations = extractTabularAnnotations(fullText, tabularStore);
 
         if (chatId) {
@@ -1756,8 +1754,8 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
         }
         console.error("[tabular/chat] error", safeErrorLog(err));
         const message = safeErrorMessage(err, "Stream error");
-        const errorEvents = err instanceof AssistantStreamError
-            ? stripTransientAssistantEvents(err.events)
+            const errorEvents = err instanceof AssistantStreamError
+            ? err.events
             : [{ type: "error" as const, message }];
         const errorFullText =
             err instanceof AssistantStreamError ? err.fullText : "";

@@ -15,7 +15,6 @@ import {
     isAbortError,
     runLLMStream,
     spotlightFilename,
-    stripTransientAssistantEvents,
     PROJECT_EXTRA_TOOLS,
     parseChatMessages,
     parseOptionalAskInputsResponse,
@@ -311,14 +310,12 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
 
     const {
         api_keys: apiKeys,
-        legal_research_us: legalResearchUs,
     } = await getUserModelSettings(userId, db);
     const apiMessages = buildMessages(
         messagesForLLM,
         docAvailability,
         systemPromptExtra,
         undefined,
-        legalResearchUs,
         nonce,
     );
 
@@ -356,7 +353,6 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
             write,
             extraTools: PROJECT_EXTRA_TOOLS,
             workflowStore,
-            includeResearchTools: legalResearchUs,
             model: pinnedRoute.model,
             route: pinnedRoute,
             credentialSecret: routeCredentialSecret,
@@ -366,7 +362,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
             nonce,
         });
 
-        const persistedEvents = stripTransientAssistantEvents(events);
+        const persistedEvents = events;
         if (askInputsResponse) {
             await appendAssistantEventsToLastAssistantMessage(
                 db,
@@ -434,8 +430,8 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
         }
         console.error("[project-chat/stream] error:", safeErrorLog(err));
         const message = safeErrorMessage(err, "Stream error");
-        const errorEvents = err instanceof AssistantStreamError
-            ? stripTransientAssistantEvents(err.events)
+                const errorEvents = err instanceof AssistantStreamError
+            ? err.events
             : [{ type: "error" as const, message }];
         const errorFullText =
             err instanceof AssistantStreamError ? err.fullText : "";

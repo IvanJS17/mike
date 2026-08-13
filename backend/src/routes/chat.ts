@@ -14,7 +14,6 @@ import {
     generateSpotlightNonce,
     isAbortError,
     runLLMStream,
-    stripTransientAssistantEvents,
     parseChatMessages,
     parseOptionalAskInputsResponse,
     parseOptionalChatId,
@@ -619,7 +618,6 @@ chatRouter.post("/", requireAuth, async (req, res) => {
     );
     const {
         api_keys: apiKeys,
-        legal_research_us: legalResearchUs,
     } = await getUserModelSettings(userId, db);
     // Extra system context: the Word add-in's active-document body. The
     // document text is user-controlled and a prompt-injection vector, so
@@ -636,7 +634,6 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         docAvailability,
         systemPromptExtra,
         undefined,
-        legalResearchUs,
         nonce,
     );
 
@@ -679,7 +676,6 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             db,
             write,
             workflowStore,
-            includeResearchTools: legalResearchUs,
             model: pinnedRoute.model,
             route: pinnedRoute,
             credentialSecret: routeCredentialSecret,
@@ -694,7 +690,7 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             eventCount: events?.length ?? 0,
         });
 
-        const persistedEvents = stripTransientAssistantEvents(events);
+        const persistedEvents = events;
         if (askInputsResponse) {
             await appendAssistantEventsToLastAssistantMessage(
                 db,
@@ -760,8 +756,8 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         }
         console.error("[chat/stream] error:", safeErrorLog(err));
         const message = safeErrorMessage(err, "Stream error");
-        const errorEvents = err instanceof AssistantStreamError
-            ? stripTransientAssistantEvents(err.events)
+                const errorEvents = err instanceof AssistantStreamError
+            ? err.events
             : [{ type: "error" as const, message }];
         const errorFullText =
             err instanceof AssistantStreamError ? err.fullText : "";

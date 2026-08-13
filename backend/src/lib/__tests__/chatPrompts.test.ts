@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { SYSTEM_PROMPT, buildSystemPrompt } from "../chat/prompts";
-import { COURTLISTENER_SYSTEM_PROMPT } from "../chat/tools/courtlistenerTools";
 
 describe("buildSystemPrompt", () => {
     it("always contains the core identity and rules", () => {
@@ -36,21 +35,10 @@ describe("buildSystemPrompt", () => {
         }
     });
 
-    it("splices the CourtListener instructions between the two base sections when research is on", () => {
-        const prompt = buildSystemPrompt(true);
-        expect(prompt).toContain(COURTLISTENER_SYSTEM_PROMPT);
-        const researchIdx = prompt.indexOf("US CASE LAW RESEARCH:");
-        const editingIdx = prompt.indexOf("DOCUMENT EDITING:");
-        const afterIdx = prompt.indexOf("DOCUMENT NAMES IN PROSE:");
-        expect(editingIdx).toBeLessThan(researchIdx);
-        expect(researchIdx).toBeLessThan(afterIdx);
-    });
-
-    it("omits the CourtListener instructions entirely when research is off", () => {
+    it("omits legal research instructions entirely", () => {
         const prompt = buildSystemPrompt(false);
         expect(prompt).not.toContain("US CASE LAW RESEARCH");
-        expect(prompt).not.toContain("courtlistener");
-        // Both base sections are still present and in order.
+        // Base sections are still present and in order.
         const editingIdx = prompt.indexOf("DOCUMENT EDITING:");
         const afterIdx = prompt.indexOf("DOCUMENT NAMES IN PROSE:");
         expect(editingIdx).toBeGreaterThan(-1);

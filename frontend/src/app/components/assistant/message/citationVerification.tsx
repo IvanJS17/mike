@@ -29,7 +29,6 @@ const PRESENTATION: Record<
 export function citationVerificationState(
   citation: Citation,
 ): CitationVerificationDisplayState | null {
-  if (citation.kind === "case") return null;
   return citation.verified === false ? "unverified" : "verified";
 }
 

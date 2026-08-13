@@ -267,11 +267,10 @@ export function buildMessages(
   }[],
   systemPromptExtra?: string,
   docIndex?: DocIndex,
-  includeResearchTools = true,
   nonce?: string,
 ) {
   const formatted: unknown[] = [];
-  let systemContent = buildSystemPrompt(includeResearchTools);
+  let systemContent = buildSystemPrompt();
 
   if (systemPromptExtra) {
     systemContent += `\n\n${systemPromptExtra.trim()}`;
@@ -336,10 +335,6 @@ export function extractCitations(
   return parseCitations(fullText).map((c) =>
     createCitation(c, docIndex),
   );
-}
-
-export function stripTransientAssistantEvents(events: AssistantEvent[]) {
-  return events.filter((event) => event.type !== "case_opinions");
 }
 
 function cleanAskInputResponseId(value: unknown) {
@@ -479,7 +474,7 @@ export function buildCancelledAssistantMessage(args: {
   buildCitations: (fullText: string, events: AssistantEvent[]) => unknown[];
 }) {
   const events = appendCancelledAssistantEvent(
-    stripTransientAssistantEvents(args.events),
+    args.events,
   );
   return {
     events,

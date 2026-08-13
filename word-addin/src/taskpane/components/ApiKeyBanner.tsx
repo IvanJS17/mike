@@ -8,10 +8,9 @@ const DISMISS_KEY = "apiKeyBannerDismissed";
 // Providers that back a chat model — mirrors the web app's ApiKeyBanner. If
 // none is configured the backend can't answer for real, so every chat/action
 // fails with an authentication error. @mike/core's API_KEY_PROVIDERS also
-// lists "openrouter" and "courtlistener", which this banner intentionally omits
-// (courtlistener is a case-law search key, not a chat model; openrouter was
-// never surfaced here) — filter to the chat providers the banner has always
-// checked so its show/hide behaviour is unchanged.
+// lists "openrouter", which this banner intentionally omits (it was never
+// surfaced here) — filter to the chat providers the banner has always checked
+// so its show/hide behaviour is unchanged.
 const MODEL_PROVIDERS = API_KEY_PROVIDERS.filter(
   (p) => p === "claude" || p === "gemini" || p === "openai"
 );

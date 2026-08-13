@@ -46,7 +46,6 @@ export type UserApiKeys = {
     deepseek?: string | null;
     "opencode-zen"?: string | null;
     "opencode-go"?: string | null;
-    courtlistener?: string | null;
 };
 
 export type StreamChatParams = {

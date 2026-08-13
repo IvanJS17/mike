@@ -344,11 +344,10 @@ export async function updateUserMfaOnLogin(
     });
 }
 
-// MERGE-REVIEW: upstream defined ApiKeyProvider/ApiKeySource locally with the
-// extra "openrouter" and "courtlistener" providers. The fork sources these
-// types from @mike/core (imported above), so the local redefinition is dropped
-// to keep a single source of truth — @mike/core's ApiKeyProvider should be
-// extended with "openrouter" and "courtlistener" to match the backend schema.
+// MERGE-REVIEW: upstream defined ApiKeyProvider/ApiKeySource locally. The fork
+// sources these types from @mike/core (imported above), so the local
+// redefinition is dropped to keep a single source of truth — @mike/core's
+// ApiKeyProvider should match the backend schema (openrouter included).
 export type ApiKeyState = Record<
     ApiKeyProvider,
     {
@@ -1133,32 +1132,6 @@ export async function generateChatTitle(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message }),
     });
-}
-
-export type CaseLawOpinion = {
-    opinionId: number | null;
-    apiUrl?: string | null;
-    type: string | null;
-    author: string | null;
-    url: string | null;
-    text?: string | null;
-    html?: string | null;
-};
-
-export async function getCourtlistenerOpinions(
-    clusterId: number,
-): Promise<CaseLawOpinion[]> {
-    const result = await apiRequest<{ opinions: CaseLawOpinion[] }>(
-        "/case-law/case-opinions",
-        {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                clusterId,
-            }),
-        },
-    );
-    return result.opinions;
 }
 
 export async function streamChat(payload: {

@@ -21,13 +21,6 @@ export function toolCallLabel(name: string): string {
     if (name === "read_workflow") return "Loading workflow...";
     if (name === "list_workflows") return "Loading workflows...";
     if (name === "list_documents") return "Loading documents...";
-    if (name === "courtlistener_search_case_law")
-        return "Searching case law...";
-    if (name === "courtlistener_get_cases") return "Fetching cases...";
-    if (name === "courtlistener_find_in_case") return "Searching case...";
-    if (name === "courtlistener_read_case") return "Reading case...";
-    if (name === "courtlistener_verify_citations")
-        return "Verifying citations...";
     if (name.startsWith("mcp_")) return "Using connector...";
     return name ? `Running ${name}...` : "Working...";
 }
