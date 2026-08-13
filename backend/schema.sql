@@ -1411,3 +1411,24 @@ grant select, insert, update, delete on public.workspaces to authenticated;
 grant select, insert, update, delete on public.workspace_memberships to authenticated;
 grant select, insert, update, delete on public.matters to authenticated;
 grant select, insert, update, delete on public.matter_memberships to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- W1.6 RLS hardening: every public table has row-level security enabled
+-- (backend uses service_role which bypasses RLS; browser roles hold no grants).
+-- ---------------------------------------------------------------------------
+alter table public.user_profiles enable row level security;
+alter table public.projects enable row level security;
+alter table public.project_subfolders enable row level security;
+alter table public.library_folders enable row level security;
+alter table public.documents enable row level security;
+alter table public.document_versions enable row level security;
+alter table public.document_edits enable row level security;
+alter table public.workflows enable row level security;
+alter table public.hidden_workflows enable row level security;
+alter table public.workflow_shares enable row level security;
+alter table public.chats enable row level security;
+alter table public.chat_messages enable row level security;
+alter table public.tabular_reviews enable row level security;
+alter table public.tabular_cells enable row level security;
+alter table public.tabular_review_chats enable row level security;
+alter table public.tabular_review_chat_messages enable row level security;
