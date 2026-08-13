@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Users } from "lucide-react";
 import { Modal } from "@/app/components/modals/Modal";
 import { ModalFieldLabel } from "@/app/components/modals/ModalFieldLabel";
 import { ModalTextInput } from "@/app/components/modals/ModalTextInput";
@@ -14,7 +13,6 @@ interface ProjectDetailsModalProps {
     canEdit: boolean;
     onClose: () => void;
     onSave: (values: { name: string; cmNumber: string; practice: string }) => Promise<void>;
-    onShareProject?: () => void;
 }
 
 export function ProjectDetailsModal({
@@ -23,7 +21,6 @@ export function ProjectDetailsModal({
     canEdit,
     onClose,
     onSave,
-    onShareProject,
 }: ProjectDetailsModalProps) {
     const [nameDraft, setNameDraft] = useState("");
     const [cmDraft, setCmDraft] = useState("");
@@ -82,15 +79,6 @@ export function ProjectDetailsModal({
             open={open}
             onClose={onClose}
             breadcrumbs={["Projects", project.name, "Details"]}
-            secondaryAction={
-                onShareProject
-                    ? {
-                          label: "Share Project",
-                          icon: <Users className="h-4 w-4" />,
-                          onClick: onShareProject,
-                      }
-                    : undefined
-            }
             footerStatus={
                 error ? (
                     <span className="text-sm text-red-600">{error}</span>

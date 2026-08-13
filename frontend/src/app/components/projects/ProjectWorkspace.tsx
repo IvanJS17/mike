@@ -16,7 +16,6 @@ import {
     createTabularReview,
     deleteProject,
     getProject,
-    getProjectPeople,
     listProjectChats,
     updateProject,
 } from "@/app/lib/mikeApi";
@@ -30,7 +29,6 @@ import { TableToolbar } from "@/app/components/shared/TableToolbar";
 import { NewTRModal } from "@/app/components/tabular/NewTRModal";
 import { ConfirmPopup } from "@/app/components/popups/ConfirmPopup";
 import { OwnerOnlyPopup } from "@/app/components/popups/OwnerOnlyPopup";
-import { PeopleModal } from "@/app/components/modals/PeopleModal";
 import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
 import { useAuth } from "@/app/contexts/AuthContext";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
@@ -109,7 +107,6 @@ export function ProjectWorkspaceProvider({
     >({ documents: "", assistant: "", reviews: "" });
     const [projectChats, setProjectChats] = useState<Chat[] | null>(null);
     const [projectChatsLoading, setProjectChatsLoading] = useState(false);
-    const [peopleModalOpen, setPeopleModalOpen] = useState(false);
     const [projectDetailsOpen, setProjectDetailsOpen] = useState(false);
     const [ownerOnlyAction, setOwnerOnlyAction] = useState<string | null>(null);
     const [deleteProjectConfirmOpen, setDeleteProjectConfirmOpen] =
@@ -388,7 +385,6 @@ export function ProjectWorkspaceProvider({
                     onOpenDetails={() => setProjectDetailsOpen(true)}
                     onDeleteProject={requestProjectDelete}
                     onSearchChange={setSearch}
-                    onOpenPeople={() => setPeopleModalOpen(true)}
                     onNewChat={() => void createChat()}
                     onNewReview={openNewReview}
                     onAddDocuments={addDocumentsHeaderAction.action}
@@ -420,10 +416,6 @@ export function ProjectWorkspaceProvider({
                     canEdit={project?.is_owner !== false}
                     onClose={() => setProjectDetailsOpen(false)}
                     onSave={handleProjectDetailsSave}
-                    onShareProject={() => {
-                        setProjectDetailsOpen(false);
-                        setPeopleModalOpen(true);
-                    }}
                 />
 
                 <ConfirmPopup
@@ -447,42 +439,6 @@ export function ProjectWorkspaceProvider({
                     onConfirm={() => void confirmProjectDelete()}
                 />
 
-                {project && (
-                    <PeopleModal
-                        open={peopleModalOpen}
-                        onClose={() => setPeopleModalOpen(false)}
-                        resource={project}
-                        fetchPeople={getProjectPeople}
-                        currentUserEmail={user?.email ?? null}
-                        breadcrumb={[
-                            "Projects",
-                            project.name +
-                                (project.cm_number
-                                    ? ` (${project.cm_number})`
-                                    : ""),
-                            "People",
-                        ]}
-                        onSharedWithChange={
-                            project.is_owner === false
-                                ? undefined
-                                : async (next) => {
-                                      const updated = await updateProject(
-                                          projectId,
-                                          { shared_with: next },
-                                      );
-                                      setProject((prev) =>
-                                          prev
-                                              ? {
-                                                    ...prev,
-                                                    shared_with:
-                                                        updated.shared_with,
-                                                }
-                                              : prev,
-                                      );
-                                  }
-                        }
-                    />
-                )}
             </div>
         </ProjectWorkspaceContext.Provider>
     );

@@ -233,16 +233,12 @@ create table if not exists public.projects (
   cm_number text,
   practice text,
   visibility text not null default 'private',
-  shared_with jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
 create index if not exists idx_projects_user
   on public.projects(user_id);
-
-create index if not exists projects_shared_with_idx
-  on public.projects using gin (shared_with);
 
 create table if not exists public.project_subfolders (
   id uuid primary key default gen_random_uuid(),
@@ -416,26 +412,8 @@ create table if not exists public.hidden_workflows (
 create index if not exists idx_hidden_workflows_user
   on public.hidden_workflows(user_id);
 
-create table if not exists public.workflow_shares (
-  id uuid primary key default gen_random_uuid(),
-  workflow_id uuid not null references public.workflows(id) on delete cascade,
-  shared_by_user_id text not null,
-  shared_with_email text not null,
-  allow_edit boolean not null default false,
-  created_at timestamptz not null default now(),
-  constraint workflow_shares_workflow_email_unique
-    unique(workflow_id, shared_with_email)
-);
-
-create index if not exists workflow_shares_workflow_id_idx
-  on public.workflow_shares(workflow_id);
-
-create index if not exists workflow_shares_email_idx
-  on public.workflow_shares(shared_with_email);
-
 create or replace function public.get_workflows_overview(
   p_user_id text,
-  p_user_email text default null,
   p_type text default null
 )
 returns table (
@@ -451,80 +429,29 @@ returns table (
   is_system boolean,
   created_at timestamptz,
   allow_edit boolean,
-  is_owner boolean,
-  shared_by_name text
+  is_owner boolean
 )
 language sql
 stable
 as $$
-  with owned as (
-    select
-      w.id,
-      w.user_id::text as user_id,
-      w.title,
-      w.type,
-      w.prompt_md,
-      w.columns_config,
-      w.language,
-      w.practice,
-      w.jurisdictions,
-      false as is_system,
-      w.created_at,
-      true as allow_edit,
-      true as is_owner,
-      null::text as shared_by_name,
-      0 as sort_bucket
-    from public.workflows w
-    where w.user_id::text = p_user_id
-      and (p_type is null or w.type = p_type)
-  ),
-  shared as (
-    select
-      w.id,
-      w.user_id::text as user_id,
-      w.title,
-      w.type,
-      w.prompt_md,
-      w.columns_config,
-      w.language,
-      w.practice,
-      w.jurisdictions,
-      false as is_system,
-      w.created_at,
-      ws.allow_edit,
-      false as is_owner,
-      nullif(trim(up.display_name), '') as shared_by_name,
-      1 as sort_bucket
-    from public.workflow_shares ws
-    join public.workflows w
-      on w.id = ws.workflow_id
-    left join public.user_profiles up
-      on up.user_id::text = ws.shared_by_user_id::text
-    where lower(ws.shared_with_email) = lower(coalesce(p_user_email, ''))
-      and (p_type is null or w.type = p_type)
-  ),
-  visible_workflows as (
-    select * from owned
-    union all
-    select * from shared
-  )
   select
-    vw.id,
-    vw.user_id,
-    vw.title,
-    vw.type,
-    vw.prompt_md,
-    vw.columns_config,
-    vw.language,
-    vw.practice,
-    vw.jurisdictions,
-    vw.is_system,
-    vw.created_at,
-    vw.allow_edit,
-    vw.is_owner,
-    vw.shared_by_name
-  from visible_workflows vw
-  order by vw.sort_bucket asc, vw.created_at desc;
+    w.id,
+    w.user_id::text as user_id,
+    w.title,
+    w.type,
+    w.prompt_md,
+    w.columns_config,
+    w.language,
+    w.practice,
+    w.jurisdictions,
+    false as is_system,
+    w.created_at,
+    true as allow_edit,
+    true as is_owner
+  from public.workflows w
+  where w.user_id::text = p_user_id
+    and (p_type is null or w.type = p_type)
+  order by w.created_at desc;
 $$;
 
 -- ---------------------------------------------------------------------------
@@ -633,7 +560,6 @@ create table if not exists public.tabular_reviews (
   workflow_id uuid references public.workflows(id) on delete set null,
   practice text,
   document_grouping text not null default 'document' check (document_grouping in ('document', 'folder')),
-  shared_with jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -644,15 +570,11 @@ create index if not exists idx_tabular_reviews_user
 create index if not exists idx_tabular_reviews_project
   on public.tabular_reviews(project_id);
 
-create index if not exists tabular_reviews_shared_with_idx
-  on public.tabular_reviews using gin (shared_with);
-
 create index if not exists tabular_reviews_title_trgm_idx
   on public.tabular_reviews using gin (lower(title) gin_trgm_ops);
 
 create or replace function public.get_projects_overview(
-  p_user_id text,
-  p_user_email text default null
+  p_user_id text
 )
 returns table (
   id uuid,
@@ -660,7 +582,6 @@ returns table (
   name text,
   cm_number text,
   practice text,
-  shared_with jsonb,
   created_at timestamptz,
   updated_at timestamptz,
   is_owner boolean,
@@ -677,11 +598,6 @@ as $$
     select p.*
     from public.projects p
     where p.user_id = p_user_id
-       or (
-        coalesce(p_user_email, '') <> ''
-        and p.user_id <> p_user_id
-        and p.shared_with @> jsonb_build_array(p_user_email)
-      )
   ),
   document_counts as (
     select d.project_id, count(*)::integer as document_count
@@ -707,7 +623,6 @@ as $$
     vp.name,
     vp.cm_number,
     vp.practice,
-    vp.shared_with,
     vp.created_at,
     vp.updated_at,
     vp.user_id = p_user_id as is_owner,
@@ -778,7 +693,6 @@ create index if not exists idx_tabular_cells_review_row
 
 create or replace function public.get_tabular_reviews_overview(
   p_user_id text,
-  p_user_email text,
   p_project_id text,
   p_scope text,
   p_limit integer,
@@ -795,7 +709,6 @@ returns table (
   columns_config jsonb,
   document_ids jsonb,
   workflow_id uuid,
-  shared_with jsonb,
   created_at timestamptz,
   updated_at timestamptz,
   is_owner boolean,
@@ -804,17 +717,7 @@ returns table (
 language sql
 stable
 as $$
-  with accessible_projects as (
-    select p.id
-    from public.projects p
-    where p.user_id = p_user_id
-       or (
-        coalesce(p_user_email, '') <> ''
-        and p.user_id <> p_user_id
-        and p.shared_with @> jsonb_build_array(p_user_email)
-      )
-  ),
-  visible_reviews as (
+  with visible_reviews as (
     select tr.*
     from public.tabular_reviews tr
     where (p_project_id is null or tr.project_id::text = p_project_id)
@@ -840,27 +743,7 @@ as $$
           '%'
           escape '\'
       )
-      and (
-        p_project_id is null
-        or exists (
-          select 1
-          from accessible_projects ap
-          where ap.id::text = p_project_id
-        )
-      )
-      and (
-        tr.user_id = p_user_id
-        or (
-          tr.project_id in (select ap.id from accessible_projects ap)
-          and tr.user_id <> p_user_id
-        )
-        or (
-          p_project_id is null
-          and coalesce(p_user_email, '') <> ''
-          and tr.user_id <> p_user_id
-          and tr.shared_with @> jsonb_build_array(p_user_email)
-        )
-      )
+      and tr.user_id = p_user_id
   ),
   cell_document_counts as (
     select
@@ -897,7 +780,6 @@ as $$
     vr.columns_config,
     vr.document_ids,
     vr.workflow_id,
-    vr.shared_with,
     vr.created_at,
     vr.updated_at,
     vr.user_id = p_user_id as is_owner,
@@ -946,7 +828,6 @@ $$;
 
 create or replace function public.get_tabular_reviews_overview(
   p_user_id text,
-  p_user_email text default null,
   p_project_id text default null
 )
 returns table (
@@ -957,7 +838,6 @@ returns table (
   columns_config jsonb,
   document_ids jsonb,
   workflow_id uuid,
-  shared_with jsonb,
   created_at timestamptz,
   updated_at timestamptz,
   is_owner boolean,
@@ -969,7 +849,6 @@ as $$
   select *
   from public.get_tabular_reviews_overview(
     p_user_id,
-    p_user_email,
     p_project_id,
     'all',
     2147483647,
@@ -982,7 +861,6 @@ $$;
 
 create or replace function public.get_tabular_review_ids_overview(
   p_user_id text,
-  p_user_email text,
   p_project_id text,
   p_scope text,
   p_search_term text,
@@ -996,16 +874,6 @@ returns table (
 language sql
 stable
 as $$
-  with accessible_projects as (
-    select p.id
-    from public.projects p
-    where p.user_id = p_user_id
-       or (
-        coalesce(p_user_email, '') <> ''
-        and p.user_id <> p_user_id
-        and p.shared_with @> jsonb_build_array(p_user_email)
-      )
-  )
   select tr.id, tr.user_id
   from public.tabular_reviews tr
   where (p_project_id is null or tr.project_id::text = p_project_id)
@@ -1031,27 +899,7 @@ as $$
         '%'
         escape '\'
     )
-    and (
-      p_project_id is null
-      or exists (
-        select 1
-        from accessible_projects ap
-        where ap.id::text = p_project_id
-      )
-    )
-    and (
-      tr.user_id = p_user_id
-      or (
-        tr.project_id in (select ap.id from accessible_projects ap)
-        and tr.user_id <> p_user_id
-      )
-      or (
-        p_project_id is null
-        and coalesce(p_user_email, '') <> ''
-        and tr.user_id <> p_user_id
-        and tr.shared_with @> jsonb_build_array(p_user_email)
-      )
-    )
+    and tr.user_id = p_user_id
   order by tr.created_at desc, tr.id asc
   limit greatest(coalesce(p_limit, 1000), 1)
   offset greatest(coalesce(p_offset, 0), 0);
@@ -1102,7 +950,6 @@ revoke all on public.document_versions from anon, authenticated;
 revoke all on public.document_edits from anon, authenticated;
 revoke all on public.workflows from anon, authenticated;
 revoke all on public.hidden_workflows from anon, authenticated;
-revoke all on public.workflow_shares from anon, authenticated;
 revoke all on public.chats from anon, authenticated;
 revoke all on public.chat_messages from anon, authenticated;
 revoke all on public.tabular_reviews from anon, authenticated;
@@ -1426,7 +1273,6 @@ alter table public.document_versions enable row level security;
 alter table public.document_edits enable row level security;
 alter table public.workflows enable row level security;
 alter table public.hidden_workflows enable row level security;
-alter table public.workflow_shares enable row level security;
 alter table public.chats enable row level security;
 alter table public.chat_messages enable row level security;
 alter table public.tabular_reviews enable row level security;

@@ -28,10 +28,6 @@ import {
   contentTypeForDocumentType,
   shouldConvertToPdf,
 } from "../lib/documentTypes";
-import {
-  findMissingUserEmails,
-  loadProfileUsersByEmail,
-} from "../lib/userLookup";
 
 export const projectsRouter = Router();
 
@@ -166,13 +162,11 @@ async function attachChatCreatorLabels(
 // and a fixed number of queries regardless of project count.
 projectsRouter.get("/", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
   const includeDocuments = req.query.include === "documents";
   const db = createServerSupabase();
 
   const { data, error } = await db.rpc("get_projects_overview", {
     p_user_id: userId,
-    p_user_email: userEmail ?? null,
   });
   if (error) return void res.status(500).json({ detail: error.message });
 
@@ -238,40 +232,14 @@ projectsRouter.get("/", requireAuth, async (req, res) => {
 // POST /projects
 projectsRouter.post("/", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
-  const { name, cm_number, practice, shared_with } = req.body as {
+  const { name, cm_number, practice } = req.body as {
     name: string;
     cm_number?: string;
     practice?: string;
-    shared_with?: string[];
   };
   if (!name?.trim())
     return void res.status(400).json({ detail: "name is required" });
-  const normalizedUserEmail = userEmail?.trim().toLowerCase();
-  const cleanedSharedWith: string[] = [];
-  const seenSharedEmails = new Set<string>();
-  if (Array.isArray(shared_with)) {
-    for (const raw of shared_with) {
-      if (typeof raw !== "string") continue;
-      const e = raw.trim().toLowerCase();
-      if (!e || seenSharedEmails.has(e)) continue;
-      if (normalizedUserEmail && e === normalizedUserEmail) {
-        return void res
-          .status(400)
-          .json({ detail: "You cannot share a project with yourself." });
-      }
-      seenSharedEmails.add(e);
-      cleanedSharedWith.push(e);
-    }
-  }
-
   const db = createServerSupabase();
-  const missingSharedUsers = await findMissingUserEmails(db, cleanedSharedWith);
-  if (missingSharedUsers.length > 0) {
-    return void res.status(400).json({
-      detail: `${missingSharedUsers[0]} does not belong to a Mike user.`,
-    });
-  }
 
   const { data, error } = await db
     .from("projects")
@@ -280,7 +248,6 @@ projectsRouter.post("/", requireAuth, async (req, res) => {
       name: name.trim(),
       cm_number: normalizeOptionalString(cm_number),
       practice: normalizeOptionalString(practice),
-      shared_with: cleanedSharedWith,
     })
     .select("*")
     .single();
@@ -291,7 +258,6 @@ projectsRouter.post("/", requireAuth, async (req, res) => {
 // GET /projects/:projectId
 projectsRouter.get("/:projectId", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string;
   const { projectId } = req.params;
   const db = createServerSupabase();
 
@@ -299,16 +265,9 @@ projectsRouter.get("/:projectId", requireAuth, async (req, res) => {
     .from("projects")
     .select("*")
     .eq("id", projectId)
+    .eq("user_id", userId)
     .single();
   if (error || !project)
-    return void res.status(404).json({ detail: "Project not found" });
-
-  const canAccess =
-    project.user_id === userId ||
-    (userEmail &&
-      Array.isArray(project.shared_with) &&
-      project.shared_with.includes(userEmail));
-  if (!canAccess)
     return void res.status(404).json({ detail: "Project not found" });
 
   const [{ data: docs }, { data: folderData }] = await Promise.all([
@@ -331,56 +290,9 @@ projectsRouter.get("/:projectId", requireAuth, async (req, res) => {
   });
 });
 
-// GET /projects/:projectId/people
-// Resolve the owner + every shared member to {email, display_name}. Used
-// by the People modal so the UI can show display names where available
-// and tag the current user as "You".
-projectsRouter.get("/:projectId/people", requireAuth, async (req, res) => {
-  const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
-  const { projectId } = req.params;
-  const db = createServerSupabase();
-
-  const { data: project } = await db
-    .from("projects")
-    .select("id, user_id, shared_with")
-    .eq("id", projectId)
-    .single();
-  if (!project)
-    return void res.status(404).json({ detail: "Project not found" });
-
-  const isOwner = project.user_id === userId;
-  const sharedWith = (Array.isArray(project.shared_with)
-    ? (project.shared_with as string[])
-    : []
-  ).map((e) => e.toLowerCase());
-  const isShared =
-    !!userEmail && sharedWith.includes(userEmail.toLowerCase());
-  if (!isOwner && !isShared)
-    return void res.status(404).json({ detail: "Project not found" });
-
-  // Use the mirrored profile email so sharing checks do not scan auth.users.
-  const { userByEmail, userById } = await loadProfileUsersByEmail(db);
-
-  const ownerInfo = userById.get(project.user_id as string);
-  const owner = {
-    user_id: project.user_id,
-    email: ownerInfo?.email ?? null,
-    display_name: ownerInfo?.display_name ?? null,
-  };
-  const members = sharedWith.map((email) => {
-    const u = userByEmail.get(email);
-    const display_name = u?.display_name ?? null;
-    return { email, display_name };
-  });
-
-  res.json({ owner, members });
-});
-
 // PATCH /projects/:projectId
 projectsRouter.patch("/:projectId", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
   const { projectId } = req.params;
   const updates: Record<string, unknown> = {};
   if (req.body.name != null) updates.name = req.body.name;
@@ -388,38 +300,7 @@ projectsRouter.patch("/:projectId", requireAuth, async (req, res) => {
   if ("practice" in req.body) {
     updates.practice = normalizeOptionalString(req.body.practice);
   }
-  if (Array.isArray(req.body.shared_with)) {
-    // Normalise: lowercase + dedupe + drop empties.
-    const normalizedUserEmail = userEmail?.trim().toLowerCase();
-    const seen = new Set<string>();
-    const cleaned: string[] = [];
-    for (const raw of req.body.shared_with) {
-      if (typeof raw !== "string") continue;
-      const e = raw.trim().toLowerCase();
-      if (!e || seen.has(e)) continue;
-      if (normalizedUserEmail && e === normalizedUserEmail) {
-        return void res
-          .status(400)
-          .json({ detail: "You cannot share a project with yourself." });
-      }
-      seen.add(e);
-      cleaned.push(e);
-    }
-    updates.shared_with = cleaned;
-  }
-
   const db = createServerSupabase();
-  if (Array.isArray(updates.shared_with)) {
-    const missingSharedUsers = await findMissingUserEmails(
-      db,
-      updates.shared_with as string[],
-    );
-    if (missingSharedUsers.length > 0) {
-      return void res.status(400).json({
-        detail: `${missingSharedUsers[0]} does not belong to a Mike user.`,
-      });
-    }
-  }
 
   const { data, error } = await db
     .from("projects")
@@ -464,11 +345,10 @@ projectsRouter.delete("/:projectId", requireAuth, async (req, res) => {
 // GET /projects/:projectId/documents
 projectsRouter.get("/:projectId/documents", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
   const { projectId } = req.params;
   const db = createServerSupabase();
 
-  const access = await checkProjectAccess(projectId, userId, userEmail, db);
+  const access = await checkProjectAccess(projectId, userId, db);
   if (!access.ok)
     return void res.status(404).json({ detail: "Project not found" });
 
@@ -497,11 +377,10 @@ projectsRouter.get(
   requireMfaIfEnrolled,
   async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { projectId } = req.params;
     const db = createServerSupabase();
 
-    const access = await checkProjectAccess(projectId, userId, userEmail, db);
+    const access = await checkProjectAccess(projectId, userId, db);
     if (!access.ok)
       return void res.status(404).json({ detail: "Project not found" });
 
@@ -531,11 +410,10 @@ projectsRouter.post(
   requireAuth,
   async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { projectId, documentId } = req.params;
     const db = createServerSupabase();
 
-    const access = await checkProjectAccess(projectId, userId, userEmail, db);
+    const access = await checkProjectAccess(projectId, userId, db);
     if (!access.ok)
       return void res.status(404).json({ detail: "Project not found" });
 
@@ -713,11 +591,10 @@ projectsRouter.post(
 // PATCH /projects/:projectId/documents/:documentId — rename a project document
 projectsRouter.patch("/:projectId/documents/:documentId", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
   const { projectId, documentId } = req.params;
   const db = createServerSupabase();
 
-  const access = await checkProjectAccess(projectId, userId, userEmail, db);
+  const access = await checkProjectAccess(projectId, userId, db);
   if (!access.ok)
     return void res.status(404).json({ detail: "Project not found" });
 
@@ -778,11 +655,10 @@ projectsRouter.post(
   singleFileUpload("file"),
   async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { projectId } = req.params;
     const db = createServerSupabase();
 
-    const access = await checkProjectAccess(projectId, userId, userEmail, db);
+    const access = await checkProjectAccess(projectId, userId, db);
     if (!access.ok)
       return void res.status(404).json({ detail: "Project not found" });
 
@@ -797,11 +673,10 @@ projectsRouter.post(
 // in the global list.
 projectsRouter.get("/:projectId/chats", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
   const { projectId } = req.params;
   const db = createServerSupabase();
 
-  const access = await checkProjectAccess(projectId, userId, userEmail, db);
+  const access = await checkProjectAccess(projectId, userId, db);
   if (!access.ok)
     return void res.status(404).json({ detail: "Project not found" });
 
@@ -821,13 +696,12 @@ projectsRouter.get("/:projectId/chats", requireAuth, async (req, res) => {
 // POST /projects/:projectId/folders
 projectsRouter.post("/:projectId/folders", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
   const { projectId } = req.params;
   const { name, parent_folder_id } = req.body as { name: string; parent_folder_id?: string | null };
   if (!name?.trim()) return void res.status(400).json({ detail: "name is required" });
 
   const db = createServerSupabase();
-  const access = await checkProjectAccess(projectId, userId, userEmail, db);
+  const access = await checkProjectAccess(projectId, userId, db);
   if (!access.ok) return void res.status(404).json({ detail: "Project not found" });
 
   // Verify parent folder belongs to this project
@@ -849,12 +723,11 @@ projectsRouter.post("/:projectId/folders", requireAuth, async (req, res) => {
 // PATCH /projects/:projectId/folders/:folderId
 projectsRouter.patch("/:projectId/folders/:folderId", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
   const { projectId, folderId } = req.params;
   const body = req.body as { name?: string; parent_folder_id?: string | null };
 
   const db = createServerSupabase();
-  const access = await checkProjectAccess(projectId, userId, userEmail, db);
+  const access = await checkProjectAccess(projectId, userId, db);
   if (!access.ok) return void res.status(404).json({ detail: "Project not found" });
 
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
@@ -887,11 +760,10 @@ projectsRouter.patch("/:projectId/folders/:folderId", requireAuth, async (req, r
 // DELETE /projects/:projectId/folders/:folderId
 projectsRouter.delete("/:projectId/folders/:folderId", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
   const { projectId, folderId } = req.params;
   const db = createServerSupabase();
 
-  const access = await checkProjectAccess(projectId, userId, userEmail, db);
+  const access = await checkProjectAccess(projectId, userId, db);
   if (!access.ok) return void res.status(404).json({ detail: "Project not found" });
   if (!access.isOwner) return void res.status(404).json({ detail: "Project not found" });
 
@@ -947,12 +819,11 @@ projectsRouter.delete("/:projectId/folders/:folderId", requireAuth, async (req, 
 // PATCH /projects/:projectId/documents/:documentId/folder — move doc to a folder
 projectsRouter.patch("/:projectId/documents/:documentId/folder", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
   const { projectId, documentId } = req.params;
   const { folder_id } = req.body as { folder_id: string | null };
 
   const db = createServerSupabase();
-  const access = await checkProjectAccess(projectId, userId, userEmail, db);
+  const access = await checkProjectAccess(projectId, userId, db);
   if (!access.ok) return void res.status(404).json({ detail: "Project not found" });
 
   if (folder_id) {

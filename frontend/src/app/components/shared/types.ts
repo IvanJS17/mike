@@ -29,7 +29,6 @@ export interface Project {
   name: string;
   cm_number: string | null;
   practice: string | null;
-  shared_with: string[];
   created_at: string;
   updated_at: string;
   documents?: Document[];
@@ -447,8 +446,6 @@ export interface TabularReview {
   document_grouping?: "document" | "folder";
   workflow_id: string | null;
   practice?: string | null;
-  /** Per-review email list. Used so standalone (project_id null) reviews can be shared directly. */
-  shared_with?: string[];
   /** Server-set: true when the requesting user is the review's creator. */
   is_owner?: boolean;
   created_at: string;
@@ -525,7 +522,6 @@ export interface Workflow {
   columns_config: ColumnConfig[] | null;
   is_system: boolean;
   created_at: string;
-  shared_by_name?: string | null;
   allow_edit?: boolean;
   is_owner?: boolean;
   open_source_submission?: WorkflowOpenSourceSubmission | null;

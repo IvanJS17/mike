@@ -18,7 +18,6 @@ function contentTypeFor(filename: string): string {
 // GET /download/:token
 downloadsRouter.get("/:token", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const info = verifyDownload(req.params.token);
     if (!info)
         return void res.status(404).json({ detail: "Invalid link" });
@@ -52,7 +51,7 @@ downloadsRouter.get("/:token", requireAuth, async (req, res) => {
     if (!doc)
         return void res.status(404).json({ detail: "File not found" });
 
-    const access = await ensureDocAccess(doc, userId, userEmail, db);
+    const access = await ensureDocAccess(doc, userId, db);
     if (!access.ok)
         return void res.status(404).json({ detail: "File not found" });
 

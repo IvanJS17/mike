@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { CheckCircle2, Loader2 } from "lucide-react";
 import { Button } from "@/app/components/ui/button";
@@ -21,33 +21,27 @@ export function InvitePasswordSetup({ onSuccess }: InvitePasswordSetupProps) {
     const inviteType = searchParams.get("type");
     const next = safeNextPath(searchParams.get("next"));
 
-    const [isChecking, setIsChecking] = useState(true);
+    const hasValidToken = !!tokenHash && (!inviteType || inviteType === "invite");
+    const [isChecking, setIsChecking] = useState(() => hasValidToken);
     const [isSetting, setIsSetting] = useState(false);
-    const [checked, setChecked] = useState(false);
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
     const [confirmPassword, setConfirmPassword] = useState("");
-    const [error, setError] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(() =>
+        !hasValidToken
+            ? !tokenHash
+                ? "Missing invitation token."
+                : "Invalid invitation link."
+            : null,
+    );
     const [success, setSuccess] = useState(false);
+    const verifyStartedRef = useRef(false);
 
     useEffect(() => {
-        if (checked) return;
-        setChecked(true);
-
-        if (!tokenHash) {
-            setError("Missing invitation token.");
-            setIsChecking(false);
-            return;
-        }
-        if (inviteType && inviteType !== "invite") {
-            setError("Invalid invitation link.");
-            setIsChecking(false);
-            return;
-        }
+        if (!hasValidToken || verifyStartedRef.current) return;
+        verifyStartedRef.current = true;
 
         async function verifyInvite() {
-            setError(null);
-            setIsChecking(true);
             const { error: verifyError } = await supabase.auth.verifyOtp({
                 token_hash: tokenHash,
                 type: "invite",
@@ -64,7 +58,7 @@ export function InvitePasswordSetup({ onSuccess }: InvitePasswordSetupProps) {
         }
 
         void verifyInvite();
-    }, [checked, tokenHash, inviteType]);
+    }, [hasValidToken, tokenHash]);
 
     const canSetPassword =
         !isChecking &&

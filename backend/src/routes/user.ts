@@ -966,10 +966,9 @@ userRouter.delete(
     requireMfaIfEnrolled,
     async (_req, res) => {
         const userId = res.locals.userId as string;
-        const userEmail = res.locals.userEmail as string | undefined;
         const db = createServerSupabase();
         try {
-            await deleteUserAccountData(db, userId, userEmail);
+            await deleteUserAccountData(db, userId);
             const { error } = await db.auth.admin.deleteUser(userId);
             if (error)
                 return void res.status(500).json({ detail: error.message });

@@ -30,7 +30,7 @@ const PUBLIC_TABLES = [
     "user_api_keys", "user_mcp_connector_tools", "user_mcp_connectors",
     "user_mcp_oauth_states", "user_mcp_oauth_tokens",
     "user_mcp_tool_audit_logs", "user_profiles",
-    "workflow_open_source_submissions", "workflow_shares", "workflows",
+    "workflow_open_source_submissions", "workflows",
 ];
 
 maybeDescribe("Supabase stack — auth contract + RLS deny-all firewall", () => {

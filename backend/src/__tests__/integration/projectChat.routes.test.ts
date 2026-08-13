@@ -130,7 +130,7 @@ describe("POST /projects/:projectId/chat", () => {
         checkProjectAccess.mockResolvedValue({
             ok: true,
             isOwner: true,
-            project: { id: "p1", user_id: "u1", shared_with: null },
+            project: { id: "p1", user_id: "u1" },
         });
         resolveModelRouteForUser.mockImplementation(
             async (_userId: string, route: unknown) => ({

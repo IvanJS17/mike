@@ -56,11 +56,11 @@ function getProjectOwnerLabel(project: Project, currentUserId?: string | null) {
     return (
         project.owner_display_name?.trim() ||
         project.owner_email?.trim() ||
-        "Shared"
+        "Owner"
     );
 }
 
-type ProjectFilter = "all" | "mine" | "shared-with-me";
+type ProjectFilter = "all" | "mine";
 type ProjectSortKey =
     | "name"
     | "cm"
@@ -183,13 +183,9 @@ export function ProjectsOverview() {
         const rows = (
             activeFilter === "all"
                 ? visibleProjects
-                : activeFilter === "mine"
-                  ? visibleProjects.filter(
-                        (p) => p.is_owner ?? p.user_id === user?.id,
-                    )
-                  : visibleProjects.filter(
-                        (p) => !(p.is_owner ?? p.user_id === user?.id),
-                    )
+                : visibleProjects.filter(
+                      (p) => p.is_owner ?? p.user_id === user?.id,
+                  )
         )
             .filter(
                 (p) =>
@@ -307,7 +303,6 @@ export function ProjectsOverview() {
     const filters: { id: ProjectFilter; label: string }[] = [
         { id: "all", label: "All" },
         { id: "mine", label: "Mine" },
-        { id: "shared-with-me", label: "Shared with me" },
     ];
     const nameSortDirection = sort?.key === "name" ? sort.direction : null;
     const cmSortDirection = sort?.key === "cm" ? sort.direction : null;

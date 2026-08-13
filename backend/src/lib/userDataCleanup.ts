@@ -115,44 +115,6 @@ async function deleteUserStoragePrefix(userId: string) {
     }
 }
 
-async function removeEmailFromSharedWith(
-    db: Db,
-    table: "projects" | "tabular_reviews",
-    email: string | null | undefined,
-) {
-    const normalizedEmail = email?.trim().toLowerCase();
-    if (!normalizedEmail) return;
-
-    const { data, error } = await db
-        .from(table)
-        .select("id, shared_with")
-        .filter("shared_with", "cs", JSON.stringify([normalizedEmail]));
-    await throwIfError(error, `Failed to load shared ${table}`);
-
-    const updates = (data ?? [])
-        .map((row) => {
-            const sharedWith = Array.isArray(row.shared_with)
-                ? row.shared_with.filter(
-                      (value) =>
-                          typeof value !== "string" ||
-                          value.trim().toLowerCase() !== normalizedEmail,
-                  )
-                : [];
-            return { id: row.id as string, sharedWith };
-        })
-        .filter((row) => row.id);
-
-    await Promise.all(
-        updates.map(async ({ id, sharedWith }) => {
-            const { error: updateError } = await db
-                .from(table)
-                .update({ shared_with: sharedWith })
-                .eq("id", id);
-            await throwIfError(updateError, `Failed to update shared ${table}`);
-        }),
-    );
-}
-
 export async function deleteAllUserChats(db: Db, userId: string) {
     const [assistantChats, tabularChats] = await Promise.all([
         db.from("chats").delete().eq("user_id", userId),
@@ -297,7 +259,6 @@ export async function deleteUserProjects(
 export async function deleteUserAccountData(
     db: Db,
     userId: string,
-    userEmail?: string | null,
 ) {
     const ownedProjectIds = await getOwnedProjectIds(db, userId);
     const documentIds = await getDocumentIdsForAccountDeletion(
@@ -307,8 +268,6 @@ export async function deleteUserAccountData(
     );
 
     await Promise.all([
-        removeEmailFromSharedWith(db, "projects", userEmail),
-        removeEmailFromSharedWith(db, "tabular_reviews", userEmail),
         deleteDocumentVersionFiles(db, documentIds),
         deleteUserStoragePrefix(userId),
     ]);
@@ -325,13 +284,6 @@ export async function deleteUserAccountData(
             .from("workflow_open_source_submissions")
             .delete()
             .eq("submitted_by_user_id", userId),
-        db.from("workflow_shares").delete().eq("shared_by_user_id", userId),
-        userEmail
-            ? db
-                  .from("workflow_shares")
-                  .delete()
-                  .eq("shared_with_email", userEmail.trim().toLowerCase())
-            : Promise.resolve({ error: null }),
         db.from("workflows").delete().eq("user_id", userId),
         db.from("projects").delete().eq("user_id", userId),
     ];

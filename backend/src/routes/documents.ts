@@ -116,7 +116,6 @@ documentsRouter.delete("/:documentId", requireAuth, async (req, res) => {
 // document's current_version_id.
 documentsRouter.get("/:documentId/display", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string;
   const { documentId } = req.params;
   const versionIdParam =
     typeof req.query.version_id === "string" ? req.query.version_id : null;
@@ -129,7 +128,7 @@ documentsRouter.get("/:documentId/display", requireAuth, async (req, res) => {
     .single();
   if (!doc)
     return void res.status(404).json({ detail: "Document not found" });
-  const access = await ensureDocAccess(doc, userId, userEmail, db);
+  const access = await ensureDocAccess(doc, userId, db);
   if (!access.ok)
     return void res.status(404).json({ detail: "Document not found" });
 
@@ -177,7 +176,6 @@ documentsRouter.get("/:documentId/display", requireAuth, async (req, res) => {
 // POST /single-documents/download-zip
 documentsRouter.post("/download-zip", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
   const { document_ids } = req.body as { document_ids?: string[] };
 
   if (!Array.isArray(document_ids) || document_ids.length === 0)
@@ -197,7 +195,6 @@ documentsRouter.post("/download-zip", requireAuth, async (req, res) => {
       access: await ensureDocAccess(
         d as { user_id: string; project_id: string | null },
         userId,
-        userEmail,
         db,
       ),
     })),
@@ -239,7 +236,6 @@ documentsRouter.post("/download-zip", requireAuth, async (req, res) => {
 // Otherwise falls back to documents.current_version_id, else the original upload.
 documentsRouter.get("/:documentId/url", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
   const { documentId } = req.params;
   const versionIdParam = typeof req.query.version_id === "string" ? req.query.version_id : null;
   const db = createServerSupabase();
@@ -251,7 +247,7 @@ documentsRouter.get("/:documentId/url", requireAuth, async (req, res) => {
     .single();
   if (error || !doc)
     return void res.status(404).json({ detail: "Document not found" });
-  const access = await ensureDocAccess(doc, userId, userEmail, db);
+  const access = await ensureDocAccess(doc, userId, db);
   if (!access.ok)
     return void res.status(404).json({ detail: "Document not found" });
 
@@ -290,7 +286,6 @@ documentsRouter.get("/:documentId/url", requireAuth, async (req, res) => {
 // viewer can load tracked-change documents directly.
 documentsRouter.get("/:documentId/docx", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
   const { documentId } = req.params;
   const versionIdParam = typeof req.query.version_id === "string" ? req.query.version_id : null;
   const db = createServerSupabase();
@@ -302,7 +297,7 @@ documentsRouter.get("/:documentId/docx", requireAuth, async (req, res) => {
     .single();
   if (error || !doc)
     return void res.status(404).json({ detail: "Document not found" });
-  const access = await ensureDocAccess(doc, userId, userEmail, db);
+  const access = await ensureDocAccess(doc, userId, db);
   if (!access.ok)
     return void res.status(404).json({ detail: "Document not found" });
 
@@ -352,7 +347,6 @@ function downloadFilenameForVersion(
 // the human-friendly version number when present.
 documentsRouter.get("/:documentId/versions", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
   const { documentId } = req.params;
   const db = createServerSupabase();
 
@@ -363,7 +357,7 @@ documentsRouter.get("/:documentId/versions", requireAuth, async (req, res) => {
     .single();
   if (!doc)
     return void res.status(404).json({ detail: "Document not found" });
-  const access = await ensureDocAccess(doc, userId, userEmail, db);
+  const access = await ensureDocAccess(doc, userId, db);
   if (!access.ok)
     return void res.status(404).json({ detail: "Document not found" });
 
@@ -389,7 +383,6 @@ documentsRouter.post(
   requireAuth,
   async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { documentId } = req.params;
     const sourceDocumentId =
       typeof req.body?.source_document_id === "string"
@@ -415,7 +408,7 @@ documentsRouter.post(
       .single();
     if (!targetDoc)
       return void res.status(404).json({ detail: "Document not found" });
-    const targetAccess = await ensureDocAccess(targetDoc, userId, userEmail, db);
+    const targetAccess = await ensureDocAccess(targetDoc, userId, db);
     if (!targetAccess.ok)
       return void res.status(404).json({ detail: "Document not found" });
 
@@ -426,7 +419,7 @@ documentsRouter.post(
       .single();
     if (!sourceDoc)
       return void res.status(404).json({ detail: "Source document not found" });
-    const sourceAccess = await ensureDocAccess(sourceDoc, userId, userEmail, db);
+    const sourceAccess = await ensureDocAccess(sourceDoc, userId, db);
     if (!sourceAccess.ok)
       return void res.status(404).json({ detail: "Source document not found" });
     const willDeleteSource =
@@ -585,7 +578,6 @@ documentsRouter.post(
   singleFileUpload("file"),
   async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { documentId } = req.params;
     const db = createServerSupabase();
 
@@ -600,7 +592,7 @@ documentsRouter.post(
       .single();
     if (!doc)
       return void res.status(404).json({ detail: "Document not found" });
-    const access = await ensureDocAccess(doc, userId, userEmail, db);
+    const access = await ensureDocAccess(doc, userId, db);
     if (!access.ok)
       return void res.status(404).json({ detail: "Document not found" });
 
@@ -742,7 +734,6 @@ documentsRouter.patch(
   requireAuth,
   async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { documentId, versionId } = req.params;
     const db = createServerSupabase();
 
@@ -753,7 +744,7 @@ documentsRouter.patch(
       .single();
     if (!doc)
       return void res.status(404).json({ detail: "Document not found" });
-    const access = await ensureDocAccess(doc, userId, userEmail, db);
+    const access = await ensureDocAccess(doc, userId, db);
     if (!access.ok)
       return void res.status(404).json({ detail: "Document not found" });
 
@@ -787,7 +778,6 @@ documentsRouter.put(
   singleFileUpload("file"),
   async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { documentId, versionId } = req.params;
     const db = createServerSupabase();
 
@@ -802,7 +792,7 @@ documentsRouter.put(
       .single();
     if (!doc)
       return void res.status(404).json({ detail: "Document not found" });
-    const access = await ensureDocAccess(doc, userId, userEmail, db);
+    const access = await ensureDocAccess(doc, userId, db);
     if (!access.ok || !access.isOwner)
       return void res.status(404).json({ detail: "Document not found" });
 
@@ -938,7 +928,6 @@ documentsRouter.delete(
   requireAuth,
   async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { documentId, versionId } = req.params;
     const db = createServerSupabase();
 
@@ -949,7 +938,7 @@ documentsRouter.delete(
       .single();
     if (!doc)
       return void res.status(404).json({ detail: "Document not found" });
-    const access = await ensureDocAccess(doc, userId, userEmail, db);
+    const access = await ensureDocAccess(doc, userId, db);
     if (!access.ok || !access.isOwner)
       return void res.status(404).json({ detail: "Document not found" });
 
@@ -1050,7 +1039,6 @@ documentsRouter.get(
   requireAuth,
   async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { documentId } = req.params;
     const versionIdParam =
       typeof req.query.version_id === "string" ? req.query.version_id : null;
@@ -1063,7 +1051,7 @@ documentsRouter.get(
       .single();
     if (!doc)
       return void res.status(404).json({ detail: "Document not found" });
-    const access = await ensureDocAccess(doc, userId, userEmail, db);
+    const access = await ensureDocAccess(doc, userId, db);
     if (!access.ok)
       return void res.status(404).json({ detail: "Document not found" });
 
@@ -1090,7 +1078,6 @@ async function handleEditResolution(
   mode: "accept" | "reject",
 ) {
   const userId = res.locals.userId as string;
-  const userEmail = res.locals.userEmail as string | undefined;
   const { documentId, editId } = req.params;
   const db = createServerSupabase();
 
@@ -1128,7 +1115,7 @@ async function handleEditResolution(
       devLog(`[edit-resolution] doc not found for resolved edit`);
       return void res.status(404).json({ detail: "Document not found" });
     }
-    const accessResolved = await ensureDocAccess(doc, userId, userEmail, db);
+    const accessResolved = await ensureDocAccess(doc, userId, db);
     if (!accessResolved.ok) {
       devLog(`[edit-resolution] doc access denied for resolved edit`);
       return void res.status(404).json({ detail: "Document not found" });
@@ -1163,7 +1150,7 @@ async function handleEditResolution(
   devLog(`[edit-resolution] fetched doc`, { doc, docErr });
   if (!doc)
     return void res.status(404).json({ detail: "Document not found" });
-  const access = await ensureDocAccess(doc, userId, userEmail, db);
+  const access = await ensureDocAccess(doc, userId, db);
   if (!access.ok)
     return void res.status(404).json({ detail: "Document not found" });
 

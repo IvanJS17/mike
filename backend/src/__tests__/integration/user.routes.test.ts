@@ -481,11 +481,10 @@ describe("user.routes", () => {
             const res = await request(app).delete("/user/account").set(...AUTH);
 
             expect(res.status).toBe(204);
-            // Account purge runs the cleanup helper with id + email.
+            // Account purge runs the owner-only cleanup helper.
             expect(deleteUserAccountData).toHaveBeenCalledWith(
                 expect.anything(),
                 "u1",
-                "u1@test.local",
             );
         });
 

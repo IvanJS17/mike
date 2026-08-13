@@ -52,7 +52,6 @@ export const projectChatRouter = Router({ mergeParams: true });
 // POST /projects/:projectId/chat — streaming
 projectChatRouter.post("/", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { projectId } = req.params;
     const body =
         req.body && typeof req.body === "object" && !Array.isArray(req.body)
@@ -111,7 +110,6 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     const projectAccess = await checkProjectAccess(
         projectId,
         userId,
-        userEmail,
         db,
     );
     if (!projectAccess.ok)
@@ -319,7 +317,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
         nonce,
     );
 
-    const workflowStore = await buildWorkflowStore(userId, userEmail, db);
+    const workflowStore = await buildWorkflowStore(userId, db);
     if (!resolvedRoute) {
         return void res.status(409).json({
             code: "chat_route_required",

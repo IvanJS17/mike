@@ -174,12 +174,11 @@ export async function createProject(
     name: string,
     cm_number?: string,
     practice?: string,
-    shared_with?: string[],
 ): Promise<Project> {
     return apiRequest<Project>("/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, cm_number, practice, shared_with }),
+        body: JSON.stringify({ name, cm_number, practice }),
     });
 }
 
@@ -484,7 +483,6 @@ export async function updateProject(
         name?: string;
         cm_number?: string;
         practice?: string | null;
-        shared_with?: string[];
     },
 ): Promise<Project> {
     return apiRequest<Project>(`/projects/${projectId}`, {
@@ -496,21 +494,6 @@ export async function updateProject(
 
 export async function deleteProject(projectId: string): Promise<void> {
     await apiRequest(`/projects/${projectId}`, { method: "DELETE" });
-}
-
-export interface ProjectPeople {
-    owner: {
-        user_id: string;
-        email: string | null;
-        display_name: string | null;
-    };
-    members: { email: string; display_name: string | null }[];
-}
-
-export async function getProjectPeople(
-    projectId: string,
-): Promise<ProjectPeople> {
-    return apiRequest<ProjectPeople>(`/projects/${projectId}/people`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1146,7 +1129,6 @@ export async function updateTabularReview(
         document_ids?: string[];
         project_id?: string | null;
         document_grouping?: "document" | "folder";
-        shared_with?: string[];
     },
 ): Promise<TabularReview> {
     return apiRequest<TabularReview>(`/tabular-review/${reviewId}`, {
@@ -1154,12 +1136,6 @@ export async function updateTabularReview(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
     });
-}
-
-export async function getTabularReviewPeople(
-    reviewId: string,
-): Promise<ProjectPeople> {
-    return apiRequest<ProjectPeople>(`/tabular-review/${reviewId}/people`);
 }
 
 export async function generateTabularColumnPrompt(
@@ -1448,35 +1424,4 @@ export async function hideWorkflow(workflowId: string): Promise<void> {
 
 export async function unhideWorkflow(workflowId: string): Promise<void> {
     await apiRequest(`/workflows/hidden/${workflowId}`, { method: "DELETE" });
-}
-
-export async function shareWorkflow(
-    workflowId: string,
-    payload: { emails: string[]; allow_edit: boolean },
-): Promise<void> {
-    await apiRequest<void>(`/workflows/${workflowId}/share`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-    });
-}
-
-export async function listWorkflowShares(workflowId: string): Promise<
-    {
-        id: string;
-        shared_with_email: string;
-        allow_edit: boolean;
-        created_at: string;
-    }[]
-> {
-    return apiRequest(`/workflows/${workflowId}/shares`);
-}
-
-export async function deleteWorkflowShare(
-    workflowId: string,
-    shareId: string,
-): Promise<void> {
-    await apiRequest(`/workflows/${workflowId}/shares/${shareId}`, {
-        method: "DELETE",
-    });
 }

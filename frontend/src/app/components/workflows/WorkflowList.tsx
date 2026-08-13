@@ -51,7 +51,7 @@ import {
     TableStickyCell,
 } from "../shared/TablePrimitive";
 
-type WorkflowSourceFilter = "system" | "user" | "shared";
+type WorkflowSourceFilter = "system" | "user";
 type WorkflowListTab = "all" | "assistant" | "tabular" | "system";
 type WorkflowSortKey = "name" | "type";
 
@@ -157,9 +157,6 @@ export function WorkflowList() {
     const userWorkflows = visibleWorkflows.filter(
         (wf) => !wf.is_system && wf.is_owner !== false,
     );
-    const sharedWorkflows = visibleWorkflows.filter(
-        (wf) => !wf.is_system && wf.is_owner === false,
-    );
     const hiddenSystem = systemWorkflows.filter((wf) =>
         hiddenSystemIds.includes(wf.id),
     );
@@ -167,8 +164,8 @@ export function WorkflowList() {
         (wf) => !hiddenSystemIds.includes(wf.id),
     );
     const systemRows = [...visibleSystem, ...hiddenSystem];
-    const activeRows = [...userWorkflows, ...sharedWorkflows, ...visibleSystem];
-    const allRows = [...userWorkflows, ...sharedWorkflows, ...systemRows];
+    const activeRows = [...userWorkflows, ...visibleSystem];
+    const allRows = [...userWorkflows, ...systemRows];
     const tabRows =
         activeTab === "all"
             ? activeRows
@@ -393,7 +390,6 @@ export function WorkflowList() {
     const sourceOptions: TableFilterOption<WorkflowSourceFilter>[] = [
         { value: "system", label: "System" },
         { value: "user", label: "User" },
-        { value: "shared", label: "Shared with me" },
     ];
     const sourceFilterButton = (
         <TableFilters
@@ -597,17 +593,6 @@ export function WorkflowList() {
                                         Create
                                     </PillButton>
                                 </>
-                            ) : sourceFilter === "shared" ? (
-                                <>
-                                    <WorkflowSkeuoIcon className="mb-4 h-8 w-8" />
-                                    <p className="text-2xl font-medium font-serif text-gray-900">
-                                        Shared Workflows
-                                    </p>
-                                    <p className="mt-1 text-xs text-gray-400 text-left">
-                                        Workflows shared with you by other users
-                                        will appear here.
-                                    </p>
-                                </>
                             ) : (
                                 <>
                                     <WorkflowSkeuoIcon className="mb-4 h-8 w-8" />
@@ -749,14 +734,7 @@ export function WorkflowList() {
                                             <User className="h-3.5 w-3.5 text-blue-600" />
                                             User
                                         </span>
-                                    ) : (
-                                        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-600 truncate max-w-full">
-                                            <User className="h-3.5 w-3.5 shrink-0 text-blue-600" />
-                                            <span className="truncate">
-                                                {getSharedByLabel(wf)}
-                                            </span>
-                                        </span>
-                                    )}
+                                    ) : null}
                                 </TableCell>
                                 <div
                                     className="w-8 shrink-0 flex justify-end"
@@ -835,13 +813,9 @@ export function WorkflowList() {
     );
 }
 
-function getSharedByLabel(workflow: Workflow) {
-    return workflow.shared_by_name?.trim() || "Shared";
-}
-
 function getWorkflowSource(workflow: Workflow): WorkflowSourceFilter {
     if (workflow.is_system) return "system";
-    return workflow.is_owner === false ? "shared" : "user";
+    return "user";
 }
 
 function compareWorkflows(

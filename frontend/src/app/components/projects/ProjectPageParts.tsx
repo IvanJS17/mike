@@ -8,7 +8,6 @@ import {
     Plus,
     Trash2,
     Upload,
-    Users,
 } from "lucide-react";
 import {
     PageHeader,
@@ -361,7 +360,6 @@ export function ProjectPageHeader({
     onOpenDetails,
     onDeleteProject,
     onSearchChange,
-    onOpenPeople,
     onNewChat,
     onNewReview,
     onAddDocuments,
@@ -377,7 +375,6 @@ export function ProjectPageHeader({
     onOpenDetails: () => void;
     onDeleteProject: () => void;
     onSearchChange: (search: string) => void;
-    onOpenPeople: () => void;
     onNewChat: () => void;
     onNewReview: () => void;
     onAddDocuments?: (() => void) | null;
@@ -443,12 +440,6 @@ export function ProjectPageHeader({
                         value: search,
                         onChange: onSearchChange,
                         placeholder: "Search…",
-                    },
-                    {
-                        onClick: onOpenPeople,
-                        iconOnly: true,
-                        title: "People with access",
-                        icon: <Users className="h-4 w-4" />,
                     },
                     {
                         type: "custom",
