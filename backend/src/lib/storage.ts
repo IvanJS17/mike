@@ -143,6 +143,31 @@ export async function listFiles(prefix: string): Promise<string[]> {
   return keys;
 }
 
+/** List objects in an explicit bucket (W1.14 audit-export retention). */
+export async function listFilesFromBucket(
+  bucket: string,
+  prefix: string,
+): Promise<string[]> {
+  if (!storageEnabled) return [];
+  const client = getClient();
+  const keys: string[] = [];
+  let ContinuationToken: string | undefined;
+  do {
+    const response = await client.send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix,
+        ContinuationToken,
+      }),
+    );
+    for (const item of response.Contents ?? []) {
+      if (item.Key) keys.push(item.Key);
+    }
+    ContinuationToken = response.NextContinuationToken;
+  } while (ContinuationToken);
+  return keys;
+}
+
 // ---------------------------------------------------------------------------
 // Delete
 // ---------------------------------------------------------------------------

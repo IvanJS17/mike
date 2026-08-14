@@ -28,7 +28,7 @@ import {
 import {
   uploadFileToBucket,
   deleteFileFromBucket,
-  listFiles,
+  listFilesFromBucket,
 } from "../src/lib/storage";
 
 async function main() {
@@ -75,8 +75,12 @@ async function main() {
   ]);
   await uploadFileToBucket(bucket, objectKey, payload, "application/octet-stream");
 
-  // Retention: drop exports older than the window.
-  const existing = await listFiles(`${AUDIT_EXPORT_PREFIX}/`).catch(() => [] as string[]);
+  // Retention: drop exports older than the window (scoped to the export
+  // bucket — never the documents bucket).
+  const existing = await listFilesFromBucket(
+    bucket,
+    `${AUDIT_EXPORT_PREFIX}/`,
+  ).catch(() => [] as string[]);
   const expired = expiredExportKeys(existing, now, AUDIT_EXPORT_RETENTION_DAYS);
   for (const k of expired) {
     await deleteFileFromBucket(bucket, k).catch(() => {});
