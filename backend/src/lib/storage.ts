@@ -74,6 +74,35 @@ export async function uploadFile(
   );
 }
 
+/** Upload to an explicit bucket (used by the W1.14 audit-export job). */
+export async function uploadFileToBucket(
+  bucket: string,
+  key: string,
+  content: ArrayBuffer | Buffer,
+  contentType: string,
+): Promise<void> {
+  requireStorageConfig();
+  const client = getClient();
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: Buffer.isBuffer(content) ? content : Buffer.from(content),
+      ContentType: contentType,
+    }),
+  );
+}
+
+/** Delete an object in an explicit bucket (W1.14 audit-export retention). */
+export async function deleteFileFromBucket(
+  bucket: string,
+  key: string,
+): Promise<void> {
+  if (!storageEnabled) return;
+  const client = getClient();
+  await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+}
+
 // ---------------------------------------------------------------------------
 // Download
 // ---------------------------------------------------------------------------
