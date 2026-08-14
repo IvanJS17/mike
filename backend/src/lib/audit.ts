@@ -10,14 +10,10 @@ type Db = ReturnType<typeof createServerSupabase>;
 
 export type AuditEventType =
   | "user.invited"
-  | "user.revoked"
   | "membership.revoked"
-  | "membership.role_changed"
   | "document.uploaded"
   | "document.deleted"
-  | "document.downloaded"
-  | "api_key.saved"
-  | "api_key.deleted";
+  | "document.downloaded";
 
 export async function recordAuditEvent(
   db: Db,
@@ -28,15 +24,23 @@ export async function recordAuditEvent(
     eventDetail?: Record<string, unknown>;
   },
 ): Promise<void> {
-  const { error } = await db.from("audit_events").insert({
-    actor_user_id: event.actorUserId,
-    organization_id: event.organizationId ?? null,
-    event_type: event.eventType,
-    event_detail: event.eventDetail ?? {},
-  });
-  if (error) {
-    // Audit failures must never break the underlying operation; they are
-    // logged and surfaced to the operator via the W1.14 daily export gap.
-    console.error(`[audit] failed to record ${event.eventType}`, error.message);
+  try {
+    const { error } = await db.from("audit_events").insert({
+      actor_user_id: event.actorUserId,
+      organization_id: event.organizationId ?? null,
+      event_type: event.eventType,
+      event_detail: event.eventDetail ?? {},
+    });
+    if (error) {
+      // Audit failures must never break the underlying operation; they are
+      // logged and surfaced to the operator via the W1.14 daily export gap.
+      console.error(`[audit] failed to record ${event.eventType}`, error.message);
+    }
+  } catch (err) {
+    // Even a thrown exception must not break the underlying operation.
+    console.error(
+      `[audit] failed to record ${event.eventType}`,
+      err instanceof Error ? err.message : String(err),
+    );
   }
 }
