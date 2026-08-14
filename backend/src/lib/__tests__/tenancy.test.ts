@@ -7,6 +7,7 @@ import {
 function makeDb() {
   const db = {
     from: vi.fn((table: string) => ({
+      insert: vi.fn(() => ({ data: null, error: null })),
       delete: vi.fn(() => ({
         eq: vi.fn(() => ({
           eq: vi.fn(() => ({ data: null, error: null })),

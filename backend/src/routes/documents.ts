@@ -25,6 +25,7 @@ import {
 import { ensureDocAccess } from "../lib/access";
 import { singleFileUpload } from "../lib/upload";
 import { validateUploadContent } from "../lib/fileValidation";
+import { recordAuditEvent } from "../lib/audit";
 import {
   ALLOWED_DOCUMENT_TYPES,
   ALLOWED_DOCUMENT_TYPES_LABEL,
@@ -109,6 +110,11 @@ documentsRouter.delete("/:documentId", requireAuth, async (req, res) => {
     return void res.status(404).json({ detail: "Document not found" });
 
   await deleteDocumentAndVersionFiles(db, documentId);
+  await recordAuditEvent(db, {
+    actorUserId: userId,
+    eventType: "document.deleted",
+    eventDetail: { document_id: documentId },
+  });
   res.status(204).send();
 });
 
@@ -1457,6 +1463,12 @@ export async function handleDocumentUpload(
           active_version_number: 1,
         }
       : updated;
+    await recordAuditEvent(db, {
+      actorUserId: userId,
+      eventType: "document.uploaded",
+      eventDetail: { document_id: docId, filename },
+    });
+
     return void res.status(201).json(responseDoc);
   } catch (e) {
     // W1.9: clean up the partial upload so revoked/failed files never linger.

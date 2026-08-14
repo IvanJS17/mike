@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
+import { recordAuditEvent } from "../lib/audit";
 import { buildContentDisposition, downloadFile } from "../lib/storage";
 import { verifyDownload } from "../lib/downloadTokens";
 import { ensureDocAccess } from "../lib/access";
@@ -64,5 +65,11 @@ downloadsRouter.get("/:token", requireAuth, async (req, res) => {
         "Content-Disposition",
         buildContentDisposition("attachment", info.filename),
     );
+    await recordAuditEvent(db, {
+        actorUserId: userId,
+        organizationId: null,
+        eventType: "document.downloaded",
+        eventDetail: { document_id: version.document_id, path: info.path },
+    });
     res.send(Buffer.from(raw));
 });

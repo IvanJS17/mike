@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { Router } from "express";
 import { requireAuth, requireMfaIfEnrolled } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
+import { recordAuditEvent } from "../lib/audit";
 import {
     DEFAULT_TABULAR_MODEL,
     DEFAULT_TITLE_MODEL,
@@ -523,6 +524,12 @@ userRouter.post("/invite", requireAuth, async (req, res) => {
         { redirectTo: frontendUrl("/accept-invite") },
     );
     if (error) return void res.status(500).json({ detail: error.message });
+
+    await recordAuditEvent(db, {
+        actorUserId: res.locals.userId as string,
+        eventType: "user.invited",
+        eventDetail: { email: parsed.email },
+    });
 
     res.status(200).json({ ok: true });
 });

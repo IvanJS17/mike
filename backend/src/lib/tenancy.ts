@@ -8,6 +8,7 @@
  */
 
 import { createServerSupabase } from "./supabase";
+import { recordAuditEvent } from "./audit";
 
 type Db = ReturnType<typeof createServerSupabase>;
 type Admin = {
@@ -50,6 +51,12 @@ export async function revokeOrganizationMembership(
   if (signOutError) {
     return { ok: false, detail: `Failed to revoke sessions: ${signOutError.message}` };
   }
+
+  await recordAuditEvent(db, {
+    actorUserId: userId,
+    organizationId,
+    eventType: "membership.revoked",
+  });
 
   return { ok: true };
 }
