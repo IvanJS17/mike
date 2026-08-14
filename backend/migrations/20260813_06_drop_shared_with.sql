@@ -127,6 +127,41 @@ as $$
   order by vp.created_at desc;
 $$;;
 
+
+create or replace function public.get_tabular_reviews_overview(
+  p_user_id text,
+  p_project_id text default null
+)
+returns table (
+  id uuid,
+  project_id uuid,
+  user_id text,
+  title text,
+  columns_config jsonb,
+  document_ids jsonb,
+  workflow_id uuid,
+  created_at timestamptz,
+  updated_at timestamptz,
+  is_owner boolean,
+  document_count integer
+)
+language sql
+stable
+as $$
+  select *
+  from public.get_tabular_reviews_overview(
+    p_user_id,
+    p_project_id,
+    'all',
+    2147483647,
+    0,
+    null,
+    'created',
+    'desc'
+  );
+$$;;
+
+-- W1.8: full paginated overview RPC (replaces the truncated copy).
 create or replace function public.get_tabular_reviews_overview(
   p_user_id text,
   p_project_id text,
@@ -260,37 +295,4 @@ as $$
     vr.id asc
   limit greatest(coalesce(p_limit, 20), 1)
   offset greatest(coalesce(p_offset, 0), 0);
-$$;;
-
-create or replace function public.get_tabular_reviews_overview(
-  p_user_id text,
-  p_project_id text default null
-)
-returns table (
-  id uuid,
-  project_id uuid,
-  user_id text,
-  title text,
-  columns_config jsonb,
-  document_ids jsonb,
-  workflow_id uuid,
-  created_at timestamptz,
-  updated_at timestamptz,
-  is_owner boolean,
-  document_count integer
-)
-language sql
-stable
-as $$
-  select *
-  from public.get_tabular_reviews_overview(
-    p_user_id,
-    p_project_id,
-    'all',
-    2147483647,
-    0,
-    null,
-    'created',
-    'desc'
-  );
-$$;;
+$$;
