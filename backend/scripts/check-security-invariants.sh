@@ -10,9 +10,9 @@ cd "$(dirname "$0")/.."
 fail=0
 
 # 1) RLS coverage
-tables=$(rg -o 'create table if not exists public\.[a-z_]+' schema.sql migrations/*.sql 2>/dev/null \
+tables=$(grep -ohE 'create table if not exists public\.[a-z_]+' schema.sql migrations/*.sql 2>/dev/null \
   | sed 's/.*public\.//' | sort -u)
-rls=$(rg -o 'alter table public\.[a-z_]+ enable row level security' schema.sql migrations/*.sql 2>/dev/null \
+rls=$(grep -ohE 'alter table public\.[a-z_]+ enable row level security' schema.sql migrations/*.sql 2>/dev/null \
   | sed 's/.*public\.//; s/ enable.*//' | sort -u)
 
 for t in $tables; do
@@ -28,7 +28,7 @@ echo "RLS check: $(echo "$tables" | wc -l) tablas auditadas, $(echo "$rls" | wc 
 
 # 2) service_role isolation
 for f in src/routes/*.ts; do
-  if rg -q 'createServerSupabase' "$f" && ! rg -q 'requireAuth' "$f"; then
+  if grep -qE 'createServerSupabase' "$f" && ! grep -qE 'requireAuth' "$f"; then
     echo "FAIL: $f usa service_role sin requireAuth"
     fail=1
   fi
