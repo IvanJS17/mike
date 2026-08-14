@@ -1,14 +1,16 @@
-# Mike
+# LiTT
 
-![Mike](https://mikeoss.com/link-image.jpg)
+![LiTT](https://mikeoss.com/link-image.jpg)
 
-Mike (MikeOSS) is an open-source legal AI platform for document review,
-drafting, and legal research.
+LiTT is a fork of [Mike (MikeOSS)](https://mikeoss.com) — an open-source legal
+AI platform for document review, workflow and drafting — customized for
+Mexican legal practice with hardened identity, tenancy and audit governance.
+All rights and notices of the original authors are preserved (AGPL-3.0).
 
 It has a Next.js frontend, an Express backend, Supabase Auth/Postgres, and
 Cloudflare R2-compatible object storage.
 
-Website: [mikeoss.com](https://mikeoss.com)
+Website: [mikeoss.com](https://mikeoss.com) (upstream)
 
 ## Quick start with Docker
 
@@ -44,7 +46,7 @@ Local service endpoints:
 
 | Service | Address | Notes |
 | --- | --- | --- |
-| Mike | `http://localhost:3000` | Main application |
+| LiTT | `http://localhost:3000` | Main application |
 | Supabase API | `http://localhost:54321` | Auth and data API gateway |
 | Postgres | `localhost:54322` | Host access for database tools |
 | RustFS console | `http://localhost:9001` | `rustfsadmin` / `rustfsadmin` |

@@ -116,7 +116,7 @@ export default function VerifyMfaPage() {
 
         const { data, error: enrollError } = await supabase.auth.mfa.enroll({
             factorType: "totp",
-            friendlyName: "Mike Authenticator",
+            friendlyName: "LiTT Authenticator",
         });
 
         if (enrollError) {
