@@ -156,13 +156,11 @@ export const test = base.extend<{ addin: Addin }>({
           gemini: false,
           openai: false,
           openrouter: false,
-          courtlistener: false,
           sources: {
             claude: "env",
             gemini: null,
             openai: null,
             openrouter: null,
-            courtlistener: null,
           },
         }),
       });

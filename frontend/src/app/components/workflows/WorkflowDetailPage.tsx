@@ -12,18 +12,12 @@ import {
     Play,
     Plus,
     Trash2,
-    Users,
     X,
 } from "lucide-react";
 import {
-    deleteWorkflowShare,
     deleteWorkflow,
     getWorkflow,
-    listWorkflowShares,
-    lookupUserByEmail,
-    shareWorkflow,
     updateWorkflow,
-    type ProjectPeople,
 } from "@/app/lib/mikeApi";
 import { UseWorkflowModal } from "@/app/components/workflows/UseWorkflowModal";
 import { WFEditColumnModal } from "@/app/components/workflows/WFEditColumnModal";
@@ -43,7 +37,6 @@ import {
     HeaderActionsMenu,
     type HeaderActionsMenuItem,
 } from "@/app/components/shared/HeaderActionsMenu";
-import { PeopleModal } from "@/app/components/modals/PeopleModal";
 import { OpenSourceWorkflowModal } from "@/app/components/workflows/OpenSourceWorkflowModal";
 import { PageHeader } from "@/app/components/shared/PageHeader";
 import { PillButton } from "@/app/components/ui/pill-button";
@@ -85,7 +78,6 @@ interface Props {
 
 type SaveStatus = "idle" | "saving" | "saved";
 type DeleteStatus = "idle" | "loading" | "complete";
-type WorkflowShare = Awaited<ReturnType<typeof listWorkflowShares>>[number];
 
 const NAME_COL_W = "w-[332px] shrink-0";
 const WORKFLOW_CONTRIBUTIONS_ENABLED =
@@ -105,10 +97,9 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
     const readOnly =
         (workflow?.is_system ?? false) ||
         workflow?.allow_edit === false;
-    const canShare = !readOnly && (workflow?.is_owner ?? true);
     const canOpenSource =
         WORKFLOW_CONTRIBUTIONS_ENABLED &&
-        canShare &&
+        !readOnly &&
         workflow?.is_system !== true;
 
     // Editor state
@@ -130,9 +121,7 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
     const [editingColumn, setEditingColumn] = useState<ColumnConfig | null>(null);
     const [viewingColumn, setViewingColumn] = useState<ColumnConfig | null>(null);
 
-    // Share / use / details popovers
-    const [shareOpen, setShareOpen] = useState(false);
-    const [workflowSharedWith, setWorkflowSharedWith] = useState<string[]>([]);
+    // Use / details popovers
     const [detailsOpen, setDetailsOpen] = useState(false);
     const [useOpen, setUseOpen] = useState(false);
     const [deleteOpen, setDeleteOpen] = useState(false);
@@ -174,82 +163,6 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
             .catch(() => setNotFound(true))
             .finally(() => setLoading(false));
     }, [id, workflowType]);
-
-    const fetchWorkflowShares = useCallback(async () => {
-        const shares = await listWorkflowShares(id);
-        setWorkflowSharedWith(
-            shares.map((share) => share.shared_with_email.trim().toLowerCase()),
-        );
-        return shares;
-    }, [id]);
-
-    const fetchWorkflowPeople = useCallback(async (): Promise<ProjectPeople> => {
-        const shares = await fetchWorkflowShares();
-        const members = await Promise.all(
-            shares.map(async (share) => {
-                const email = share.shared_with_email.trim().toLowerCase();
-                const userResult = await lookupUserByEmail(email).catch(
-                    () => null,
-                );
-                return {
-                    email,
-                    display_name:
-                        userResult?.exists === true
-                            ? userResult.display_name
-                            : null,
-                };
-            }),
-        );
-        return {
-            owner: {
-                user_id: user?.id ?? workflow?.user_id ?? "",
-                email: user?.email ?? null,
-                display_name: profile?.displayName ?? null,
-            },
-            members,
-        };
-    }, [
-        fetchWorkflowShares,
-        profile?.displayName,
-        user?.email,
-        user?.id,
-        workflow?.user_id,
-    ]);
-
-    async function handleWorkflowSharedWithChange(nextSharedWith: string[]) {
-        const nextEmails = [
-            ...new Set(
-                nextSharedWith
-                    .map((email) => email.trim().toLowerCase())
-                    .filter(Boolean),
-            ),
-        ];
-        const currentShares = await listWorkflowShares(id);
-        const currentByEmail = new Map<string, WorkflowShare>();
-        for (const share of currentShares) {
-            currentByEmail.set(
-                share.shared_with_email.trim().toLowerCase(),
-                share,
-            );
-        }
-
-        const added = nextEmails.filter((email) => !currentByEmail.has(email));
-        const removed = currentShares.filter(
-            (share) =>
-                !nextEmails.includes(
-                    share.shared_with_email.trim().toLowerCase(),
-                ),
-        );
-
-        await Promise.all([
-            ...removed.map((share) => deleteWorkflowShare(id, share.id)),
-            ...(added.length > 0
-                ? [shareWorkflow(id, { emails: added, allow_edit: false })]
-                : []),
-        ]);
-
-        await fetchWorkflowShares();
-    }
 
     // ---------------------------------------------------------------------------
     // Debounced auto-save for prompt
@@ -453,14 +366,6 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
                           ]
                         : [],
                     [
-                        canShare
-                            ? {
-                                  onClick: () => setShareOpen(true),
-                                  title: "Open workflow people",
-                                  iconOnly: true,
-                                  icon: <Users className="h-4 w-4" />,
-                              }
-                            : null,
                         {
                             type: "custom",
                             render: (
@@ -498,10 +403,6 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
                             ? {
                                   ...current,
                                   ...updated,
-                                  shared_by_name:
-                                      updated.shared_by_name ??
-                                      current.shared_by_name ??
-                                      null,
                                   open_source_submission:
                                       updated.open_source_submission ??
                                       current.open_source_submission ??
@@ -512,21 +413,6 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
                     setDetailsOpen(false);
                 }}
             />
-            {shareOpen && (
-                <PeopleModal
-                    open={shareOpen}
-                    onClose={() => setShareOpen(false)}
-                    resource={{ id, shared_with: workflowSharedWith }}
-                    fetchPeople={fetchWorkflowPeople}
-                    currentUserEmail={user?.email ?? null}
-                    breadcrumb={[
-                        "Workflows",
-                        workflow.metadata.title,
-                        "People",
-                    ]}
-                    onSharedWithChange={handleWorkflowSharedWithChange}
-                />
-            )}
             <ConfirmPopup
                 open={deleteOpen}
                 title="Delete workflow?"

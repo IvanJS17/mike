@@ -1,14 +1,16 @@
-# Mike
+# LiTT
 
-![Mike](https://mikeoss.com/link-image.jpg)
+![LiTT](https://mikeoss.com/link-image.jpg)
 
-Mike (MikeOSS) is an open-source legal AI platform for document review,
-drafting, and legal research.
+LiTT is a fork of [Mike (MikeOSS)](https://mikeoss.com) — an open-source legal
+AI platform for document review, workflow and drafting — customized for
+Mexican legal practice with hardened identity, tenancy and audit governance.
+All rights and notices of the original authors are preserved (AGPL-3.0).
 
 It has a Next.js frontend, an Express backend, Supabase Auth/Postgres, and
 Cloudflare R2-compatible object storage.
 
-Website: [mikeoss.com](https://mikeoss.com)
+Website: [mikeoss.com](https://mikeoss.com) (upstream)
 
 ## Quick start with Docker
 
@@ -44,7 +46,7 @@ Local service endpoints:
 
 | Service | Address | Notes |
 | --- | --- | --- |
-| Mike | `http://localhost:3000` | Main application |
+| LiTT | `http://localhost:3000` | Main application |
 | Supabase API | `http://localhost:54321` | Auth and data API gateway |
 | Postgres | `localhost:54322` | Host access for database tools |
 | RustFS console | `http://localhost:9001` | `rustfsadmin` / `rustfsadmin` |
@@ -165,9 +167,9 @@ Supabase values come from the project dashboard. Use the project URL for
 `SUPABASE_SECRET_KEY`, and the anon/public key for
 `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY`.
 
-Model-provider keys and the CourtListener token can be configured globally in
-`backend/.env` or per user under **Account > Models & API Keys**. If a provider
-key is configured globally, the matching account field is read-only.
+Model-provider keys can be configured globally in `backend/.env` or per user
+under **Account > Models & API Keys**. If a provider key is configured
+globally, the matching account field is read-only.
 
 Supabase Auth, rather than the Mike backend, sends signup, email-change, and
 password-recovery messages. Configure production SMTP in the Supabase dashboard
@@ -206,28 +208,11 @@ for configuration, verification, and security considerations.
 
 ## CourtListener Integration
 
-Mike can use CourtListener for US case law citation verification, case fetching,
-targeted opinion search, and case-law panels in assistant responses.
-
-To enable live CourtListener access, set `COURTLISTENER_API_TOKEN` in
-`backend/.env` and restart the backend. Users can also add their own token under
-**Account > Models & API Keys** when the instance does not provide one globally.
-
-Fresh databases created from `backend/schema.sql` already include the
-CourtListener support tables. Existing deployments should apply the matching
-dated migration in `backend/migrations/` before enabling the feature.
-
-Bulk data is optional. When `COURTLISTENER_BULK_DATA_ENABLED=true`, Mike first
-tries local Supabase/R2 data before falling back to CourtListener's API:
-
-- citation metadata is read from `public.courtlistener_citation_index`
-- case cluster metadata is read from `public.courtlistener_opinion_cluster_index`
-- cached opinion JSON is read from the R2 prefix
-  `courtlistener/opinions/by-cluster/{clusterId}/{opinionId}.json`
-
-If you do not import bulk data, leave `COURTLISTENER_BULK_DATA_ENABLED=false`;
-live CourtListener tools still work with a valid token, subject to CourtListener
-rate limits.
+CourtListener (US case law) is **disabled in this fork** (W1.3): the backend
+no longer exposes case-law routes or chat tools, the frontend has no case-law
+UI, and the support tables are dropped by migration
+`20260813_01_drop_courtlistener.sql`. Do not re-enable it for Mexican legal
+workflows.
 
 ## First Run
 
@@ -257,16 +242,6 @@ mapping, for example `DB_PORT=54323 docker compose up --build`.
 **The model picker shows a missing-key warning.** Add a key under
 **Account > Models & API Keys**, or configure it in `backend/.env` and restart
 the backend.
-
-**CourtListener tools say the API token is missing.** Set
-`COURTLISTENER_API_TOKEN` in `backend/.env`, or add a token under
-**Account > Models & API Keys**. Restart the backend after changing `.env`.
-
-**CourtListener bulk lookup is not returning local results.** Confirm
-`COURTLISTENER_BULK_DATA_ENABLED=true`, the two CourtListener tables are
-populated, and opinion JSON exists under `courtlistener/opinions/by-cluster/` in
-R2. Mike falls back to the live API when bulk data is unavailable and a token is
-configured.
 
 **DOC or DOCX conversion fails.** Install LibreOffice and restart the backend so
 the conversion command is available on the process path.

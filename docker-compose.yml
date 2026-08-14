@@ -48,9 +48,10 @@ services:
       GOTRUE_JWT_AUD: authenticated
       GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
       GOTRUE_JWT_ADMIN_ROLES: service_role
-      # Open registration by default (localhost). On a public host, create your
-      # account then set GOTRUE_DISABLE_SIGNUP=true to pull the ladder up.
-      GOTRUE_DISABLE_SIGNUP: ${GOTRUE_DISABLE_SIGNUP:-false}
+      # Invitation-only access is the default (true). For local bootstrapping,
+      # create your first account with GOTRUE_DISABLE_SIGNUP=false and then
+      # switch it back to true.
+      GOTRUE_DISABLE_SIGNUP: ${GOTRUE_DISABLE_SIGNUP:-true}
       GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
       GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
       # Keep local signup frictionless by default. Set this to false to exercise

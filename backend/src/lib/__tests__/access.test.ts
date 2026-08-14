@@ -58,21 +58,11 @@ function makeDb(tables: Record<string, Row[]>) {
 describe("access helpers", () => {
     const db = makeDb({
         projects: [
-            { id: "own-project", user_id: "owner", shared_with: [] },
-            {
-                id: "shared-project",
-                user_id: "other-owner",
-                shared_with: ["Reviewer@Example.com"],
-            },
-            { id: "private-project", user_id: "other-owner", shared_with: [] },
+            { id: "own-project", user_id: "owner" },
+            { id: "private-project", user_id: "other-owner" },
         ],
         documents: [
             { id: "own-doc", user_id: "owner", project_id: null },
-            {
-                id: "shared-doc",
-                user_id: "other-owner",
-                project_id: "shared-project",
-            },
             {
                 id: "private-doc",
                 user_id: "other-owner",
@@ -83,81 +73,64 @@ describe("access helpers", () => {
 
     it("allows project owners", async () => {
         await expect(
-            checkProjectAccess("own-project", "owner", "owner@example.com", db),
+            checkProjectAccess("own-project", "owner", db),
         ).resolves.toMatchObject({ ok: true, isOwner: true });
     });
 
-    it("allows shared project access case-insensitively", async () => {
+    it("denies non-owner project access", async () => {
         await expect(
-            checkProjectAccess(
-                "shared-project",
-                "reviewer",
-                "reviewer@example.com",
-                db,
-            ),
-        ).resolves.toMatchObject({ ok: true, isOwner: false });
-    });
-
-    it("denies private project access", async () => {
-        await expect(
-            checkProjectAccess(
-                "private-project",
-                "reviewer",
-                "reviewer@example.com",
-                db,
-            ),
+            checkProjectAccess("private-project", "reviewer", db),
         ).resolves.toEqual({ ok: false });
     });
 
-    it("allows document owners and shared-project readers", async () => {
+    it("allows document owners only", async () => {
         await expect(
             ensureDocAccess(
                 { user_id: "owner", project_id: null },
                 "owner",
-                "owner@example.com",
                 db,
             ),
         ).resolves.toMatchObject({ ok: true, isOwner: true });
 
         await expect(
-            ensureDocAccess(
-                { user_id: "other-owner", project_id: "shared-project" },
-                "reviewer",
-                "reviewer@example.com",
-                db,
-            ),
-        ).resolves.toMatchObject({ ok: true, isOwner: false });
+            ensureDocAccess({ user_id: "other-owner", project_id: null }, "reviewer", db),
+        ).resolves.toEqual({ ok: false });
     });
 
-    it("filters user-supplied document IDs to accessible documents only", async () => {
+    it("filters user-supplied document IDs to owned documents only", async () => {
         await expect(
             filterAccessibleDocumentIds(
-                ["own-doc", "shared-doc", "private-doc", "missing-doc"],
-                "reviewer",
-                "reviewer@example.com",
+                ["own-doc", "private-doc", "missing-doc"],
+                "owner",
                 db,
             ),
-        ).resolves.toEqual(["shared-doc"]);
+        ).resolves.toEqual(["own-doc"]);
     });
 
-    it("lists own and directly shared projects", async () => {
-        await expect(
-            listAccessibleProjectIds("owner", "reviewer@example.com", db),
-        ).resolves.toEqual(expect.arrayContaining(["own-project", "shared-project"]));
+    it("lists owned projects", async () => {
+        await expect(listAccessibleProjectIds("owner", db)).resolves.toEqual([
+            "own-project",
+        ]);
     });
 
-    it("allows direct review sharing without project access", async () => {
+    it("allows review owners only", async () => {
         await expect(
             ensureReviewAccess(
                 {
-                    user_id: "other-owner",
+                    user_id: "owner",
                     project_id: null,
-                    shared_with: ["Reviewer@Example.com"],
                 },
-                "reviewer",
-                "reviewer@example.com",
+                "owner",
                 db,
             ),
-        ).resolves.toMatchObject({ ok: true, isOwner: false });
+        ).resolves.toMatchObject({ ok: true, isOwner: true });
+
+        await expect(
+            ensureReviewAccess(
+                { user_id: "other-owner", project_id: null },
+                "reviewer",
+                db,
+            ),
+        ).resolves.toEqual({ ok: false });
     });
 });

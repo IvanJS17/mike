@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/app/lib/supabase";
 import { Button } from "@/app/components/ui/button";
 import { Input } from "@/app/components/ui/input";
@@ -10,6 +10,7 @@ import { SiteLogo } from "@/app/components/site-logo";
 import { CheckCircle2 } from "lucide-react";
 import { useAuth } from "@/app/contexts/AuthContext";
 import { updateUserProfile } from "@/app/lib/mikeApi";
+import { InvitePasswordSetup } from "@/app/components/auth/InvitePasswordSetup";
 
 const authGlassCardClassName =
     "rounded-2xl border border-white/70 bg-white/72 p-8 shadow-[0_4px_14px_rgba(15,23,42,0.045),inset_0_1px_0_rgba(255,255,255,0.86),inset_0_-8px_18px_rgba(255,255,255,0.12)] backdrop-blur-2xl";
@@ -24,6 +25,7 @@ const authToggleInactiveClassName =
 
 export default function SignupPage() {
     const router = useRouter();
+    const searchParams = useSearchParams();
     const { isAuthenticated, authLoading } = useAuth();
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
@@ -33,12 +35,16 @@ export default function SignupPage() {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [success, setSuccess] = useState(false);
+    const isInviteFlow =
+        searchParams.has("token_hash") ||
+        searchParams.has("token") ||
+        searchParams.get("type") === "invite";
 
     useEffect(() => {
-        if (!authLoading && isAuthenticated && !success) {
+        if (!authLoading && isAuthenticated && !success && !isInviteFlow) {
             router.replace("/assistant");
         }
-    }, [authLoading, isAuthenticated, router, success]);
+    }, [authLoading, isAuthenticated, isInviteFlow, router, success]);
 
     const handleSignup = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -89,15 +95,38 @@ export default function SignupPage() {
                 router.push("/assistant");
             }, 2000);
         } catch (error: unknown) {
-            setError(
+            const message =
                 error instanceof Error
                     ? error.message
-                    : "An error occurred during signup",
+                    : "An error occurred during signup";
+            const lower = message.toLowerCase();
+            setError(
+                lower.includes("signup") &&
+                    (lower.includes("disabled") || lower.includes("signups"))
+                    ? "Solo acceso por invitación"
+                    : message,
             );
         } finally {
             setLoading(false);
         }
     };
+
+    if (isInviteFlow) {
+        return (
+            <div className="min-h-dvh bg-gray-50/80 flex items-start justify-center px-6 pt-32 md:pt-40 pb-10 relative">
+                <div className="absolute top-4 md:top-8 left-1/2 -translate-x-1/2">
+                    <SiteLogo size="lg" asLink />
+                </div>
+                <div className="w-full max-w-md">
+                    <div className={`${authGlassCardClassName} p-8`}>
+                        <InvitePasswordSetup
+                            onSuccess={() => router.replace("/assistant")}
+                        />
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     // Success View
     if (success) {

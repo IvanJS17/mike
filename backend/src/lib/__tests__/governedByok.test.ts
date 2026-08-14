@@ -6,11 +6,10 @@ import {
 } from "../userApiKeys";
 
 describe("governed BYOK credential references", () => {
-    it("recognizes the new LLM providers without folding CourtListener into them", () => {
+    it("recognizes the new LLM providers without adding aliases", () => {
         expect(normalizeApiKeyProvider("deepseek")).toBe("deepseek");
         expect(normalizeApiKeyProvider("opencode-zen")).toBe("opencode-zen");
         expect(normalizeApiKeyProvider("opencode-go")).toBe("opencode-go");
-        expect(normalizeApiKeyProvider("courtlistener")).toBe("courtlistener");
     });
 
     it("leaves credential version allocation to the database and never writes plaintext", async () => {

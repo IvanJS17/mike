@@ -19,7 +19,6 @@ const keys = (configured: {
         gemini: { configured: !!configured.gemini, source: null },
         openai: { configured: !!configured.openai, source: null },
         openrouter: { configured: false, source: null },
-        courtlistener: { configured: false, source: null },
     }) as ApiKeyState;
 
 describe("getModelProvider", () => {

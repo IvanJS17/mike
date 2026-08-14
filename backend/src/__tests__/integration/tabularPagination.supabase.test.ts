@@ -7,7 +7,6 @@ const maybeDescribe = url && serviceKey ? describe : describe.skip;
 
 maybeDescribe("Supabase tabular-review pagination", () => {
     const ownerId = crypto.randomUUID();
-    const ownerEmail = `pagination-${ownerId}@test.local`;
     const projectId = crypto.randomUUID();
     const projectReviewIds = Array.from({ length: 25 }, () =>
         crypto.randomUUID(),
@@ -77,7 +76,7 @@ maybeDescribe("Supabase tabular-review pagination", () => {
     it("paginates tied rows deterministically without duplicates", async () => {
         const commonArgs = {
             p_user_id: ownerId,
-            p_user_email: ownerEmail,
+
             p_project_id: projectId,
             p_scope: "in-project",
             p_search_term: "needle",
@@ -115,7 +114,7 @@ maybeDescribe("Supabase tabular-review pagination", () => {
         // just the one seeded project.
         const inProject = await admin.rpc("get_tabular_reviews_overview", {
             p_user_id: ownerId,
-            p_user_email: ownerEmail,
+
             p_project_id: null,
             p_scope: "in-project",
             p_limit: 100,
@@ -126,7 +125,7 @@ maybeDescribe("Supabase tabular-review pagination", () => {
         });
         const standalone = await admin.rpc("get_tabular_reviews_overview", {
             p_user_id: ownerId,
-            p_user_email: ownerEmail,
+
             p_project_id: null,
             p_scope: "standalone",
             p_limit: 100,
@@ -166,7 +165,7 @@ maybeDescribe("Supabase tabular-review pagination", () => {
     it("applies scope and search before limiting rows", async () => {
         const result = await admin.rpc("get_tabular_reviews_overview", {
             p_user_id: ownerId,
-            p_user_email: ownerEmail,
+
             p_project_id: null,
             p_scope: "standalone",
             p_limit: 100,
@@ -188,7 +187,7 @@ maybeDescribe("Supabase tabular-review pagination", () => {
         async (searchTerm) => {
             const reviews = await admin.rpc("get_tabular_reviews_overview", {
                 p_user_id: ownerId,
-                p_user_email: ownerEmail,
+
                 p_project_id: null,
                 p_scope: "all",
                 p_limit: 100,
@@ -199,7 +198,7 @@ maybeDescribe("Supabase tabular-review pagination", () => {
             });
             const ids = await admin.rpc("get_tabular_review_ids_overview", {
                 p_user_id: ownerId,
-                p_user_email: ownerEmail,
+
                 p_project_id: null,
                 p_scope: "all",
                 p_search_term: searchTerm,
@@ -217,7 +216,7 @@ maybeDescribe("Supabase tabular-review pagination", () => {
     it("sorts the complete filtered set before pagination", async () => {
         const result = await admin.rpc("get_tabular_reviews_overview", {
             p_user_id: ownerId,
-            p_user_email: ownerEmail,
+
             p_project_id: projectId,
             p_scope: "in-project",
             p_limit: 25,
@@ -241,7 +240,7 @@ maybeDescribe("Supabase tabular-review pagination", () => {
         // user_id, not the full review payload, for the entire filtered set.
         const result = await admin.rpc("get_tabular_review_ids_overview", {
             p_user_id: ownerId,
-            p_user_email: ownerEmail,
+
             p_project_id: null,
             p_scope: "in-project",
             p_search_term: "needle",
@@ -267,7 +266,7 @@ maybeDescribe("Supabase tabular-review pagination", () => {
         for (let offset = 0; offset < projectReviewIds.length; offset += pageSize) {
             const page = await admin.rpc("get_tabular_review_ids_overview", {
                 p_user_id: ownerId,
-                p_user_email: ownerEmail,
+
                 p_project_id: null,
                 p_scope: "in-project",
                 p_search_term: "needle",
@@ -285,7 +284,7 @@ maybeDescribe("Supabase tabular-review pagination", () => {
     it("keeps the legacy three-argument RPC callable", async () => {
         const result = await admin.rpc("get_tabular_reviews_overview", {
             p_user_id: ownerId,
-            p_user_email: ownerEmail,
+
             p_project_id: null,
         });
 

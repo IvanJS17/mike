@@ -1,7 +1,7 @@
 import type { ApiKeyProvider } from "@/app/lib/mikeApi";
 
 export interface ModelApiKeyField {
-    provider: Exclude<ApiKeyProvider, "courtlistener">;
+    provider: ApiKeyProvider;
     label: string;
     placeholder: string;
 }

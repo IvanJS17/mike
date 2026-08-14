@@ -22,8 +22,7 @@ create table if not exists public.user_profiles (
   title_model text,
   tabular_model text not null default 'gemini-3-flash-preview',
   quote_model text,
-  mfa_on_login boolean not null default false,
-  legal_research_us boolean not null default true,
+  mfa_on_login boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -65,7 +64,7 @@ create trigger on_auth_user_created
 create table if not exists public.user_api_keys (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
-  provider text not null check (provider in ('claude', 'gemini', 'openai', 'openrouter', 'deepseek', 'opencode-zen', 'opencode-go', 'courtlistener')),
+  provider text not null check (provider in ('claude', 'gemini', 'openai', 'openrouter', 'deepseek', 'opencode-zen', 'opencode-go')),
   encrypted_key text not null,
   iv text not null,
   auth_tag text not null,
@@ -234,16 +233,12 @@ create table if not exists public.projects (
   cm_number text,
   practice text,
   visibility text not null default 'private',
-  shared_with jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
 create index if not exists idx_projects_user
   on public.projects(user_id);
-
-create index if not exists projects_shared_with_idx
-  on public.projects using gin (shared_with);
 
 create table if not exists public.project_subfolders (
   id uuid primary key default gen_random_uuid(),
@@ -417,26 +412,8 @@ create table if not exists public.hidden_workflows (
 create index if not exists idx_hidden_workflows_user
   on public.hidden_workflows(user_id);
 
-create table if not exists public.workflow_shares (
-  id uuid primary key default gen_random_uuid(),
-  workflow_id uuid not null references public.workflows(id) on delete cascade,
-  shared_by_user_id text not null,
-  shared_with_email text not null,
-  allow_edit boolean not null default false,
-  created_at timestamptz not null default now(),
-  constraint workflow_shares_workflow_email_unique
-    unique(workflow_id, shared_with_email)
-);
-
-create index if not exists workflow_shares_workflow_id_idx
-  on public.workflow_shares(workflow_id);
-
-create index if not exists workflow_shares_email_idx
-  on public.workflow_shares(shared_with_email);
-
 create or replace function public.get_workflows_overview(
   p_user_id text,
-  p_user_email text default null,
   p_type text default null
 )
 returns table (
@@ -452,80 +429,29 @@ returns table (
   is_system boolean,
   created_at timestamptz,
   allow_edit boolean,
-  is_owner boolean,
-  shared_by_name text
+  is_owner boolean
 )
 language sql
 stable
 as $$
-  with owned as (
-    select
-      w.id,
-      w.user_id::text as user_id,
-      w.title,
-      w.type,
-      w.prompt_md,
-      w.columns_config,
-      w.language,
-      w.practice,
-      w.jurisdictions,
-      false as is_system,
-      w.created_at,
-      true as allow_edit,
-      true as is_owner,
-      null::text as shared_by_name,
-      0 as sort_bucket
-    from public.workflows w
-    where w.user_id::text = p_user_id
-      and (p_type is null or w.type = p_type)
-  ),
-  shared as (
-    select
-      w.id,
-      w.user_id::text as user_id,
-      w.title,
-      w.type,
-      w.prompt_md,
-      w.columns_config,
-      w.language,
-      w.practice,
-      w.jurisdictions,
-      false as is_system,
-      w.created_at,
-      ws.allow_edit,
-      false as is_owner,
-      nullif(trim(up.display_name), '') as shared_by_name,
-      1 as sort_bucket
-    from public.workflow_shares ws
-    join public.workflows w
-      on w.id = ws.workflow_id
-    left join public.user_profiles up
-      on up.user_id::text = ws.shared_by_user_id::text
-    where lower(ws.shared_with_email) = lower(coalesce(p_user_email, ''))
-      and (p_type is null or w.type = p_type)
-  ),
-  visible_workflows as (
-    select * from owned
-    union all
-    select * from shared
-  )
   select
-    vw.id,
-    vw.user_id,
-    vw.title,
-    vw.type,
-    vw.prompt_md,
-    vw.columns_config,
-    vw.language,
-    vw.practice,
-    vw.jurisdictions,
-    vw.is_system,
-    vw.created_at,
-    vw.allow_edit,
-    vw.is_owner,
-    vw.shared_by_name
-  from visible_workflows vw
-  order by vw.sort_bucket asc, vw.created_at desc;
+    w.id,
+    w.user_id::text as user_id,
+    w.title,
+    w.type,
+    w.prompt_md,
+    w.columns_config,
+    w.language,
+    w.practice,
+    w.jurisdictions,
+    false as is_system,
+    w.created_at,
+    true as allow_edit,
+    true as is_owner
+  from public.workflows w
+  where w.user_id::text = p_user_id
+    and (p_type is null or w.type = p_type)
+  order by w.created_at desc;
 $$;
 
 -- ---------------------------------------------------------------------------
@@ -634,7 +560,6 @@ create table if not exists public.tabular_reviews (
   workflow_id uuid references public.workflows(id) on delete set null,
   practice text,
   document_grouping text not null default 'document' check (document_grouping in ('document', 'folder')),
-  shared_with jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -645,15 +570,11 @@ create index if not exists idx_tabular_reviews_user
 create index if not exists idx_tabular_reviews_project
   on public.tabular_reviews(project_id);
 
-create index if not exists tabular_reviews_shared_with_idx
-  on public.tabular_reviews using gin (shared_with);
-
 create index if not exists tabular_reviews_title_trgm_idx
   on public.tabular_reviews using gin (lower(title) gin_trgm_ops);
 
 create or replace function public.get_projects_overview(
-  p_user_id text,
-  p_user_email text default null
+  p_user_id text
 )
 returns table (
   id uuid,
@@ -661,7 +582,6 @@ returns table (
   name text,
   cm_number text,
   practice text,
-  shared_with jsonb,
   created_at timestamptz,
   updated_at timestamptz,
   is_owner boolean,
@@ -678,11 +598,6 @@ as $$
     select p.*
     from public.projects p
     where p.user_id = p_user_id
-       or (
-        coalesce(p_user_email, '') <> ''
-        and p.user_id <> p_user_id
-        and p.shared_with @> jsonb_build_array(p_user_email)
-      )
   ),
   document_counts as (
     select d.project_id, count(*)::integer as document_count
@@ -708,7 +623,6 @@ as $$
     vp.name,
     vp.cm_number,
     vp.practice,
-    vp.shared_with,
     vp.created_at,
     vp.updated_at,
     vp.user_id = p_user_id as is_owner,
@@ -779,7 +693,6 @@ create index if not exists idx_tabular_cells_review_row
 
 create or replace function public.get_tabular_reviews_overview(
   p_user_id text,
-  p_user_email text,
   p_project_id text,
   p_scope text,
   p_limit integer,
@@ -796,7 +709,6 @@ returns table (
   columns_config jsonb,
   document_ids jsonb,
   workflow_id uuid,
-  shared_with jsonb,
   created_at timestamptz,
   updated_at timestamptz,
   is_owner boolean,
@@ -805,17 +717,7 @@ returns table (
 language sql
 stable
 as $$
-  with accessible_projects as (
-    select p.id
-    from public.projects p
-    where p.user_id = p_user_id
-       or (
-        coalesce(p_user_email, '') <> ''
-        and p.user_id <> p_user_id
-        and p.shared_with @> jsonb_build_array(p_user_email)
-      )
-  ),
-  visible_reviews as (
+  with visible_reviews as (
     select tr.*
     from public.tabular_reviews tr
     where (p_project_id is null or tr.project_id::text = p_project_id)
@@ -841,27 +743,7 @@ as $$
           '%'
           escape '\'
       )
-      and (
-        p_project_id is null
-        or exists (
-          select 1
-          from accessible_projects ap
-          where ap.id::text = p_project_id
-        )
-      )
-      and (
-        tr.user_id = p_user_id
-        or (
-          tr.project_id in (select ap.id from accessible_projects ap)
-          and tr.user_id <> p_user_id
-        )
-        or (
-          p_project_id is null
-          and coalesce(p_user_email, '') <> ''
-          and tr.user_id <> p_user_id
-          and tr.shared_with @> jsonb_build_array(p_user_email)
-        )
-      )
+      and tr.user_id = p_user_id
   ),
   cell_document_counts as (
     select
@@ -898,7 +780,6 @@ as $$
     vr.columns_config,
     vr.document_ids,
     vr.workflow_id,
-    vr.shared_with,
     vr.created_at,
     vr.updated_at,
     vr.user_id = p_user_id as is_owner,
@@ -947,7 +828,6 @@ $$;
 
 create or replace function public.get_tabular_reviews_overview(
   p_user_id text,
-  p_user_email text default null,
   p_project_id text default null
 )
 returns table (
@@ -958,7 +838,6 @@ returns table (
   columns_config jsonb,
   document_ids jsonb,
   workflow_id uuid,
-  shared_with jsonb,
   created_at timestamptz,
   updated_at timestamptz,
   is_owner boolean,
@@ -970,7 +849,6 @@ as $$
   select *
   from public.get_tabular_reviews_overview(
     p_user_id,
-    p_user_email,
     p_project_id,
     'all',
     2147483647,
@@ -983,7 +861,6 @@ $$;
 
 create or replace function public.get_tabular_review_ids_overview(
   p_user_id text,
-  p_user_email text,
   p_project_id text,
   p_scope text,
   p_search_term text,
@@ -997,16 +874,6 @@ returns table (
 language sql
 stable
 as $$
-  with accessible_projects as (
-    select p.id
-    from public.projects p
-    where p.user_id = p_user_id
-       or (
-        coalesce(p_user_email, '') <> ''
-        and p.user_id <> p_user_id
-        and p.shared_with @> jsonb_build_array(p_user_email)
-      )
-  )
   select tr.id, tr.user_id
   from public.tabular_reviews tr
   where (p_project_id is null or tr.project_id::text = p_project_id)
@@ -1032,27 +899,7 @@ as $$
         '%'
         escape '\'
     )
-    and (
-      p_project_id is null
-      or exists (
-        select 1
-        from accessible_projects ap
-        where ap.id::text = p_project_id
-      )
-    )
-    and (
-      tr.user_id = p_user_id
-      or (
-        tr.project_id in (select ap.id from accessible_projects ap)
-        and tr.user_id <> p_user_id
-      )
-      or (
-        p_project_id is null
-        and coalesce(p_user_email, '') <> ''
-        and tr.user_id <> p_user_id
-        and tr.shared_with @> jsonb_build_array(p_user_email)
-      )
-    )
+    and tr.user_id = p_user_id
   order by tr.created_at desc, tr.id asc
   limit greatest(coalesce(p_limit, 1000), 1)
   offset greatest(coalesce(p_offset, 0), 0);
@@ -1086,45 +933,6 @@ create index if not exists tabular_review_chat_messages_chat_idx
   on public.tabular_review_chat_messages(chat_id, created_at);
 
 -- ---------------------------------------------------------------------------
--- CourtListener bulk-data indexes
--- ---------------------------------------------------------------------------
-
-create table if not exists public.courtlistener_citation_index (
-  id bigint primary key,
-  volume text not null,
-  reporter text not null,
-  page text not null,
-  type integer,
-  cluster_id bigint not null,
-  date_created timestamptz,
-  date_modified timestamptz
-);
-
-create index if not exists courtlistener_citation_lookup_idx
-  on public.courtlistener_citation_index(volume, reporter, page);
-
-create index if not exists courtlistener_citation_cluster_idx
-  on public.courtlistener_citation_index(cluster_id);
-
-alter table public.courtlistener_citation_index enable row level security;
-
-create table if not exists public.courtlistener_opinion_cluster_index (
-  id bigint primary key,
-  case_name text,
-  case_name_short text,
-  case_name_full text,
-  slug text,
-  date_filed date,
-  citation_count integer,
-  precedential_status text,
-  filepath_pdf_harvard text,
-  filepath_json_harvard text,
-  docket_id bigint
-);
-
-alter table public.courtlistener_opinion_cluster_index enable row level security;
-
--- ---------------------------------------------------------------------------
 -- Direct client grant hardening
 -- ---------------------------------------------------------------------------
 --
@@ -1142,7 +950,6 @@ revoke all on public.document_versions from anon, authenticated;
 revoke all on public.document_edits from anon, authenticated;
 revoke all on public.workflows from anon, authenticated;
 revoke all on public.hidden_workflows from anon, authenticated;
-revoke all on public.workflow_shares from anon, authenticated;
 revoke all on public.chats from anon, authenticated;
 revoke all on public.chat_messages from anon, authenticated;
 revoke all on public.tabular_reviews from anon, authenticated;
@@ -1157,8 +964,6 @@ revoke all on public.user_mcp_oauth_tokens from anon, authenticated;
 revoke all on public.user_mcp_oauth_states from anon, authenticated;
 revoke all on public.user_mcp_connector_tools from anon, authenticated;
 revoke all on public.user_mcp_tool_audit_logs from anon, authenticated;
-revoke all on public.courtlistener_citation_index from anon, authenticated;
-revoke all on public.courtlistener_opinion_cluster_index from anon, authenticated;
 
 -- Tables created by this file are owned by the database bootstrap role. The
 -- backend connects as service_role, so grant it only the data privileges that
@@ -1170,3 +975,367 @@ grant select, insert, update, delete
 grant usage, select
   on all sequences in schema public
   to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Multi-tenant foundations (W1.5): organizations, workspaces, matters + RLS
+-- ---------------------------------------------------------------------------
+-- W1.5: multi-tenant foundations — organizations, workspaces, matters and
+-- memberships with row-level security. The backend validates authorization
+-- in application code (service_role path); RLS is enforced defense-in-depth
+-- for direct browser roles (anon/authenticated).
+--
+-- Membership checks run through SECURITY DEFINER helpers to avoid the
+-- infinite-recursion Postgres detects when a policy subqueries its own table.
+
+-- ---------------------------------------------------------------------------
+-- Organizations
+-- ---------------------------------------------------------------------------
+create table if not exists public.organizations (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  created_by uuid not null references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  authorization_epoch bigint not null default 0
+);
+
+alter table public.organizations enable row level security;
+
+create table if not exists public.organization_memberships (
+  organization_id uuid not null references public.organizations(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  role text not null check (
+    role in ('org_owner', 'workspace_admin', 'editor', 'viewer', 'technical_operator')
+  ),
+  created_at timestamptz not null default now(),
+  primary key (organization_id, user_id)
+);
+
+alter table public.organization_memberships enable row level security;
+
+-- ---------------------------------------------------------------------------
+-- Workspaces
+-- ---------------------------------------------------------------------------
+create table if not exists public.workspaces (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.organizations(id) on delete cascade,
+  name text not null,
+  created_by uuid not null references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.workspaces enable row level security;
+
+create table if not exists public.workspace_memberships (
+  workspace_id uuid not null references public.workspaces(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  role text not null check (
+    role in ('workspace_admin', 'editor', 'viewer', 'technical_operator')
+  ),
+  created_at timestamptz not null default now(),
+  primary key (workspace_id, user_id)
+);
+
+alter table public.workspace_memberships enable row level security;
+
+-- ---------------------------------------------------------------------------
+-- Matters (legal matters / asuntos)
+-- ---------------------------------------------------------------------------
+create table if not exists public.matters (
+  id uuid primary key default gen_random_uuid(),
+  workspace_id uuid not null references public.workspaces(id) on delete cascade,
+  name text not null,
+  cm_number text,
+  practice text,
+  status text not null default 'open' check (status in ('open', 'closed', 'archived')),
+  created_by uuid not null references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.matters enable row level security;
+
+create table if not exists public.matter_memberships (
+  matter_id uuid not null references public.matters(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  role text not null check (
+    role in ('matter_owner', 'editor', 'viewer', 'technical_operator')
+  ),
+  created_at timestamptz not null default now(),
+  primary key (matter_id, user_id)
+);
+
+alter table public.matter_memberships enable row level security;
+
+-- ---------------------------------------------------------------------------
+-- RLS helper functions (SECURITY DEFINER, fixed search_path)
+-- ---------------------------------------------------------------------------
+create or replace function public.organization_role(p_org uuid)
+returns text
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select role from public.organization_memberships
+  where organization_id = p_org and user_id = auth.uid()
+  limit 1;
+$$;
+
+create or replace function public.is_organization_member(p_org uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.organization_memberships
+    where organization_id = p_org and user_id = auth.uid()
+  );
+$$;
+
+create or replace function public.is_workspace_admin(p_ws uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.workspaces w
+    join public.organization_memberships m on m.organization_id = w.organization_id
+    where w.id = p_ws
+      and m.user_id = auth.uid()
+      and m.role in ('org_owner', 'workspace_admin')
+  );
+$$;
+
+create or replace function public.matter_role(p_matter uuid)
+returns text
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select role from public.matter_memberships
+  where matter_id = p_matter and user_id = auth.uid()
+  limit 1;
+$$;
+
+grant execute on function public.organization_role(uuid) to authenticated;
+grant execute on function public.is_organization_member(uuid) to authenticated;
+grant execute on function public.is_workspace_admin(uuid) to authenticated;
+grant execute on function public.matter_role(uuid) to authenticated;
+
+
+-- ---------------------------------------------------------------------------
+-- Policies
+-- ---------------------------------------------------------------------------
+drop policy if exists organizations_select_member on public.organizations;
+create policy organizations_select_member
+  on public.organizations for select
+  using (public.is_organization_member(id));
+
+drop policy if exists organizations_update_owner on public.organizations;
+create policy organizations_update_owner
+  on public.organizations for update
+  using (public.organization_role(id) = 'org_owner');
+
+drop policy if exists org_memberships_select_member on public.organization_memberships;
+create policy org_memberships_select_member
+  on public.organization_memberships for select
+  using (user_id = auth.uid() or public.organization_role(organization_id) = 'org_owner');
+
+drop policy if exists org_memberships_insert_owner on public.organization_memberships;
+create policy org_memberships_insert_owner
+  on public.organization_memberships for insert
+  with check (public.organization_role(organization_id) = 'org_owner');
+
+drop policy if exists org_memberships_delete_owner on public.organization_memberships;
+create policy org_memberships_delete_owner
+  on public.organization_memberships for delete
+  using (public.organization_role(organization_id) = 'org_owner');
+
+drop policy if exists workspaces_select_member on public.workspaces;
+create policy workspaces_select_member
+  on public.workspaces for select
+  using (public.is_organization_member(organization_id));
+
+drop policy if exists workspaces_update_member on public.workspaces;
+create policy workspaces_update_member
+  on public.workspaces for update
+  using (public.organization_role(organization_id) in ('org_owner', 'workspace_admin'));
+
+drop policy if exists workspace_memberships_select_member on public.workspace_memberships;
+create policy workspace_memberships_select_member
+  on public.workspace_memberships for select
+  using (
+    user_id = auth.uid()
+    or public.is_workspace_admin(workspace_id)
+  );
+
+drop policy if exists workspace_memberships_insert_admin on public.workspace_memberships;
+create policy workspace_memberships_insert_admin
+  on public.workspace_memberships for insert
+  with check (public.is_workspace_admin(workspace_id));
+
+drop policy if exists workspace_memberships_delete_admin on public.workspace_memberships;
+create policy workspace_memberships_delete_admin
+  on public.workspace_memberships for delete
+  using (public.is_workspace_admin(workspace_id));
+
+drop policy if exists matters_select_member on public.matters;
+create policy matters_select_member
+  on public.matters for select
+  using (
+    public.matter_role(id) is not null
+    or exists (
+      select 1 from public.workspaces w
+      where w.id = matters.workspace_id
+        and public.is_organization_member(w.organization_id)
+    )
+  );
+
+drop policy if exists matters_update_member on public.matters;
+create policy matters_update_member
+  on public.matters for update
+  using (public.matter_role(id) in ('matter_owner', 'editor'));
+
+drop policy if exists matter_memberships_select_member on public.matter_memberships;
+create policy matter_memberships_select_member
+  on public.matter_memberships for select
+  using (
+    user_id = auth.uid()
+    or public.matter_role(matter_id) is not null
+    or exists (
+      select 1 from public.matters m
+      join public.workspaces w on w.id = m.workspace_id
+      where m.id = matter_memberships.matter_id
+        and public.is_organization_member(w.organization_id)
+    )
+  );
+
+drop policy if exists matter_memberships_insert_owner on public.matter_memberships;
+create policy matter_memberships_insert_owner
+  on public.matter_memberships for insert
+  with check (
+    public.matter_role(matter_id) = 'matter_owner'
+    or exists (
+      select 1 from public.matters m
+      where m.id = matter_memberships.matter_id
+        and public.is_workspace_admin(m.workspace_id)
+    )
+  );
+
+drop policy if exists matter_memberships_delete_owner on public.matter_memberships;
+create policy matter_memberships_delete_owner
+  on public.matter_memberships for delete
+  using (
+    public.matter_role(matter_id) = 'matter_owner'
+    or exists (
+      select 1 from public.matters m
+      where m.id = matter_memberships.matter_id
+        and public.is_workspace_admin(m.workspace_id)
+    )
+  );
+
+-- ---------------------------------------------------------------------------
+-- Direct client access: browser roles only through RLS policies.
+-- ---------------------------------------------------------------------------
+revoke all on public.organizations from anon;
+revoke all on public.organization_memberships from anon;
+revoke all on public.workspaces from anon;
+revoke all on public.workspace_memberships from anon;
+revoke all on public.matters from anon;
+revoke all on public.matter_memberships from anon;
+
+-- authenticated gets table-level access filtered by the policies above;
+-- anon gets nothing.
+grant select, insert, update, delete on public.organizations to authenticated;
+grant select, insert, update, delete on public.organization_memberships to authenticated;
+grant select, insert, update, delete on public.workspaces to authenticated;
+grant select, insert, update, delete on public.workspace_memberships to authenticated;
+grant select, insert, update, delete on public.matters to authenticated;
+grant select, insert, update, delete on public.matter_memberships to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- W1.6 RLS hardening: every public table has row-level security enabled
+-- (backend uses service_role which bypasses RLS; browser roles hold no grants).
+-- ---------------------------------------------------------------------------
+alter table public.user_profiles enable row level security;
+alter table public.projects enable row level security;
+alter table public.project_subfolders enable row level security;
+alter table public.library_folders enable row level security;
+alter table public.documents enable row level security;
+alter table public.document_versions enable row level security;
+alter table public.document_edits enable row level security;
+alter table public.workflows enable row level security;
+alter table public.hidden_workflows enable row level security;
+alter table public.chats enable row level security;
+alter table public.chat_messages enable row level security;
+alter table public.tabular_reviews enable row level security;
+alter table public.tabular_cells enable row level security;
+alter table public.tabular_review_chats enable row level security;
+alter table public.tabular_review_chat_messages enable row level security;
+
+-- W1.7: monotonic authorization epoch bump (called via RPC on membership
+-- revocation; atomic increment).
+create or replace function public.bump_authorization_epoch(p_org uuid)
+returns void
+language sql
+security definer
+set search_path = public
+as $$
+  update public.organizations
+  set authorization_epoch = authorization_epoch + 1
+  where id = p_org;
+$$;
+
+revoke execute on function public.bump_authorization_epoch(uuid) from public, anon, authenticated;
+grant execute on function public.bump_authorization_epoch(uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- W1.13: insert-only audit trail
+-- ---------------------------------------------------------------------------
+-- W1.13: insert-only audit trail.
+-- audit_events is append-only: UPDATE and DELETE are aborted by trigger for
+-- every role (including service_role); rows can only be exported (W1.14) and
+-- pruned by a future retention job running with elevated privileges outside
+-- the normal path.
+
+create table if not exists public.audit_events (
+  id bigint generated always as identity primary key,
+  actor_user_id uuid references auth.users(id) on delete set null,
+  organization_id uuid references public.organizations(id) on delete set null,
+  event_type text not null,
+  event_detail jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists audit_events_org_created_idx
+  on public.audit_events(organization_id, created_at desc);
+create index if not exists audit_events_type_idx
+  on public.audit_events(event_type);
+
+alter table public.audit_events enable row level security;
+
+-- Insert-only enforcement: abort any UPDATE/DELETE attempt.
+create or replace function public.audit_events_insert_only()
+returns trigger
+language plpgsql
+as $$
+begin
+  raise exception 'audit_events is insert-only; UPDATE/DELETE are forbidden (W1.13)';
+end;
+$$;
+
+drop trigger if exists audit_events_insert_only_trigger on public.audit_events;
+create trigger audit_events_insert_only_trigger
+  before update or delete on public.audit_events
+  for each row execute function public.audit_events_insert_only();
+
+-- Direct browser roles get nothing; the backend writes via service_role.
+revoke all on public.audit_events from anon, authenticated;
+grant insert, select on public.audit_events to service_role;

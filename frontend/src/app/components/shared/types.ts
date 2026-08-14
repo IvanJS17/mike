@@ -29,7 +29,6 @@ export interface Project {
   name: string;
   cm_number: string | null;
   practice: string | null;
-  shared_with: string[];
   created_at: string;
   updated_at: string;
   documents?: Document[];
@@ -214,101 +213,7 @@ export type AssistantEvent =
       error?: string;
       isStreaming?: boolean;
     }
-  | {
-      type: "courtlistener_search_case_law";
-      query: string;
-      result_count?: number;
-      error?: string;
-      isStreaming?: boolean;
-    }
-  | {
-      type: "courtlistener_get_cases";
-      cluster_ids: number[];
-      case_count?: number;
-      opinion_count?: number;
-      cases?: {
-        cluster_id: number;
-        case_name: string | null;
-        citation: string | null;
-        dateFiled?: string | null;
-        url?: string | null;
-      }[];
-      error?: string;
-      isStreaming?: boolean;
-    }
-  | {
-      type: "courtlistener_find_in_case";
-      cluster_id: number | null;
-      query: string;
-      total_matches?: number;
-      case_name?: string | null;
-      citation?: string | null;
-      searches?: {
-        cluster_id: number | null;
-        query: string;
-        total_matches?: number;
-        case_name?: string | null;
-        citation?: string | null;
-        error?: string;
-      }[];
-      error?: string;
-      isStreaming?: boolean;
-    }
-  | {
-      type: "courtlistener_read_case";
-      cluster_id: number | null;
-      case_name?: string | null;
-      citation?: string | null;
-      opinion_count?: number;
-      error?: string;
-      isStreaming?: boolean;
-    }
-  | {
-      type: "courtlistener_verify_citations";
-      citation_count?: number;
-      match_count?: number;
-      error?: string;
-      isStreaming?: boolean;
-    }
-  | {
-      type: "case_citation";
-      cluster_id: number | null;
-      case_name: string | null;
-      citation: string | null;
-      url: string;
-      pdfUrl?: string | null;
-      dateFiled?: string | null;
-      case?: Extract<AssistantEvent, { type: "case_opinions" }>["case"];
-    }
-  | {
-      type: "case_opinions";
-      cluster_id: number;
-      case: {
-        id: number | null;
-        caseName?: string | null;
-        dateFiled?: string | null;
-        citations?: string[];
-        url?: string | null;
-        pdfUrl?: string | null;
-        opinions: {
-          opinionId: number | null;
-          apiUrl?: string | null;
-          type: string | null;
-          author: string | null;
-          url: string | null;
-          text?: string | null;
-          html?: string | null;
-        }[];
-      };
-    }
   | { type: "content"; text: string; isStreaming?: boolean };
-
-export type CaseCitationQuote = {
-  opinionId: number | null;
-  type: string | null;
-  author: string | null;
-  quote: string;
-};
 
 export interface Message {
   id?: string;
@@ -367,27 +272,8 @@ export type DocumentCitation = {
   verified?: boolean;
 };
 
-export type CaseCitation = {
-  type: "citation_data";
-  kind: "case";
-  ref: number;
-  cluster_id: number;
-  case_name?: string | null;
-  citation?: string | null;
-  url?: string | null;
-  pdfUrl?: string | null;
-  dateFiled?: string | null;
-  quotes: CaseCitationQuote[];
-};
-
-/**
- * A citation emitted by the assistant. Document citations have doc/page
- * anchors. Case citations anchor to a CourtListener cluster and include a
- * quoted opinion passage.
- */
-export type Citation =
-  | DocumentCitation
-  | CaseCitation;
+/** A citation emitted by the assistant. */
+export type Citation = DocumentCitation;
 
 const PAGE_BREAK_SENTINEL = "[[PAGE_BREAK]]";
 
@@ -427,7 +313,6 @@ function formatCellLocatorReadable(sheet?: string, cell?: string): string {
 export function getCitationCells(
   a: Citation,
 ): { sheet?: string; cell?: string }[] {
-  if (a.kind === "case") return [];
   return getDocumentCitationQuotes(a)
     .filter((q) => q.cell || q.sheet)
     .map((q) => ({ sheet: q.sheet, cell: q.cell }));
@@ -458,7 +343,6 @@ function expandDocumentQuoteEntry(entry: DocumentCitationQuote): CitationQuote[]
 export function getDocumentCitationQuotes(
   a: Citation,
 ): DocumentCitationQuote[] {
-  if (a.kind === "case") return [];
   if (Array.isArray(a.quotes) && a.quotes.length) {
     return a.quotes.filter((entry) => entry.quote.trim().length > 0);
   }
@@ -473,7 +357,6 @@ export function getDocumentCitationQuotes(
 export function expandCitationToEntries(
   a: Citation,
 ): CitationQuote[] {
-  if (a.kind === "case") return [];
   return getDocumentCitationQuotes(a).flatMap(expandDocumentQuoteEntry);
 }
 
@@ -483,9 +366,6 @@ export function expandCitationToEntries(
  * callers join with `.filter(Boolean)` so the locator is simply omitted.
  */
 export function formatCitationPage(a: Citation): string {
-  if (a.kind === "case") {
-    return a.citation || a.case_name || `Case ${a.cluster_id}`;
-  }
   const quotes = getDocumentCitationQuotes(a);
   // Spreadsheets are located by cell, e.g. "Sheet1!B7" (or several).
   if (isSpreadsheetFilename(a.filename)) {
@@ -510,7 +390,7 @@ export function formatCitationQuotePage(
   page: number | string,
   quote?: DocumentCitationQuote,
 ): string {
-  if (a.kind !== "case" && isSpreadsheetFilename(a.filename)) {
+  if (isSpreadsheetFilename(a.filename)) {
     return formatCellLocatorReadable(quote?.sheet, quote?.cell);
   }
   return `Page ${page}`;
@@ -529,11 +409,6 @@ export function cleanCitationQuoteText(
 
 /** Produce a reader-friendly version of the quote (replaces [[PAGE_BREAK]] with "..."). */
 export function displayCitationQuote(a: Citation): string {
-  if (a.kind === "case") {
-    return a.quotes
-      .map((q) => q.quote.replaceAll(PAGE_BREAK_SENTINEL, "..."))
-      .join(" / ");
-  }
   return getDocumentCitationQuotes(a)
     .map((q) => cleanCitationQuoteText(a, q.quote))
     .filter(Boolean)
@@ -571,8 +446,6 @@ export interface TabularReview {
   document_grouping?: "document" | "folder";
   workflow_id: string | null;
   practice?: string | null;
-  /** Per-review email list. Used so standalone (project_id null) reviews can be shared directly. */
-  shared_with?: string[];
   /** Server-set: true when the requesting user is the review's creator. */
   is_owner?: boolean;
   created_at: string;
@@ -649,7 +522,6 @@ export interface Workflow {
   columns_config: ColumnConfig[] | null;
   is_system: boolean;
   created_at: string;
-  shared_by_name?: string | null;
   allow_edit?: boolean;
   is_owner?: boolean;
   open_source_submission?: WorkflowOpenSourceSubmission | null;

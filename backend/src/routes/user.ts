@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { Router } from "express";
 import { requireAuth, requireMfaIfEnrolled } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
+import { recordAuditEvent } from "../lib/audit";
 import {
     DEFAULT_TABULAR_MODEL,
     DEFAULT_TITLE_MODEL,
@@ -55,7 +56,6 @@ type UserProfileRow = {
     title_model: string | null;
     tabular_model: string;
     mfa_on_login: boolean | null;
-    legal_research_us: boolean | null;
 };
 
 function errorMessage(error: unknown): string {
@@ -161,7 +161,7 @@ function mcpOAuthPopupCsp(nonce: string) {
 }
 
 const PROFILE_SELECT =
-    "display_name, organisation, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login, legal_research_us";
+    "display_name, organisation, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login";
 const PROFILE_SELECT_NO_LEGAL =
     "display_name, organisation, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login";
 const LEGACY_PROFILE_SELECT =
@@ -178,10 +178,6 @@ function isMissingProfileColumn(error: unknown, column: string): boolean {
     return record.code === "42703" && message.includes(column);
 }
 
-// Loads a profile while tolerating older databases that lack the
-// legal_research_us column. Tries the full select first, then falls back to
-// the legacy cascade (which also handles missing title_model / mfa_on_login)
-// and defaults the feature flag to enabled.
 async function selectProfile(
     db: ReturnType<typeof createServerSupabase>,
     userId: string,
@@ -191,20 +187,9 @@ async function selectProfile(
         .from("user_profiles")
         .select(PROFILE_SELECT)
         .eq("user_id", userId);
-    const full =
-        mode === "single"
-            ? await fullQuery.single()
-            : await fullQuery.maybeSingle();
-    if (!full.error) return full;
-
-    const legacy = await selectProfileLegacy(db, userId, mode);
-    if (legacy.data && typeof legacy.data === "object") {
-        const row = legacy.data as Record<string, unknown>;
-        if (!("legal_research_us" in row)) {
-            Object.assign(row, { legal_research_us: true });
-        }
-    }
-    return legacy;
+    return mode === "single"
+        ? await fullQuery.single()
+        : await fullQuery.maybeSingle();
 }
 
 async function selectProfileLegacy(
@@ -293,7 +278,6 @@ function serializeProfile(row: UserProfileRow, apiKeyStatus?: ApiKeyStatus) {
         titleModel: resolveModel(row.title_model, titleFallback),
         tabularModel: resolveModel(row.tabular_model, DEFAULT_TABULAR_MODEL),
         mfaOnLogin: row.mfa_on_login === true,
-        legalResearchUs: row.legal_research_us !== false,
         ...(apiKeyStatus ? { apiKeyStatus } : {}),
     };
 }
@@ -306,7 +290,6 @@ function validateProfilePayload(body: unknown):
               organisation?: string | null;
               title_model?: string;
               tabular_model?: string;
-              legal_research_us?: boolean;
               updated_at: string;
           };
       }
@@ -321,7 +304,6 @@ function validateProfilePayload(body: unknown):
         "organisation",
         "titleModel",
         "tabularModel",
-        "legalResearchUs",
     ]);
     const invalidField = Object.keys(raw).find(
         (key) => !allowedFields.has(key),
@@ -338,7 +320,6 @@ function validateProfilePayload(body: unknown):
         organisation?: string | null;
         title_model?: string;
         tabular_model?: string;
-        legal_research_us?: boolean;
         updated_at: string;
     } = { updated_at: new Date().toISOString() };
 
@@ -384,16 +365,6 @@ function validateProfilePayload(body: unknown):
         update.title_model = resolved;
     }
 
-    if ("legalResearchUs" in raw) {
-        if (typeof raw.legalResearchUs !== "boolean") {
-            return {
-                ok: false,
-                detail: "legalResearchUs must be a boolean",
-            };
-        }
-        update.legal_research_us = raw.legalResearchUs;
-    }
-
     return { ok: true, update };
 }
 
@@ -415,6 +386,26 @@ function readBooleanBodyField(
     }
 
     return { ok: true, value: raw[field] };
+}
+
+function readInviteBody(
+    body: unknown,
+): { ok: true; email: string } | { ok: false; detail: string } {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return { ok: false, detail: "Expected a JSON object" };
+    }
+
+    const raw = body as Record<string, unknown>;
+    const invalidField = Object.keys(raw).find((key) => key !== "email");
+    if (invalidField) {
+        return { ok: false, detail: `Unsupported field: ${invalidField}` };
+    }
+
+    if (typeof raw.email !== "string" || !raw.email.trim()) {
+        return { ok: false, detail: "email is required" };
+    }
+
+    return { ok: true, email: raw.email.trim() };
 }
 
 async function userHasVerifiedTotpFactor(
@@ -520,6 +511,27 @@ userRouter.get("/lookup", requireAuth, async (req, res) => {
         email: user?.email ?? email.trim().toLowerCase(),
         display_name: user?.display_name ?? null,
     });
+});
+
+// POST /user/invite
+userRouter.post("/invite", requireAuth, async (req, res) => {
+    const parsed = readInviteBody(req.body);
+    if (!parsed.ok) return void res.status(400).json({ detail: parsed.detail });
+
+    const db = createServerSupabase();
+    const { error } = await db.auth.admin.inviteUserByEmail(
+        parsed.email,
+        { redirectTo: frontendUrl("/accept-invite") },
+    );
+    if (error) return void res.status(500).json({ detail: error.message });
+
+    await recordAuditEvent(db, {
+        actorUserId: res.locals.userId as string,
+        eventType: "user.invited",
+        eventDetail: { email: parsed.email },
+    });
+
+    res.status(200).json({ ok: true });
 });
 
 // GET /user/profile
@@ -961,10 +973,9 @@ userRouter.delete(
     requireMfaIfEnrolled,
     async (_req, res) => {
         const userId = res.locals.userId as string;
-        const userEmail = res.locals.userEmail as string | undefined;
         const db = createServerSupabase();
         try {
-            await deleteUserAccountData(db, userId, userEmail);
+            await deleteUserAccountData(db, userId);
             const { error } = await db.auth.admin.deleteUser(userId);
             if (error)
                 return void res.status(500).json({ detail: error.message });

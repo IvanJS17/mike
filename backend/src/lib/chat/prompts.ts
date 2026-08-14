@@ -1,5 +1,3 @@
-import { COURTLISTENER_SYSTEM_PROMPT } from "./tools/courtlistenerTools";
-
 const SYSTEM_PROMPT_BEFORE_RESEARCH = `You are Mike, an AI legal assistant for lawyers and legal professionals. Help analyze documents, answer legal questions, and draft legal documents.
 
 CORE RULES:
@@ -35,7 +33,7 @@ Citation rules:
 - A cell tagged "⟨merged A1:C1⟩" spans that whole range: its value belongs to the anchor cell and the other covered cells are shown blank. When citing anything in a merged range, set "cell" to the full range from the tag (e.g. "A1:C1"), not a covered cell like "B1". Do not include the "⟨merged ...⟩" tag text in "quote".
 - For a continuous quote crossing two pages, set "page" to "N-M" and include [[PAGE_BREAK]] at the page break. Otherwise, use separate quote objects.
 - For legacy compatibility, you may also include top-level "page" and "quote" matching the first quote.
-- TESTING ONLY: Make 50% of document citation quotes exact source text and 50% deliberately false text that does not appear in the source, so citation verification produces both outcomes. Use an even number of document quotes. Do not alter case-law citations.
+- Every document citation quote must be exact verbatim text from the cited source. Never invent, alter, or approximate quoted text; if a claim cannot be supported by exact source text, omit the citation rather than fabricating one. Do not alter case-law citations.
 - Omit the <CITATIONS> block when there are no citations.
 
 DOCX GENERATION:
@@ -92,15 +90,10 @@ GENERAL GUIDANCE:
 `;
 
 /**
- * Assemble the chat system prompt. When `includeResearchTools` is true the
- * CourtListener (US case-law) research instructions are spliced in; when
- * false they are omitted entirely so the model is not told about tools it
- * does not have.
+ * Assemble the chat system prompt.
  */
-export function buildSystemPrompt(includeResearchTools = true): string {
-  return includeResearchTools
-    ? `${SYSTEM_PROMPT_BEFORE_RESEARCH}\n\n${COURTLISTENER_SYSTEM_PROMPT}\n${SYSTEM_PROMPT_AFTER_RESEARCH}`
-    : `${SYSTEM_PROMPT_BEFORE_RESEARCH}\n\n${SYSTEM_PROMPT_AFTER_RESEARCH}`;
+export function buildSystemPrompt(): string {
+  return `${SYSTEM_PROMPT_BEFORE_RESEARCH}\n\n${SYSTEM_PROMPT_AFTER_RESEARCH}`;
 }
 
-export const SYSTEM_PROMPT = buildSystemPrompt(true);
+export const SYSTEM_PROMPT = buildSystemPrompt();

@@ -147,9 +147,9 @@ type DocQuoteEntry = { page: number | string; quote: string };
 
 /**
  * Attach server-side verification to one document citation annotation.
- * Case-law annotations (kind === "case") are returned untouched — their
- * existence is verified upstream via CourtListener and must never be
- * re-marked. For document annotations, source text is fetched once via
+ * Case-law annotations (kind === "case") are returned untouched — with
+ * CourtListener disabled they carry no source metadata and are never marked
+ * verified. For document annotations, source text is fetched once via
  * `getSourceText(doc_id)` and each quote is located in it; corrected quotes
  * have the exact source excerpt swapped in so the UI never shows drifted text.
  */

@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import type { Citation, DocumentCitation } from "../../shared/types";
+import type { DocumentCitation } from "../../shared/types";
 import { CitationQuotesHeader } from "../CitationQuotesHeader";
 import {
   citationVerificationAriaLabel,
@@ -23,16 +23,6 @@ function documentCitation(verified?: boolean): DocumentCitation {
     ...(verified === undefined ? {} : { verified }),
   };
 }
-
-const caseCitation: Citation = {
-  type: "citation_data",
-  kind: "case",
-  ref: 2,
-  cluster_id: 123,
-  case_name: "Example v Example",
-  quotes: [],
-};
-
 describe("citation verification presentation", () => {
   it("leaves verified document citations in their original gray style", () => {
     const citation = documentCitation(true);
@@ -58,12 +48,6 @@ describe("citation verification presentation", () => {
     expect(citationVerificationState(citation)).toBe("verified");
     expect(citationVerificationAriaLabel(citation)).toBe("Citation 1");
     expect(citationVerificationPillClassName(citation)).toBe("");
-  });
-
-  it("does not apply document verification semantics to case citations", () => {
-    expect(citationVerificationState(caseCitation)).toBeNull();
-    expect(citationVerificationAriaLabel(caseCitation)).toBe("Citation 2");
-    expect(citationVerificationPillClassName(caseCitation)).toBe("");
   });
 
   it("renders an accessible per-quote warning badge", () => {

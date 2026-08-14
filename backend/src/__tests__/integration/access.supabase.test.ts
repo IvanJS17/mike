@@ -22,24 +22,22 @@ maybeDescribe("Supabase access integration", () => {
         const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
         const ownerId = crypto.randomUUID();
         const reviewerId = crypto.randomUUID();
-        const sharedProjectId = crypto.randomUUID();
-        const privateProjectId = crypto.randomUUID();
-        const sharedDocId = crypto.randomUUID();
-        const privateDocId = crypto.randomUUID();
+        const ownerProjectId = crypto.randomUUID();
+        const otherProjectId = crypto.randomUUID();
+        const ownerDocId = crypto.randomUUID();
+        const otherDocId = crypto.randomUUID();
 
         try {
             const projectsInsert = await admin.from("projects").insert([
                 {
-                    id: sharedProjectId,
+                    id: ownerProjectId,
                     user_id: ownerId,
-                    name: `shared-${suffix}`,
-                    shared_with: [`reviewer-${suffix}@example.com`],
+                    name: `owner-${suffix}`,
                 },
                 {
-                    id: privateProjectId,
+                    id: otherProjectId,
                     user_id: ownerId,
-                    name: `private-${suffix}`,
-                    shared_with: [],
+                    name: `other-${suffix}`,
                 },
             ]);
             if (projectsInsert.error) {
@@ -53,14 +51,14 @@ maybeDescribe("Supabase access integration", () => {
             // the documents rows only need identity + ownership columns.
             const documentsInsert = await admin.from("documents").insert([
                 {
-                    id: sharedDocId,
+                    id: ownerDocId,
                     user_id: ownerId,
-                    project_id: sharedProjectId,
+                    project_id: ownerProjectId,
                 },
                 {
-                    id: privateDocId,
+                    id: otherDocId,
                     user_id: ownerId,
-                    project_id: privateProjectId,
+                    project_id: otherProjectId,
                 },
             ]);
             if (documentsInsert.error) {
@@ -73,25 +71,23 @@ maybeDescribe("Supabase access integration", () => {
             await expect(
                 listAccessibleProjectIds(
                     reviewerId,
-                    `reviewer-${suffix}@example.com`,
                     admin as any,
                 ),
-            ).resolves.toContain(sharedProjectId);
+            ).resolves.toEqual([]);
 
             await expect(
                 filterAccessibleDocumentIds(
-                    [sharedDocId, privateDocId],
+                    [ownerDocId, otherDocId],
                     reviewerId,
-                    `reviewer-${suffix}@example.com`,
                     admin as any,
                 ),
-            ).resolves.toEqual([sharedDocId]);
+            ).resolves.toEqual([]);
         } finally {
-            await admin.from("documents").delete().in("id", [sharedDocId, privateDocId]);
+            await admin.from("documents").delete().in("id", [ownerDocId, otherDocId]);
             await admin
                 .from("projects")
                 .delete()
-                .in("id", [sharedProjectId, privateProjectId]);
+                .in("id", [ownerProjectId, otherProjectId]);
         }
     });
 });

@@ -262,31 +262,24 @@ export function parsePartialCitationObjects(text: string): ParsedCitation[] {
   return parsed;
 }
 
-type CasesByClusterId = Map<number, {
-  caseName: string | null;
-  citations: string[];
-  url: string | null;
-  pdfUrl: string | null;
-  dateFiled: string | null;
-}>;
-
 export function createCitation(
   citation: ParsedCitation,
   docIndex: DocIndex,
-  casesByClusterId?: CasesByClusterId,
 ) {
+  // Legacy case-shaped entries can still appear from model output that reuses
+  // outdated legal citation formats, so render them with no source data rather
+  // than fabricating metadata.
   if (citation.kind === "case") {
-    const caseRecord = casesByClusterId?.get(citation.cluster_id);
     return {
       type: "citation_data",
       kind: "case",
       ref: citation.ref,
       cluster_id: citation.cluster_id,
-      case_name: caseRecord?.caseName ?? null,
-      citation: caseRecord?.citations[0] ?? null,
-      url: caseRecord?.url ?? null,
-      pdfUrl: caseRecord?.pdfUrl ?? null,
-      dateFiled: caseRecord?.dateFiled ?? null,
+      case_name: null,
+      citation: null,
+      url: null,
+      pdfUrl: null,
+      dateFiled: null,
       quotes: citation.quotes,
     };
   }

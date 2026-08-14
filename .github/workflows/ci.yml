@@ -46,6 +46,11 @@ jobs:
       # harness PR merges); runs the suite once it exists.
       - run: npm test --if-present
 
+      # W1.6 security invariants: every public table has RLS enabled and no
+      # ordinary router uses the service_role path without requireAuth.
+      - name: Security invariants (RLS coverage, service_role isolation)
+        run: bash scripts/check-security-invariants.sh
+
       - run: npm run build
 
   frontend:

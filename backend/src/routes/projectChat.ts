@@ -15,7 +15,6 @@ import {
     isAbortError,
     runLLMStream,
     spotlightFilename,
-    stripTransientAssistantEvents,
     PROJECT_EXTRA_TOOLS,
     parseChatMessages,
     parseOptionalAskInputsResponse,
@@ -53,7 +52,6 @@ export const projectChatRouter = Router({ mergeParams: true });
 // POST /projects/:projectId/chat — streaming
 projectChatRouter.post("/", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { projectId } = req.params;
     const body =
         req.body && typeof req.body === "object" && !Array.isArray(req.body)
@@ -112,7 +110,6 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     const projectAccess = await checkProjectAccess(
         projectId,
         userId,
-        userEmail,
         db,
     );
     if (!projectAccess.ok)
@@ -311,18 +308,16 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
 
     const {
         api_keys: apiKeys,
-        legal_research_us: legalResearchUs,
     } = await getUserModelSettings(userId, db);
     const apiMessages = buildMessages(
         messagesForLLM,
         docAvailability,
         systemPromptExtra,
         undefined,
-        legalResearchUs,
         nonce,
     );
 
-    const workflowStore = await buildWorkflowStore(userId, userEmail, db);
+    const workflowStore = await buildWorkflowStore(userId, db);
     if (!resolvedRoute) {
         return void res.status(409).json({
             code: "chat_route_required",
@@ -356,7 +351,6 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
             write,
             extraTools: PROJECT_EXTRA_TOOLS,
             workflowStore,
-            includeResearchTools: legalResearchUs,
             model: pinnedRoute.model,
             route: pinnedRoute,
             credentialSecret: routeCredentialSecret,
@@ -366,7 +360,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
             nonce,
         });
 
-        const persistedEvents = stripTransientAssistantEvents(events);
+        const persistedEvents = events;
         if (askInputsResponse) {
             await appendAssistantEventsToLastAssistantMessage(
                 db,
@@ -434,8 +428,8 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
         }
         console.error("[project-chat/stream] error:", safeErrorLog(err));
         const message = safeErrorMessage(err, "Stream error");
-        const errorEvents = err instanceof AssistantStreamError
-            ? stripTransientAssistantEvents(err.events)
+                const errorEvents = err instanceof AssistantStreamError
+            ? err.events
             : [{ type: "error" as const, message }];
         const errorFullText =
             err instanceof AssistantStreamError ? err.fullText : "";

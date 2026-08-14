@@ -10,7 +10,6 @@ import {
     MessageSquare,
     MessageSquareX,
     Download,
-    Users,
     Upload,
     X,
     Pencil,
@@ -23,7 +22,6 @@ import {
     deleteTabularReview,
     getTabularReview,
     getProject,
-    getTabularReviewPeople,
     listProjects,
     regenerateTabularCell,
     streamTabularGeneration,
@@ -43,12 +41,10 @@ import { AddColumnModal } from "./AddColumnModal";
 import { TRWorkflowModal } from "./TRWorkflowModal";
 import { AddDocumentsModal } from "../modals/AddDocumentsModal";
 import { AddProjectDocsModal } from "../modals/AddProjectDocsModal";
-import { PeopleModal } from "../modals/PeopleModal";
 import { OwnerOnlyPopup } from "../popups/OwnerOnlyPopup";
 import { ApiKeyMissingPopup } from "../popups/ApiKeyMissingPopup";
 import { ConfirmPopup } from "../popups/ConfirmPopup";
 import { HeaderActionsMenu } from "../shared/HeaderActionsMenu";
-import { useAuth } from "@/app/contexts/AuthContext";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
 import {
     getModelProvider,
@@ -87,7 +83,6 @@ export function TRView({ reviewId, projectId }: Props) {
     const [addDocsOpen, setAddDocsOpen] = useState(false);
     const [detailsOpen, setDetailsOpen] = useState(false);
     const [availableProjects, setAvailableProjects] = useState<Project[]>([]);
-    const [peopleModalOpen, setPeopleModalOpen] = useState(false);
     const [workflowModalOpen, setWorkflowModalOpen] = useState(false);
     const [applyingWorkflow, setApplyingWorkflow] = useState(false);
     const [deleteReviewConfirmOpen, setDeleteReviewConfirmOpen] =
@@ -96,7 +91,6 @@ export function TRView({ reviewId, projectId }: Props) {
         "idle" | "deleting" | "deleted"
     >("idle");
     const [ownerOnlyAction, setOwnerOnlyAction] = useState<string | null>(null);
-    const { user } = useAuth();
     const [expandedCell, setExpandedCell] = useState<TabularCell | null>(null);
     const [expandedCellCitation, setExpandedCellCitation] = useState<
         {
@@ -746,15 +740,6 @@ export function TRView({ reviewId, projectId }: Props) {
                                 onChange: setSearch,
                                 placeholder: "Search rows…",
                             },
-                            !projectId
-                                ? {
-                                      onClick: () => setPeopleModalOpen(true),
-                                      disabled: loading,
-                                      iconOnly: true,
-                                      title: "People with access",
-                                      icon: <Users className="h-4 w-4" />,
-                                  }
-                                : null,
                             {
                                 type: "custom",
                                 render: (
@@ -1161,41 +1146,6 @@ export function TRView({ reviewId, projectId }: Props) {
                 lockProject={Boolean(projectId)}
                 onClose={() => setDetailsOpen(false)}
                 onSave={handleDetailsSave}
-            />
-
-            <PeopleModal
-                open={peopleModalOpen}
-                onClose={() => setPeopleModalOpen(false)}
-                resource={review}
-                fetchPeople={getTabularReviewPeople}
-                currentUserEmail={user?.email ?? null}
-                breadcrumb={[
-                    "Tabular Reviews",
-                    review?.title || "Untitled Review",
-                    "People",
-                ]}
-                // Only the review owner may modify the member list. PeopleModal
-                // hides the add/remove controls when this prop is undefined.
-                onSharedWithChange={
-                    review?.is_owner === false
-                        ? undefined
-                        : async (next) => {
-                              const updated = await updateTabularReview(
-                                  reviewId,
-                                  {
-                                      shared_with: next,
-                                  },
-                              );
-                              setReview((prev) =>
-                                  prev
-                                      ? {
-                                            ...prev,
-                                            shared_with: updated.shared_with,
-                                        }
-                                      : prev,
-                              );
-                          }
-                }
             />
 
             <TRWorkflowModal

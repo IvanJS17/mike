@@ -129,7 +129,7 @@ describe("tabular.routes", () => {
         checkProjectAccess.mockResolvedValue({
             ok: true,
             isOwner: true,
-            project: { id: "p1", user_id: "u1", shared_with: null },
+            project: { id: "p1", user_id: "u1" },
         });
         // Default: every requested doc is accessible (identity passthrough).
         filterAccessibleDocumentIds.mockImplementation(
@@ -546,18 +546,6 @@ describe("tabular.routes", () => {
             expect(res.status).toBe(400);
             expect(res.body.detail).toBe(
                 "project_id must be a non-empty string or null",
-            );
-        });
-
-        it("returns 400 when sharing the review with yourself", async () => {
-            const res = await request(app)
-                .patch("/tabular-review/r1")
-                .set(...AUTH)
-                .send({ shared_with: ["U1@Test.Local"] });
-
-            expect(res.status).toBe(400);
-            expect(res.body.detail).toBe(
-                "You cannot share a tabular review with yourself.",
             );
         });
 

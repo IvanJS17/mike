@@ -9,7 +9,6 @@ import {
     type GovernedLlmProvider,
     type ModelRoute,
 } from "./routes";
-import { createRawLlmStreamRecorder, logRawLlmStream } from "./rawStreamLog";
 
 const MAX_OUTPUT_TOKENS = 16384;
 
@@ -118,14 +117,7 @@ async function readStreamingResponse(
     const tools = new Map<number, ToolAccumulator>();
 
     const handlePayload = (payload: unknown) => {
-        logRawLlmStream({
-            provider: params.route?.provider ?? "openai-compatible",
-            model: params.model,
-            iteration,
-            label: "sse_event",
-            payload,
-        });
-        if (!payload || typeof payload !== "object") return;
+                if (!payload || typeof payload !== "object") return;
         const choice = (
             payload as {
                 choices?: {
@@ -189,14 +181,7 @@ async function readStreamingResponse(
             const { done, value } = await reader.read();
             if (done) break;
             const decoded = decoder.decode(value, { stream: true });
-            logRawLlmStream({
-                provider: params.route?.provider ?? "openai-compatible",
-                model: params.model,
-                iteration,
-                label: "sse_chunk",
-                payload: decoded,
-            });
-            buffer += decoded;
+                        buffer += decoded;
             const chunks = buffer.split(/\r?\n\r?\n/);
             buffer = chunks.pop() ?? "";
             for (const chunk of chunks) {
@@ -254,11 +239,7 @@ export async function streamOpenAICompatible(
     const tools = params.tools ?? [];
     let fullText = "";
     const maxIterations = params.maxIterations ?? 10;
-    const recorder = createRawLlmStreamRecorder({
-        provider: route.provider,
-        model: route.model,
-    });
-
+    
     try {
         for (let iteration = 0; iteration < maxIterations; iteration++) {
             throwIfAborted(params.abortSignal);
@@ -305,11 +286,9 @@ export async function streamOpenAICompatible(
                 });
             }
         }
-        await recorder?.flush("completed");
-        return { fullText };
+                return { fullText };
     } catch (error) {
-        await recorder?.flush("error", error);
-        throw error;
+                throw error;
     }
 }
 

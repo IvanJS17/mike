@@ -3,9 +3,7 @@ import { createServerSupabase } from "./supabase";
 import type { UserApiKeys } from "./llm";
 
 type Db = ReturnType<typeof createServerSupabase>;
-export type ApiKeyProvider =
-    | LlmApiKeyProvider
-    | "courtlistener";
+export type ApiKeyProvider = LlmApiKeyProvider;
 export type LlmApiKeyProvider =
     | "claude"
     | "gemini"
@@ -45,7 +43,6 @@ type EncryptedKeyRow = {
 
 const PROVIDERS: ApiKeyProvider[] = [
     ...LLM_API_KEY_PROVIDERS,
-    "courtlistener",
 ];
 
 function envApiKey(provider: ApiKeyProvider): string | null {
@@ -68,8 +65,6 @@ function envApiKey(provider: ApiKeyProvider): string | null {
             return process.env.OPENCODE_ZEN_API_KEY?.trim() || null;
         case "opencode-go":
             return process.env.OPENCODE_GO_API_KEY?.trim() || null;
-        case "courtlistener":
-            return process.env.COURTLISTENER_API_TOKEN?.trim() || null;
         default:
             return null;
     }
@@ -136,12 +131,6 @@ export type ResolvedUserLlmCredential = {
     credential_ref: string;
     secret: string;
 };
-
-function isLlmApiKeyProvider(
-    provider: ApiKeyProvider,
-): provider is LlmApiKeyProvider {
-    return provider !== "courtlistener";
-}
 
 export async function resolveUserLlmCredential(
     userId: string,
@@ -218,7 +207,7 @@ export async function listUserLlmCredentials(
 
     for (const row of (data ?? []) as EncryptedKeyRow[]) {
         const provider = normalizeApiKeyProvider(String(row.provider));
-        if (!provider || !isLlmApiKeyProvider(provider)) continue;
+        if (!provider) continue;
         const credentialRef = row.credential_ref?.trim();
         if (!credentialRef || row.enabled === false) continue;
         const secret = decrypt(row);
@@ -241,7 +230,6 @@ export async function getUserApiKeyStatus(
         deepseek: false,
         "opencode-zen": false,
         "opencode-go": false,
-        courtlistener: false,
         sources: {
             claude: null,
             gemini: null,
@@ -250,7 +238,6 @@ export async function getUserApiKeyStatus(
             deepseek: null,
             "opencode-zen": null,
             "opencode-go": null,
-            courtlistener: null,
         },
     };
 
@@ -291,7 +278,6 @@ export async function getUserApiKeys(
         deepseek: envApiKey("deepseek"),
         "opencode-zen": envApiKey("opencode-zen"),
         "opencode-go": envApiKey("opencode-go"),
-        courtlistener: envApiKey("courtlistener"),
     };
 
     const { data, error } = await db

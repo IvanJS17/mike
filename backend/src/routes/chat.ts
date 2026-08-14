@@ -14,7 +14,6 @@ import {
     generateSpotlightNonce,
     isAbortError,
     runLLMStream,
-    stripTransientAssistantEvents,
     parseChatMessages,
     parseOptionalAskInputsResponse,
     parseOptionalChatId,
@@ -65,11 +64,10 @@ type AccessibleChat = {
 async function validateAccessibleProjectId(
     projectId: string | null,
     userId: string,
-    userEmail: string | null | undefined,
     db: Db,
 ): Promise<{ ok: true } | { ok: false; status: number; detail: string }> {
     if (!projectId) return { ok: true };
-    const access = await checkProjectAccess(projectId, userId, userEmail, db);
+    const access = await checkProjectAccess(projectId, userId, db);
     if (!access.ok)
         return { ok: false, status: 404, detail: "Project not found" };
     return { ok: true };
@@ -78,7 +76,6 @@ async function validateAccessibleProjectId(
 async function getAccessibleChat(
     chatId: string,
     userId: string,
-    userEmail: string | null | undefined,
     db: Db,
 ): Promise<AccessibleChat | null> {
     const { data: chat, error } = await db
@@ -95,7 +92,6 @@ async function getAccessibleChat(
         const access = await checkProjectAccess(
             row.project_id,
             userId,
-            userEmail,
             db,
         );
         if (access.ok) return row;
@@ -129,7 +125,6 @@ chatRouter.get("/", requireAuth, async (req, res) => {
 // POST /chat/create
 chatRouter.post("/create", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const parsedRoute = parseModelRoute(req.body?.route);
     if (!parsedRoute.ok) {
         return void res.status(400).json({ detail: parsedRoute.detail });
@@ -154,7 +149,6 @@ chatRouter.post("/create", requireAuth, async (req, res) => {
     const projectAccess = await validateAccessibleProjectId(
         projectId,
         userId,
-        userEmail,
         db,
     );
     if (!projectAccess.ok)
@@ -181,11 +175,10 @@ chatRouter.post("/create", requireAuth, async (req, res) => {
 // GET /chat/:chatId
 chatRouter.get("/:chatId", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { chatId } = req.params;
     const db = createServerSupabase();
 
-    const chat = await getAccessibleChat(chatId, userId, userEmail, db);
+    const chat = await getAccessibleChat(chatId, userId, db);
     if (!chat)
         return void res.status(404).json({ detail: "Chat not found" });
 
@@ -353,7 +346,6 @@ chatRouter.delete("/:chatId", requireAuth, async (req, res) => {
 // POST /chat/:chatId/generate-title
 chatRouter.post("/:chatId/generate-title", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { chatId } = req.params;
     const message =
         typeof req.body?.message === "string" ? req.body.message.trim() : "";
@@ -361,7 +353,7 @@ chatRouter.post("/:chatId/generate-title", requireAuth, async (req, res) => {
         return void res.status(400).json({ detail: "message is required" });
 
     const db = createServerSupabase();
-    const chat = await getAccessibleChat(chatId, userId, userEmail, db);
+    const chat = await getAccessibleChat(chatId, userId, db);
     if (!chat)
         return void res.status(404).json({ detail: "Chat not found" });
 
@@ -454,7 +446,6 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         messageCount: messages?.length,
     });
 
-    const userEmail = res.locals.userEmail as string | undefined;
     const db = createServerSupabase();
     let chatId = chat_id ?? null;
     let chatTitle: string | null = null;
@@ -463,7 +454,7 @@ chatRouter.post("/", requireAuth, async (req, res) => {
     let routeCredentialSecret: string | undefined;
 
     if (chatId) {
-        const existing = await getAccessibleChat(chatId, userId, userEmail, db);
+        const existing = await getAccessibleChat(chatId, userId, db);
         if (!existing)
             return void res.status(404).json({ detail: "Chat not found" });
 
@@ -549,7 +540,6 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         const projectAccess = await validateAccessibleProjectId(
             resolvedProjectId,
             userId,
-            userEmail,
             db,
         );
         if (!projectAccess.ok)
@@ -619,7 +609,6 @@ chatRouter.post("/", requireAuth, async (req, res) => {
     );
     const {
         api_keys: apiKeys,
-        legal_research_us: legalResearchUs,
     } = await getUserModelSettings(userId, db);
     // Extra system context: the Word add-in's active-document body. The
     // document text is user-controlled and a prompt-injection vector, so
@@ -636,11 +625,10 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         docAvailability,
         systemPromptExtra,
         undefined,
-        legalResearchUs,
         nonce,
     );
 
-    const workflowStore = await buildWorkflowStore(userId, userEmail, db);
+    const workflowStore = await buildWorkflowStore(userId, db);
     if (!resolvedRoute) {
         return void res.status(409).json({
             code: "chat_route_required",
@@ -679,7 +667,6 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             db,
             write,
             workflowStore,
-            includeResearchTools: legalResearchUs,
             model: pinnedRoute.model,
             route: pinnedRoute,
             credentialSecret: routeCredentialSecret,
@@ -694,7 +681,7 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             eventCount: events?.length ?? 0,
         });
 
-        const persistedEvents = stripTransientAssistantEvents(events);
+        const persistedEvents = events;
         if (askInputsResponse) {
             await appendAssistantEventsToLastAssistantMessage(
                 db,
@@ -760,8 +747,8 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         }
         console.error("[chat/stream] error:", safeErrorLog(err));
         const message = safeErrorMessage(err, "Stream error");
-        const errorEvents = err instanceof AssistantStreamError
-            ? stripTransientAssistantEvents(err.events)
+                const errorEvents = err instanceof AssistantStreamError
+            ? err.events
             : [{ type: "error" as const, message }];
         const errorFullText =
             err instanceof AssistantStreamError ? err.fullText : "";

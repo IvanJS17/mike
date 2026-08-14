@@ -36,7 +36,7 @@ maybeDescribe("governed BYOK credential allocation in PostgreSQL", () => {
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 CONSTRAINT user_api_keys_provider_check
-                    CHECK (provider IN ('claude', 'gemini', 'openai', 'openrouter', 'courtlistener')),
+                    CHECK (provider IN ('claude', 'gemini', 'openai', 'openrouter')),
                 CONSTRAINT user_api_keys_user_provider_key UNIQUE (user_id, provider)
             );
             CREATE TABLE public.chats (id text PRIMARY KEY);

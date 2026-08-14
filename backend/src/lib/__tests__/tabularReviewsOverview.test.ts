@@ -10,7 +10,6 @@ describe("buildTabularReviewsOverviewRpcArgs", () => {
         expect(
             buildTabularReviewsOverviewRpcArgs({
                 userId: "user-1",
-                userEmail: "user@example.com",
                 projectIdFilter: "project-1",
                 scope: "in-project",
                 pagination: { limit: 25, offset: 10 },
@@ -19,7 +18,6 @@ describe("buildTabularReviewsOverviewRpcArgs", () => {
             }),
         ).toEqual({
             p_user_id: "user-1",
-            p_user_email: "user@example.com",
             p_project_id: "project-1",
             p_scope: "in-project",
             p_limit: 25,
@@ -34,12 +32,10 @@ describe("buildTabularReviewsOverviewRpcArgs", () => {
         expect(
             buildTabularReviewsOverviewRpcArgs({
                 userId: "user-1",
-                userEmail: undefined,
                 projectIdFilter: null,
             }),
         ).toEqual({
             p_user_id: "user-1",
-            p_user_email: null,
             p_project_id: null,
             p_scope: "all",
             p_limit: 20,
@@ -56,7 +52,6 @@ describe("buildTabularReviewIdsOverviewRpcArgs", () => {
         expect(
             buildTabularReviewIdsOverviewRpcArgs({
                 userId: "user-1",
-                userEmail: "user@example.com",
                 projectIdFilter: "project-1",
                 scope: "in-project",
                 searchTerm: "merger",
@@ -64,7 +59,6 @@ describe("buildTabularReviewIdsOverviewRpcArgs", () => {
             }),
         ).toEqual({
             p_user_id: "user-1",
-            p_user_email: "user@example.com",
             p_project_id: "project-1",
             p_scope: "in-project",
             p_search_term: "merger",
@@ -77,13 +71,11 @@ describe("buildTabularReviewIdsOverviewRpcArgs", () => {
         expect(
             buildTabularReviewIdsOverviewRpcArgs({
                 userId: "user-1",
-                userEmail: undefined,
                 projectIdFilter: null,
                 pagination: { limit: 1000, offset: 0 },
             }),
         ).toEqual({
             p_user_id: "user-1",
-            p_user_email: null,
             p_project_id: null,
             p_scope: "all",
             p_search_term: null,

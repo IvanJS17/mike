@@ -283,13 +283,9 @@ export async function buildUserAccountExport(
         workflows,
         workflowOpenSourceSubmissions,
         hiddenWorkflows,
-        workflowSharesByUser,
-        workflowSharesWithUser,
         assistantChats,
         tabularChats,
         tabularReviews,
-        sharedProjects,
-        sharedTabularReviews,
     ] = await Promise.all([
         selectAll(db, "user_profiles", (query) => query.eq("user_id", userId)),
         loadApiKeyStatus(db, userId),
@@ -313,41 +309,11 @@ export async function buildUserAccountExport(
         selectAll(db, "hidden_workflows", (query) =>
             query.eq("user_id", userId).order("created_at", { ascending: true }),
         ),
-        selectAll(db, "workflow_shares", (query) =>
-            query
-                .eq("shared_by_user_id", userId)
-                .order("created_at", { ascending: true }),
-        ),
-        userEmail
-            ? selectAll(db, "workflow_shares", (query) =>
-                  query
-                      .eq("shared_with_email", userEmail)
-                      .order("created_at", { ascending: true }),
-              )
-            : Promise.resolve([]),
         loadUserChats(db, userId),
         loadUserTabularChats(db, userId),
         selectAll(db, "tabular_reviews", (query) =>
             query.eq("user_id", userId).order("created_at", { ascending: true }),
         ),
-        userEmail
-            ? selectAll(db, "projects", (query) =>
-                  query
-                      .filter("shared_with", "cs", JSON.stringify([userEmail]))
-                      .neq("user_id", userId)
-                      .order("created_at", { ascending: true }),
-                  "id, user_id, name, cm_number, created_at, updated_at",
-              )
-            : Promise.resolve([]),
-        userEmail
-            ? selectAll(db, "tabular_reviews", (query) =>
-                  query
-                      .filter("shared_with", "cs", JSON.stringify([userEmail]))
-                      .neq("user_id", userId)
-                      .order("created_at", { ascending: true }),
-                  "id, user_id, project_id, title, practice, created_at, updated_at",
-              )
-            : Promise.resolve([]),
     ]);
 
     const projectIds = idsFrom(projects);
@@ -381,15 +347,9 @@ export async function buildUserAccountExport(
         workflows,
         workflow_open_source_submissions: workflowOpenSourceSubmissions,
         hidden_workflows: hiddenWorkflows,
-        workflow_shares_by_user: workflowSharesByUser,
-        workflow_shares_with_user: workflowSharesWithUser,
         chats: assistantChats,
         tabular_reviews: tabularReviews,
         tabular_cells: tabularCells,
         tabular_review_chats: tabularChats,
-        shared_access: {
-            projects: sharedProjects,
-            tabular_reviews: sharedTabularReviews,
-        },
     };
 }

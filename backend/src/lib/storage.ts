@@ -74,6 +74,35 @@ export async function uploadFile(
   );
 }
 
+/** Upload to an explicit bucket (used by the W1.14 audit-export job). */
+export async function uploadFileToBucket(
+  bucket: string,
+  key: string,
+  content: ArrayBuffer | Buffer,
+  contentType: string,
+): Promise<void> {
+  requireStorageConfig();
+  const client = getClient();
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: Buffer.isBuffer(content) ? content : Buffer.from(content),
+      ContentType: contentType,
+    }),
+  );
+}
+
+/** Delete an object in an explicit bucket (W1.14 audit-export retention). */
+export async function deleteFileFromBucket(
+  bucket: string,
+  key: string,
+): Promise<void> {
+  if (!storageEnabled) return;
+  const client = getClient();
+  await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+}
+
 // ---------------------------------------------------------------------------
 // Download
 // ---------------------------------------------------------------------------
@@ -102,6 +131,31 @@ export async function listFiles(prefix: string): Promise<string[]> {
     const response = await client.send(
       new ListObjectsV2Command({
         Bucket: BUCKET,
+        Prefix: prefix,
+        ContinuationToken,
+      }),
+    );
+    for (const item of response.Contents ?? []) {
+      if (item.Key) keys.push(item.Key);
+    }
+    ContinuationToken = response.NextContinuationToken;
+  } while (ContinuationToken);
+  return keys;
+}
+
+/** List objects in an explicit bucket (W1.14 audit-export retention). */
+export async function listFilesFromBucket(
+  bucket: string,
+  prefix: string,
+): Promise<string[]> {
+  if (!storageEnabled) return [];
+  const client = getClient();
+  const keys: string[] = [];
+  let ContinuationToken: string | undefined;
+  do {
+    const response = await client.send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
         Prefix: prefix,
         ContinuationToken,
       }),

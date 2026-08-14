@@ -170,9 +170,6 @@ interface Props {
 
 function getWorkflowSourceLabel(workflow: Workflow) {
     if (workflow.is_system) return "System";
-    if (workflow.is_owner === false) {
-        return workflow.shared_by_name?.trim() || "Shared";
-    }
     return "User";
 }
 

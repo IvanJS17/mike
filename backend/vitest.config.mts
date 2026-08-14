@@ -21,7 +21,7 @@ export default defineConfig({
             // llm model resolution, chat citations, userLookup,
             // documentVersions, userDataCleanup, docxTrackedChanges,
             // documentTypes, chat prompts, systemWorkflows) AND the large,
-            // still-untested feature libs (courtlistener, mcp, chat tool
+            // still-untested feature libs (mcp, chat tool
             // dispatch, llm providers, spreadsheet handling), so the global
             // number is still low. Measured on this tree: 23.88% statements,
             // 17.98% branches, 23.06% functions, 23.79% lines. These floors

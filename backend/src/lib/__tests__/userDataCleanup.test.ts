@@ -307,16 +307,12 @@ describe("deleteUserAccountData", () => {
     const fixture = () =>
         makeDb({
             projects: [
-                { id: "p1", user_id: "u1", shared_with: [] },
-                {
-                    id: "p-other",
-                    user_id: "u2",
-                    shared_with: ["u1@example.com", " U1@Example.com ", "keep@example.com"],
-                },
+                { id: "p1", user_id: "u1" },
+                { id: "p-other", user_id: "u2" },
             ],
             tabular_reviews: [
-                { id: "r1", user_id: "u1", shared_with: [] },
-                { id: "r-other", user_id: "u2", shared_with: ["u1@example.com"] },
+                { id: "r1", user_id: "u1" },
+                { id: "r-other", user_id: "u2" },
             ],
             documents: [
                 { id: "d1", user_id: "u1", project_id: null },
@@ -354,30 +350,17 @@ describe("deleteUserAccountData", () => {
             workflow_open_source_submissions: [
                 { id: "s1", submitted_by_user_id: "u1" },
             ],
-            workflow_shares: [
-                { id: "ws-by", shared_by_user_id: "u1", shared_with_email: "x@y.z" },
-                {
-                    id: "ws-to",
-                    shared_by_user_id: "u2",
-                    shared_with_email: "u1@example.com",
-                },
-                {
-                    id: "ws-keep",
-                    shared_by_user_id: "u2",
-                    shared_with_email: "keep@example.com",
-                },
-            ],
             workflows: [
                 { id: "w1", user_id: "u1" },
                 { id: "w-other", user_id: "u2" },
             ],
         });
 
-    it("removes the user's rows, files, and share references everywhere", async () => {
+    it("removes the user's rows and files", async () => {
         const { db, tables } = fixture();
         listFilesMock.mockResolvedValue(["documents/u1/orphan.bin"]);
 
-        await deleteUserAccountData(db, "u1", " U1@Example.COM ");
+        await deleteUserAccountData(db, "u1");
 
         // Owned docs and guest docs inside owned projects are gone.
         expect(ids(tables.documents)).toEqual(["d-other"]);
@@ -389,14 +372,6 @@ describe("deleteUserAccountData", () => {
         expect(tables.hidden_workflows).toEqual([]);
         expect(tables.workflow_open_source_submissions).toEqual([]);
         expect(ids(tables.workflows)).toEqual(["w-other"]);
-
-        // Shares by the user and shares to the user's email are both removed.
-        expect(ids(tables.workflow_shares)).toEqual(["ws-keep"]);
-
-        // The email is scrubbed from other users' shared_with lists
-        // (case-insensitively), preserving other collaborators.
-        expect(tables.projects[0].shared_with).toEqual(["keep@example.com"]);
-        expect(tables.tabular_reviews[0].shared_with).toEqual([]);
 
         // Version files for deleted docs plus orphans under the user's prefix.
         const deletedPaths = deleteFileMock.mock.calls.map(([path]) => path);
@@ -413,20 +388,8 @@ describe("deleteUserAccountData", () => {
         const { db, tables } = fixture();
         listFilesMock.mockRejectedValue(new Error("storage unavailable"));
         await expect(
-            deleteUserAccountData(db, "u1", "u1@example.com"),
+            deleteUserAccountData(db, "u1"),
         ).resolves.toBeUndefined();
         expect(ids(tables.documents)).toEqual(["d-other"]);
-    });
-
-    it("skips shared_with scrubbing when no email is known", async () => {
-        const { db, tables } = fixture();
-        await deleteUserAccountData(db, "u1", null);
-        // Rows referencing the email by value are left in place...
-        expect(tables.projects.find((row) => row.id === "p-other")?.shared_with)
-            .toContain("u1@example.com");
-        expect(ids(tables.workflow_shares)).toEqual(["ws-to", "ws-keep"]);
-        // ...but the user's own data is still deleted.
-        expect(ids(tables.documents)).toEqual(["d-other"]);
-        expect(tables.workflows.map((row) => row.id)).toEqual(["w-other"]);
     });
 });

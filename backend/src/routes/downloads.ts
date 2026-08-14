@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
+import { recordAuditEvent } from "../lib/audit";
 import { buildContentDisposition, downloadFile } from "../lib/storage";
 import { verifyDownload } from "../lib/downloadTokens";
 import { ensureDocAccess } from "../lib/access";
@@ -18,7 +19,6 @@ function contentTypeFor(filename: string): string {
 // GET /download/:token
 downloadsRouter.get("/:token", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const info = verifyDownload(req.params.token);
     if (!info)
         return void res.status(404).json({ detail: "Invalid link" });
@@ -52,7 +52,7 @@ downloadsRouter.get("/:token", requireAuth, async (req, res) => {
     if (!doc)
         return void res.status(404).json({ detail: "File not found" });
 
-    const access = await ensureDocAccess(doc, userId, userEmail, db);
+    const access = await ensureDocAccess(doc, userId, db);
     if (!access.ok)
         return void res.status(404).json({ detail: "File not found" });
 
@@ -65,5 +65,11 @@ downloadsRouter.get("/:token", requireAuth, async (req, res) => {
         "Content-Disposition",
         buildContentDisposition("attachment", info.filename),
     );
+    await recordAuditEvent(db, {
+        actorUserId: userId,
+        organizationId: null,
+        eventType: "document.downloaded",
+        eventDetail: { document_id: version.document_id, path: info.path },
+    });
     res.send(Buffer.from(raw));
 });

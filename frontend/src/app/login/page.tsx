@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/app/lib/supabase";
 import { Button } from "@/app/components/ui/button";
 import { Input } from "@/app/components/ui/input";
 import Link from "next/link";
 import { SiteLogo } from "@/app/components/site-logo";
 import { useAuth } from "@/app/contexts/AuthContext";
+import { InvitePasswordSetup } from "@/app/components/auth/InvitePasswordSetup";
 
 const authGlassCardClassName =
     "rounded-2xl border border-white/70 bg-white/72 p-8 shadow-[0_4px_14px_rgba(15,23,42,0.045),inset_0_1px_0_rgba(255,255,255,0.86),inset_0_-8px_18px_rgba(255,255,255,0.12)] backdrop-blur-2xl";
@@ -22,17 +23,22 @@ const authToggleInactiveClassName =
 
 export default function LoginPage() {
     const router = useRouter();
+    const searchParams = useSearchParams();
     const { isAuthenticated, authLoading } = useAuth();
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const isInviteFlow =
+        searchParams.has("token_hash") ||
+        searchParams.has("token") ||
+        searchParams.get("type") === "invite";
 
     useEffect(() => {
-        if (!authLoading && isAuthenticated) {
+        if (!authLoading && isAuthenticated && !isInviteFlow) {
             router.replace("/assistant");
         }
-    }, [authLoading, isAuthenticated, router]);
+    }, [authLoading, isAuthenticated, isInviteFlow, router]);
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -58,6 +64,23 @@ export default function LoginPage() {
             setLoading(false);
         }
     };
+
+    if (isInviteFlow) {
+        return (
+            <div className="min-h-dvh bg-gray-50/80 flex items-start justify-center px-6 pt-32 md:pt-40 pb-10 relative">
+                <div className="absolute top-4 md:top-8 left-1/2 -translate-x-1/2">
+                    <SiteLogo size="lg" asLink />
+                </div>
+                <div className="w-full max-w-md">
+                    <div className={`${authGlassCardClassName} p-8`}>
+                        <InvitePasswordSetup
+                            onSuccess={() => router.replace("/assistant")}
+                        />
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="min-h-dvh bg-gray-50/80 flex items-start justify-center px-6 pt-32 md:pt-40 pb-10 relative">

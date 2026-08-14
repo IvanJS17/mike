@@ -23,15 +23,14 @@ const maybeDescribe =
 // trips the leak sweep below. A table missing from an older local stack
 // returns an error (no rows), which never counts as a leak.
 const PUBLIC_TABLES = [
-    "chat_messages", "chats", "courtlistener_citation_index",
-    "courtlistener_opinion_cluster_index", "document_edits",
+    "chat_messages", "chats", "document_edits",
     "document_versions", "documents", "hidden_workflows", "library_folders",
     "project_subfolders", "projects", "tabular_cells",
     "tabular_review_chat_messages", "tabular_review_chats", "tabular_reviews",
     "user_api_keys", "user_mcp_connector_tools", "user_mcp_connectors",
     "user_mcp_oauth_states", "user_mcp_oauth_tokens",
     "user_mcp_tool_audit_logs", "user_profiles",
-    "workflow_open_source_submissions", "workflow_shares", "workflows",
+    "workflow_open_source_submissions", "workflows",
 ];
 
 maybeDescribe("Supabase stack — auth contract + RLS deny-all firewall", () => {

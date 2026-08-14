@@ -16,7 +16,6 @@ import {
     buildCancelledAssistantMessage,
     isAbortError,
     runLLMStream,
-    stripTransientAssistantEvents,
     TABULAR_TOOLS,
     type ChatMessage,
     type TabularCellStore,
@@ -35,10 +34,6 @@ import {
     filterAccessibleDocumentIds,
 } from "../lib/access";
 import { safeErrorLog, safeErrorMessage } from "../lib/safeError";
-import {
-    findMissingUserEmails,
-    loadProfileUsersByEmail,
-} from "../lib/userLookup";
 import { parsePaginationQuery } from "../lib/pagination";
 import { normalizeSearchTerm } from "../lib/search";
 import { parseTabularReviewSort } from "../lib/sort";
@@ -486,7 +481,6 @@ function missingModelApiKey(model: string, apiKeys: UserApiKeys) {
 // GET /tabular-review
 tabularRouter.get("/", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const db = createServerSupabase();
 
     const projectIdFilter =
@@ -500,7 +494,6 @@ tabularRouter.get("/", requireAuth, async (req, res) => {
 
     const rpcArgs = buildTabularReviewsOverviewRpcArgs({
         userId,
-        userEmail,
         projectIdFilter,
         scope,
         pagination,
@@ -530,7 +523,6 @@ const TABULAR_REVIEW_IDS_MAX_PAGES = 200; // guards a runaway loop, not a produc
 
 tabularRouter.get("/ids", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const db = createServerSupabase();
 
     const projectIdFilter =
@@ -545,7 +537,6 @@ tabularRouter.get("/ids", requireAuth, async (req, res) => {
     for (let page = 0; page < TABULAR_REVIEW_IDS_MAX_PAGES; page++) {
         const rpcArgs = buildTabularReviewIdsOverviewRpcArgs({
             userId,
-            userEmail,
             projectIdFilter,
             scope,
             searchTerm,
@@ -572,7 +563,6 @@ tabularRouter.get("/ids", requireAuth, async (req, res) => {
 // POST /tabular-review
 tabularRouter.post("/", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const {
         title,
         document_ids,
@@ -591,17 +581,12 @@ tabularRouter.post("/", requireAuth, async (req, res) => {
 
     const db = createServerSupabase();
     if (project_id) {
-        const access = await checkProjectAccess(
-            project_id,
-            userId,
-            userEmail,
-            db,
-        );
+        const access = await checkProjectAccess(project_id, userId, db);
         if (!access.ok)
             return void res.status(404).json({ detail: "Project not found" });
     }
     const allowedDocumentIds = Array.isArray(document_ids)
-        ? await filterAccessibleDocumentIds(document_ids, userId, userEmail, db)
+        ? await filterAccessibleDocumentIds(document_ids, userId, db)
         : [];
     const grouping = normalizeGrouping(document_grouping);
     const { data: review, error } = await db
@@ -718,7 +703,6 @@ tabularRouter.post("/prompt", requireAuth, async (req, res) => {
 // GET /tabular-review/:reviewId
 tabularRouter.get("/:reviewId", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { reviewId } = req.params;
     const db = createServerSupabase();
 
@@ -729,7 +713,7 @@ tabularRouter.get("/:reviewId", requireAuth, async (req, res) => {
         .single();
     if (error || !review)
         return void res.status(404).json({ detail: "Review not found" });
-    const access = await ensureReviewAccess(review, userId, userEmail, db);
+    const access = await ensureReviewAccess(review, userId, db);
     if (!access.ok)
         return void res.status(404).json({ detail: "Review not found" });
 
@@ -765,55 +749,9 @@ tabularRouter.get("/:reviewId", requireAuth, async (req, res) => {
     });
 });
 
-// GET /tabular-review/:reviewId/people
-// Owner email + display_name plus member display_names — the analog of
-// /projects/:id/people. Used by the standalone TR detail page's People
-// modal so the roster can show display_names alongside emails.
-tabularRouter.get("/:reviewId/people", requireAuth, async (req, res) => {
-    const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
-    const { reviewId } = req.params;
-    const db = createServerSupabase();
-
-    const { data: review } = await db
-        .from("tabular_reviews")
-        .select("id, user_id, project_id, shared_with")
-        .eq("id", reviewId)
-        .single();
-    if (!review)
-        return void res.status(404).json({ detail: "Review not found" });
-    const access = await ensureReviewAccess(review, userId, userEmail, db);
-    if (!access.ok)
-        return void res.status(404).json({ detail: "Review not found" });
-
-    const sharedWith: string[] = (
-        Array.isArray(review.shared_with)
-            ? (review.shared_with as string[])
-            : []
-    ).map((e) => (e ?? "").toLowerCase());
-
-    // Use the mirrored profile email so sharing checks do not scan auth.users.
-    const { userByEmail, userById } = await loadProfileUsersByEmail(db);
-
-    const ownerInfo = userById.get(review.user_id as string);
-    res.json({
-        owner: {
-            user_id: review.user_id,
-            email: ownerInfo?.email ?? null,
-            display_name: ownerInfo?.display_name ?? null,
-        },
-        members: sharedWith.map((email) => {
-            const u = userByEmail.get(email);
-            const display_name = u?.display_name ?? null;
-            return { email, display_name };
-        }),
-    });
-});
-
 // PATCH /tabular-review/:reviewId
 tabularRouter.patch("/:reviewId", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { reviewId } = req.params;
     const updates: Record<string, unknown> = {};
     if (req.body.title != null) updates.title = req.body.title;
@@ -830,27 +768,6 @@ tabularRouter.patch("/:reviewId", requireAuth, async (req, res) => {
             detail: "project_id must be a non-empty string or null",
         });
     }
-    // shared_with edits are owner-only — gated below after we know who's
-    // making the call. Normalize lowercase + dedupe + drop empties.
-    let sharedWithUpdate: string[] | undefined;
-    if (Array.isArray(req.body.shared_with)) {
-        const normalizedUserEmail = userEmail?.trim().toLowerCase();
-        const seen = new Set<string>();
-        const cleaned: string[] = [];
-        for (const raw of req.body.shared_with) {
-            if (typeof raw !== "string") continue;
-            const e = raw.trim().toLowerCase();
-            if (!e || seen.has(e)) continue;
-            if (normalizedUserEmail && e === normalizedUserEmail) {
-                return void res.status(400).json({
-                    detail: "You cannot share a tabular review with yourself.",
-                });
-            }
-            seen.add(e);
-            cleaned.push(e);
-        }
-        sharedWithUpdate = cleaned;
-    }
     updates.updated_at = new Date().toISOString();
 
     const db = createServerSupabase();
@@ -861,12 +778,7 @@ tabularRouter.patch("/:reviewId", requireAuth, async (req, res) => {
         .single();
     if (reviewError || !existingReview)
         return void res.status(404).json({ detail: "Review not found" });
-    const access = await ensureReviewAccess(
-        existingReview,
-        userId,
-        userEmail,
-        db,
-    );
+    const access = await ensureReviewAccess(existingReview, userId, db);
     if (!access.ok)
         return void res.status(404).json({ detail: "Review not found" });
     if (
@@ -902,25 +814,8 @@ tabularRouter.patch("/:reviewId", requireAuth, async (req, res) => {
         updates.document_ids = await filterAccessibleDocumentIds(
             req.body.document_ids,
             userId,
-            userEmail,
             db,
         );
-    }
-    if (sharedWithUpdate !== undefined) {
-        if (!access.isOwner)
-            return void res
-                .status(403)
-                .json({ detail: "Only the review owner can change sharing" });
-        const missingSharedUsers = await findMissingUserEmails(
-            db,
-            sharedWithUpdate,
-        );
-        if (missingSharedUsers.length > 0) {
-            return void res.status(400).json({
-                detail: `${missingSharedUsers[0]} does not belong to a Mike user.`,
-            });
-        }
-        updates.shared_with = sharedWithUpdate;
     }
     if (projectIdUpdateProvided) {
         if (!access.isOwner) {
@@ -932,7 +827,6 @@ tabularRouter.patch("/:reviewId", requireAuth, async (req, res) => {
             const projectAccess = await checkProjectAccess(
                 projectIdUpdate,
                 userId,
-                userEmail,
                 db,
             );
             if (!projectAccess.ok) {
@@ -1004,7 +898,6 @@ tabularRouter.delete("/:reviewId", requireAuth, async (req, res) => {
 // delete the rows — it blanks `content` and sets `status` back to "pending".
 tabularRouter.post("/:reviewId/clear-cells", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { reviewId } = req.params;
     const { row_ids } = req.body as { row_ids?: string[] };
 
@@ -1019,7 +912,7 @@ tabularRouter.post("/:reviewId/clear-cells", requireAuth, async (req, res) => {
         .single();
     if (reviewError || !review)
         return void res.status(404).json({ detail: "Review not found" });
-    const access = await ensureReviewAccess(review, userId, userEmail, db);
+    const access = await ensureReviewAccess(review, userId, db);
     if (!access.ok)
         return void res.status(404).json({ detail: "Review not found" });
 
@@ -1038,7 +931,6 @@ tabularRouter.post(
     requireAuth,
     async (req, res) => {
         const userId = res.locals.userId as string;
-        const userEmail = res.locals.userEmail as string | undefined;
         const { reviewId } = req.params;
         const { row_id, column_index } = req.body as {
             row_id?: string;
@@ -1058,7 +950,7 @@ tabularRouter.post(
             .single();
         if (reviewError || !review)
             return void res.status(404).json({ detail: "Review not found" });
-        const access = await ensureReviewAccess(review, userId, userEmail, db);
+        const access = await ensureReviewAccess(review, userId, db);
         if (!access.ok)
             return void res.status(404).json({ detail: "Review not found" });
 
@@ -1084,7 +976,6 @@ tabularRouter.post(
         const allowedSourceIds = await filterAccessibleDocumentIds(
             sourceIds,
             userId,
-            userEmail,
             db,
         );
         if (allowedSourceIds.length !== sourceIds.length)
@@ -1147,7 +1038,6 @@ tabularRouter.post(
 // POST /tabular-review/:reviewId/generate
 tabularRouter.post("/:reviewId/generate", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { reviewId } = req.params;
     const db = createServerSupabase();
 
@@ -1158,7 +1048,7 @@ tabularRouter.post("/:reviewId/generate", requireAuth, async (req, res) => {
         .single();
     if (reviewError || !review)
         return void res.status(404).json({ detail: "Review not found" });
-    const access = await ensureReviewAccess(review, userId, userEmail, db);
+    const access = await ensureReviewAccess(review, userId, db);
     if (!access.ok)
         return void res.status(404).json({ detail: "Review not found" });
 
@@ -1188,7 +1078,7 @@ tabularRouter.post("/:reviewId/generate", requireAuth, async (req, res) => {
         ...new Set(rows.flatMap((row) => row.source_document_ids ?? [])),
     ];
     const allowedSourceIds = new Set(
-        await filterAccessibleDocumentIds(sourceIds, userId, userEmail, db),
+        await filterAccessibleDocumentIds(sourceIds, userId, db),
     );
     rows = rows.filter((row) =>
         (row.source_document_ids ?? []).every((id) => allowedSourceIds.has(id)),
@@ -1315,7 +1205,6 @@ tabularRouter.post("/:reviewId/generate", requireAuth, async (req, res) => {
 // GET /tabular-review/:reviewId/chats — list chats (metadata only, no messages)
 tabularRouter.get("/:reviewId/chats", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { reviewId } = req.params;
     const db = createServerSupabase();
 
@@ -1327,7 +1216,7 @@ tabularRouter.get("/:reviewId/chats", requireAuth, async (req, res) => {
         .single();
     if (error || !review)
         return void res.status(404).json({ detail: "Review not found" });
-    const access = await ensureReviewAccess(review, userId, userEmail, db);
+    const access = await ensureReviewAccess(review, userId, db);
     if (!access.ok)
         return void res.status(404).json({ detail: "Review not found" });
 
@@ -1391,7 +1280,6 @@ tabularRouter.get(
     requireAuth,
     async (req, res) => {
         const userId = res.locals.userId as string;
-        const userEmail = res.locals.userEmail as string | undefined;
         const { reviewId, chatId } = req.params;
         const db = createServerSupabase();
 
@@ -1402,7 +1290,7 @@ tabularRouter.get(
             .single();
         if (!review)
             return void res.status(404).json({ detail: "Review not found" });
-        const access = await ensureReviewAccess(review, userId, userEmail, db);
+        const access = await ensureReviewAccess(review, userId, db);
         if (!access.ok)
             return void res.status(404).json({ detail: "Review not found" });
 
@@ -1526,7 +1414,6 @@ Rules:
 // POST /tabular-review/:reviewId/chat
 tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
     const { reviewId } = req.params;
     const {
         messages,
@@ -1560,7 +1447,6 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
     const reviewAccess = await ensureReviewAccess(
         review,
         userId,
-        userEmail,
         db,
     );
     if (!reviewAccess.ok)
@@ -1673,7 +1559,6 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
             db,
             write,
             extraTools: TABULAR_TOOLS,
-            includeResearchTools: false,
             tabularStore,
             buildCitations: (text) =>
                 extractTabularAnnotations(text, tabularStore),
@@ -1682,7 +1567,7 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
             signal: streamAbort.signal,
         });
 
-        const persistedEvents = stripTransientAssistantEvents(events);
+        const persistedEvents = events;
         const annotations = extractTabularAnnotations(fullText, tabularStore);
 
         if (chatId) {
@@ -1756,8 +1641,8 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
         }
         console.error("[tabular/chat] error", safeErrorLog(err));
         const message = safeErrorMessage(err, "Stream error");
-        const errorEvents = err instanceof AssistantStreamError
-            ? stripTransientAssistantEvents(err.events)
+            const errorEvents = err instanceof AssistantStreamError
+            ? err.events
             : [{ type: "error" as const, message }];
         const errorFullText =
             err instanceof AssistantStreamError ? err.fullText : "";

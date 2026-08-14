@@ -13,10 +13,6 @@ import type {
     Citation,
     EditAnnotation,
 } from "../shared/types";
-import {
-    CaseLawPanel,
-    type CaseTab,
-} from "./CaseLawPanel";
 import { cn } from "@/app/lib/utils";
 import { LIQUID_PANEL_SURFACE_CLASS } from "@/app/components/ui/liquid-surface";
 
@@ -58,8 +54,7 @@ export type EditTab = CommonTab & {
 export type AssistantSidePanelTab =
     | DocumentTab
     | CitationTab
-    | EditTab
-    | CaseTab;
+    | EditTab;
 
 interface Props {
     tabs: AssistantSidePanelTab[];
@@ -114,9 +109,6 @@ function maxPanelWidth() {
 }
 
 function tabTitle(tab: AssistantSidePanelTab): string {
-    if (tab.kind === "case") {
-        return tab.caseName || tab.citation || "Case";
-    }
     return tab.filename;
 }
 
@@ -222,10 +214,9 @@ export function AssistantSidePanel({
                 )}
             >
                 <div className="flex-1 flex items-end gap-1 overflow-hidden px-2">
-                    {tabs.map((tab) => {
-                        const isActive = tab.id === active.id;
-                        const showVersionBadge =
-                            tab.kind !== "case" &&
+                            {tabs.map((tab) => {
+                                const isActive = tab.id === active.id;
+                                const showVersionBadge =
                             typeof tab.versionNumber === "number" &&
                             Number.isFinite(tab.versionNumber) &&
                             tab.versionNumber > 1;
@@ -286,20 +277,6 @@ export function AssistantSidePanel({
             <div className="flex-1 min-h-0 relative">
                 {tabs.map((tab) => {
                     const isActive = tab.id === active.id;
-                    if (tab.kind === "case") {
-                        return (
-                            <div
-                                key={tab.id}
-                                className={`absolute inset-0 flex flex-col ${isActive ? "" : "invisible pointer-events-none"}`}
-                                aria-hidden={!isActive}
-                            >
-                                <CaseLawPanel
-                                    tab={tab}
-                                    compactActions={panelWidth < 600}
-                                />
-                            </div>
-                        );
-                    }
                     const mode: DocPanelMode =
                         tab.kind === "citation"
                             ? {

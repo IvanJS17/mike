@@ -43,7 +43,6 @@ import {
     deleteTabularChat,
     deleteTabularReview,
     deleteWorkflow,
-    deleteWorkflowShare,
     downloadDocumentsZip,
     exportAccountData,
     exportChatData,
@@ -52,18 +51,15 @@ import {
     generateTabularColumnPrompt,
     getApiKeyStatus,
     getChat,
-    getCourtlistenerOpinions,
     getDocumentUrl,
     getLibrary,
     getMcpConnector,
     getModelCatalog,
     getOllamaModels,
     getProject,
-    getProjectPeople,
     getTabularChatMessages,
     getTabularChats,
     getTabularReview,
-    getTabularReviewPeople,
     getUserProfile,
     getWorkflow,
     hideWorkflow,
@@ -77,7 +73,6 @@ import {
     listStandaloneDocuments,
     listTabularReviewIds,
     listTabularReviews,
-    listWorkflowShares,
     listWorkflows,
     lookupUserByEmail,
     mapTRMessages,
@@ -98,7 +93,6 @@ import {
     replaceDocumentVersionFile,
     saveApiKey,
     setMcpToolEnabled,
-    shareWorkflow,
     startMcpConnectorOAuth,
     streamChat,
     streamProjectChat,
@@ -1221,14 +1215,13 @@ describe("thin endpoint wrappers", () => {
         // Account & profile
         {
             name: "createProject",
-            call: () => createProject("Acme v. Zenith", "CM-42", "litigation", ["a@b.c"]),
+            call: () => createProject("Acme v. Zenith", "CM-42", "litigation"),
             url: "/projects",
             method: "POST",
             body: {
                 name: "Acme v. Zenith",
                 cm_number: "CM-42",
                 practice: "litigation",
-                shared_with: ["a@b.c"],
             },
         },
         {
@@ -1361,11 +1354,6 @@ describe("thin endpoint wrappers", () => {
             call: () => deleteProject("p1"),
             url: "/projects/p1",
             method: "DELETE",
-        },
-        {
-            name: "getProjectPeople",
-            call: () => getProjectPeople("p1"),
-            url: "/projects/p1/people",
         },
         {
             name: "listProjectChats",
@@ -1520,11 +1508,6 @@ describe("thin endpoint wrappers", () => {
             call: () => getTabularReview("r1"),
             url: "/tabular-review/r1",
         },
-        {
-            name: "getTabularReviewPeople",
-            call: () => getTabularReviewPeople("r1"),
-            url: "/tabular-review/r1/people",
-        },
         // Workflows
         {
             name: "getWorkflow",
@@ -1582,25 +1565,6 @@ describe("thin endpoint wrappers", () => {
                 },
             },
         },
-        {
-            name: "shareWorkflow",
-            call: () =>
-                shareWorkflow("w1", { emails: ["a@b.c"], allow_edit: false }),
-            url: "/workflows/w1/share",
-            method: "POST",
-            body: { emails: ["a@b.c"], allow_edit: false },
-        },
-        {
-            name: "listWorkflowShares",
-            call: () => listWorkflowShares("w1"),
-            url: "/workflows/w1/shares",
-        },
-        {
-            name: "deleteWorkflowShare",
-            call: () => deleteWorkflowShare("w1", "s1"),
-            url: "/workflows/w1/shares/s1",
-            method: "DELETE",
-        },
     ];
 
     it.each(cases)("$name → $method $url", async ({ call, url, method, body }) => {
@@ -1639,24 +1603,6 @@ describe("unwrapping and blob wrappers", () => {
 
         await expect(getOllamaModels()).resolves.toEqual(models);
         expect(lastFetchCall().url).toBe("http://localhost:3001/models/ollama");
-    });
-
-    it("getCourtlistenerOpinions posts the cluster id and unwraps opinions", async () => {
-        const opinions = [
-            {
-                opinionId: 7,
-                type: "majority",
-                author: "Judge X",
-                url: "https://example.test/op/7",
-            },
-        ];
-        fetchMock.mockResolvedValue(jsonResponse({ opinions }));
-
-        await expect(getCourtlistenerOpinions(123)).resolves.toEqual(opinions);
-        const { url, init } = lastFetchCall();
-        expect(url).toBe("http://localhost:3001/case-law/case-opinions");
-        expect(init.method).toBe("POST");
-        expect(JSON.parse(init.body as string)).toEqual({ clusterId: 123 });
     });
 
     it("exportChatData and exportTabularReviewsData hit their export routes", async () => {

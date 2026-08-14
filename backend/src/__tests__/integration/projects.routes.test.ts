@@ -126,7 +126,7 @@ describe("projects.routes", () => {
         checkProjectAccess.mockResolvedValue({
             ok: true,
             isOwner: true,
-            project: { id: "p1", user_id: "u1", shared_with: null },
+            project: { id: "p1", user_id: "u1" },
         });
         deleteUserProjects.mockResolvedValue(1);
     });
@@ -207,34 +207,12 @@ describe("projects.routes", () => {
             expect(res.body.detail).toBe("name is required");
         });
 
-        it("returns 400 when sharing the project with yourself", async () => {
-            // The authed user's email is u1@test.local; supplying it (in any
-            // case) must be rejected.
-            const res = await request(app)
-                .post("/projects")
-                .set(...AUTH)
-                .send({ name: "Beta", shared_with: ["U1@Test.Local"] });
-
-            expect(res.status).toBe(400);
-            expect(res.body.detail).toBe(
-                "You cannot share a project with yourself.",
-            );
-        });
-
-        it("creates the project (201) and normalises shared_with", async () => {
-            // Sharing requires each recipient to have a mirrored user_profiles
-            // row (findMissingUserEmails); seed both emails so validation
-            // passes and the create path proceeds.
-            supabaseState.tables.user_profiles = {
-                data: [{ email: "a@x.com" }, { email: "b@x.com" }],
-                error: null,
-            };
+        it("creates the project (201)", async () => {
             supabaseState.tables.projects = {
                 data: {
                     id: "p9",
                     name: "Gamma",
                     user_id: "u1",
-                    shared_with: ["a@x.com", "b@x.com"],
                 },
                 error: null,
             };
@@ -244,38 +222,18 @@ describe("projects.routes", () => {
                 .set(...AUTH)
                 .send({
                     name: "  Gamma  ",
-                    shared_with: ["A@x.com", "a@x.com", "B@X.com", "", "  "],
                 });
 
             expect(res.status).toBe(201);
             expect(res.body).toMatchObject({ id: "p9", documents: [] });
 
-            // The insert payload should be lowercased, deduped, trimmed and
-            // the name trimmed.
+            // The project name is trimmed before insert.
             const insert = supabaseState.inserts.find(
                 (i) => i.table === "projects",
             );
             expect(insert?.payload).toMatchObject({
                 name: "Gamma",
-                shared_with: ["a@x.com", "b@x.com"],
             });
-        });
-
-        it("returns 400 when a shared_with recipient is not a Mike user", async () => {
-            // No user_profiles rows seeded → findMissingUserEmails reports the
-            // recipient as unknown and the create is rejected before insert.
-            const res = await request(app)
-                .post("/projects")
-                .set(...AUTH)
-                .send({ name: "Gamma", shared_with: ["ghost@x.com"] });
-
-            expect(res.status).toBe(400);
-            expect(res.body.detail).toBe(
-                "ghost@x.com does not belong to a Mike user.",
-            );
-            expect(
-                supabaseState.inserts.find((i) => i.table === "projects"),
-            ).toBeUndefined();
         });
 
         it("returns 500 when the insert errors", async () => {
@@ -305,13 +263,9 @@ describe("projects.routes", () => {
             expect(res.body.detail).toBe("Project not found");
         });
 
-        it("returns 404 when the caller is neither owner nor shared", async () => {
+        it("returns 404 when the caller is not the owner", async () => {
             supabaseState.tables.projects = {
-                data: {
-                    id: "p1",
-                    user_id: "someone-else",
-                    shared_with: ["other@x.com"],
-                },
+                data: null,
                 error: null,
             };
 
@@ -321,27 +275,9 @@ describe("projects.routes", () => {
             expect(res.body.detail).toBe("Project not found");
         });
 
-        it("grants access to a shared member (is_owner false)", async () => {
-            supabaseState.tables.projects = {
-                data: {
-                    id: "p1",
-                    user_id: "someone-else",
-                    shared_with: ["u1@test.local"],
-                },
-                error: null,
-            };
-            supabaseState.tables.documents = { data: [], error: null };
-            supabaseState.tables.project_subfolders = { data: [], error: null };
-
-            const res = await request(app).get("/projects/p1").set(...AUTH);
-
-            expect(res.status).toBe(200);
-            expect(res.body).toMatchObject({ id: "p1", is_owner: false });
-        });
-
         it("returns 200 with documents/folders/is_owner when owned", async () => {
             supabaseState.tables.projects = {
-                data: { id: "p1", user_id: "u1", shared_with: null },
+                data: { id: "p1", user_id: "u1" },
                 error: null,
             };
             supabaseState.tables.documents = {
@@ -395,20 +331,8 @@ describe("projects.routes", () => {
         });
     });
 
-    // ── PATCH /projects/:projectId (sharing normalisation) ────────────────
+    // ── PATCH /projects/:projectId ────────────────────────────────────────
     describe("PATCH /projects/:projectId", () => {
-        it("returns 400 when sharing the project with yourself", async () => {
-            const res = await request(app)
-                .patch("/projects/p1")
-                .set(...AUTH)
-                .send({ shared_with: ["u1@test.local"] });
-
-            expect(res.status).toBe(400);
-            expect(res.body.detail).toBe(
-                "You cannot share a project with yourself.",
-            );
-        });
-
         it("returns 404 when the update matches no owned project", async () => {
             supabaseState.tables.projects = { data: null, error: null };
 
