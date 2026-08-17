@@ -1,0 +1,15 @@
+[Unit]
+Description=LiTT complete encrypted recovery set
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/srv/litt-secrets/backup.env
+ExecStartPre=/usr/local/sbin/verify-encrypted-mount
+ExecStart=/usr/local/sbin/litt-create-recovery-set
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/srv/litt-data/recovery

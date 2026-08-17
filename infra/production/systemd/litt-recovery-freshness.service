@@ -1,0 +1,15 @@
+[Unit]
+Description=Check LiTT recovery freshness and real-data gate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/srv/litt-secrets/backup.env
+ExecStartPre=/usr/local/sbin/verify-encrypted-mount
+ExecStart=/usr/local/sbin/litt-check-recovery-freshness
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/srv/litt-data/state

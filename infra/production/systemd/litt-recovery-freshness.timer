@@ -1,0 +1,10 @@
+[Unit]
+Description=Run LiTT recovery freshness check hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=litt-recovery-freshness.service
+
+[Install]
+WantedBy=timers.target

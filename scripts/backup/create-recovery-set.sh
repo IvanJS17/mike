@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# Build one complete, encrypted recovery set and publish it to the independent
+# backup destination. A SUCCESS marker is written only after every component and
+# remote checksum has been verified.
+set -Eeuo pipefail
+umask 077
+
+: "${COMPOSE_FILE:?set COMPOSE_FILE to compose.prod.yml}"
+: "${COMPOSE_ENV_FILE:?set COMPOSE_ENV_FILE to the external 0600 Compose env file}"
+: "${RECOVERY_ROOT:?set RECOVERY_ROOT on the encrypted volume}"
+: "${APP_BUCKET:?set APP_BUCKET to the application object bucket}"
+: "${OBJECT_ENDPOINT:?set OBJECT_ENDPOINT to the application storage endpoint}"
+: "${OBJECT_ACCESS_KEY_ID:?set OBJECT_ACCESS_KEY_ID independently of the backup account}"
+: "${OBJECT_SECRET_ACCESS_KEY:?set OBJECT_SECRET_ACCESS_KEY independently of the backup account}"
+: "${OBJECT_SSE_CUSTOMER_KEY_FILE:?set OBJECT_SSE_CUSTOMER_KEY_FILE to the mode-600 SSE-C key file}"
+: "${BACKUP_BUCKET:?set BACKUP_BUCKET to the separate recovery destination}"
+: "${BACKUP_ENDPOINT:?set BACKUP_ENDPOINT to the separate recovery endpoint}"
+: "${BACKUP_ACCESS_KEY_ID:?set BACKUP_ACCESS_KEY_ID to the independent backup credential}"
+: "${BACKUP_SECRET_ACCESS_KEY:?set BACKUP_SECRET_ACCESS_KEY to the independent backup credential}"
+: "${BACKUP_ENCRYPTION_RECIPIENT_FILE:?set BACKUP_ENCRYPTION_RECIPIENT_FILE to an age recipients file}"
+: "${BACKUP_ALERT_WEBHOOK:?set BACKUP_ALERT_WEBHOOK to the alert endpoint}"
+: "${RECOVERY_CONFIG_DIR:?set RECOVERY_CONFIG_DIR to sanitized production config}"
+: "${AUDIT_EXPORT_DIR:?set AUDIT_EXPORT_DIR to the audit export directory}"
+: "${PUBLICATION_MANIFEST_DIR:?set PUBLICATION_MANIFEST_DIR to publication manifests}"
+: "${RELEASE_MANIFEST_PATH:?set RELEASE_MANIFEST_PATH to the version manifest}"
+
+if [[ ! -f "$COMPOSE_ENV_FILE" || "$(stat -c '%a' "$COMPOSE_ENV_FILE")" != "600" ]]; then
+  printf 'Compose env file must exist with mode 600.\n' >&2
+  exit 1
+fi
+if [[ ! -s "$BACKUP_ENCRYPTION_RECIPIENT_FILE" ]]; then
+  printf 'Age recipients file is missing or empty.\n' >&2
+  exit 1
+fi
+if [[ ! -f "$OBJECT_SSE_CUSTOMER_KEY_FILE" || "$(stat -c '%a' "$OBJECT_SSE_CUSTOMER_KEY_FILE")" != "600" ]]; then
+  printf 'Object-storage SSE-C key file must exist with mode 600.\n' >&2
+  exit 1
+fi
+for path in "$RECOVERY_CONFIG_DIR" "$AUDIT_EXPORT_DIR" "$PUBLICATION_MANIFEST_DIR" "$RELEASE_MANIFEST_PATH"; do
+  [[ -e "$path" ]] || { printf 'Missing recovery source: %s\n' "$path" >&2; exit 1; }
+done
+
+notify_failure() {
+  local reason=$1
+  curl -fsS --max-time 10 -X POST \
+    -H 'Content-Type: application/json' \
+    --data "$(jq -cn --arg reason "$reason" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{event:"recovery_set_failed",reason:$reason,occurred_at:$at}')" \
+    "$BACKUP_ALERT_WEBHOOK" >/dev/null 2>&1 || true
+}
+
+on_error() {
+  local status=$?
+  notify_failure "create-recovery-set failed near line $1"
+  exit "$status"
+}
+trap 'on_error "$LINENO"' ERR
+
+if [[ "$(basename "$COMPOSE_FILE")" != "compose.prod.yml" ]]; then
+  printf 'Refusing to back up a non-production Compose file.\n' >&2
+  exit 1
+fi
+
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+set_dir="$RECOVERY_ROOT/sets/$stamp"
+work_dir=$(mktemp -d "$RECOVERY_ROOT/.recovery-$stamp.XXXXXX")
+archive="$RECOVERY_ROOT/$stamp.tar.gz"
+encrypted="$RECOVERY_ROOT/$stamp.tar.gz.age"
+cleanup() {
+  rm -rf "$work_dir" "$archive"
+}
+trap cleanup EXIT
+mkdir -p "$set_dir"
+mkdir -p "$work_dir/objects/data" "$work_dir/config" "$work_dir/audit" "$work_dir/publication"
+
+compose=(docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE")
+
+# PostgreSQL custom-format dump plus an independent restore-list check.
+"${compose[@]}" exec -T db pg_dump \
+  --username "${PGUSER:-postgres}" \
+  --dbname "${PGDATABASE:-postgres}" \
+  --format=custom --no-owner --no-acl >"$work_dir/postgres.dump"
+[[ -s "$work_dir/postgres.dump" ]]
+"${compose[@]}" exec -T db pg_restore --list - \
+  <"$work_dir/postgres.dump" >"$work_dir/postgres.restore.list"
+[[ -s "$work_dir/postgres.restore.list" ]]
+
+object_aws() {
+  AWS_ACCESS_KEY_ID="$OBJECT_ACCESS_KEY_ID" \
+  AWS_SECRET_ACCESS_KEY="$OBJECT_SECRET_ACCESS_KEY" \
+  AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}" \
+    aws --endpoint-url "$OBJECT_ENDPOINT" "$@"
+}
+backup_aws() {
+  AWS_ACCESS_KEY_ID="$BACKUP_ACCESS_KEY_ID" \
+  AWS_SECRET_ACCESS_KEY="$BACKUP_SECRET_ACCESS_KEY" \
+  AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}" \
+    aws --endpoint-url "$BACKUP_ENDPOINT" "$@"
+}
+
+# Export every object version and delete marker. Object contents are addressed
+# by a digest of (key, version) to avoid path traversal and collision.
+object_aws s3api list-object-versions --bucket "$APP_BUCKET" --output json >"$work_dir/objects/versions.json"
+: >"$work_dir/objects/index.ndjson"
+while IFS= read -r record; do
+  key=$(jq -r '.Key' <<<"$record")
+  version=$(jq -r '.VersionId' <<<"$record")
+  file_id=$(printf '%s\0%s' "$key" "$version" | sha256sum | cut -d' ' -f1)
+  object_path="$work_dir/objects/data/$file_id.object"
+  object_aws s3api get-object \
+    --bucket "$APP_BUCKET" --key "$key" --version-id "$version" \
+    --sse-customer-algorithm AES256 \
+    --sse-customer-key "fileb://$OBJECT_SSE_CUSTOMER_KEY_FILE" \
+    "$object_path" >/dev/null
+  digest=$(sha256sum "$object_path" | cut -d' ' -f1)
+  jq -cn --arg key "$key" --arg version "$version" --arg file "$file_id.object" \
+    --arg sha256 "$digest" --argjson size "$(stat -c '%s' "$object_path")" \
+    '{kind:"version",key:$key,version_id:$version,file:$file,sha256:$sha256,size:$size}' \
+    >>"$work_dir/objects/index.ndjson"
+done < <(jq -c '.Versions[]? // empty' "$work_dir/objects/versions.json")
+while IFS= read -r record; do
+  jq -c '{kind:"delete_marker",key:.Key,version_id:.VersionId,is_latest:.IsLatest,last_modified:.LastModified}' \
+    <<<"$record" >>"$work_dir/objects/index.ndjson"
+done < <(jq -c '.DeleteMarkers[]? // empty' "$work_dir/objects/versions.json")
+
+# Copy only the declared, sanitized recovery sources. Secrets remain in custody
+# and are represented by the release/config manifest, not copied into this set.
+cp -a "$RECOVERY_CONFIG_DIR/." "$work_dir/config/"
+cp -a "$AUDIT_EXPORT_DIR/." "$work_dir/audit/"
+cp -a "$PUBLICATION_MANIFEST_DIR/." "$work_dir/publication/"
+cp -a "$RELEASE_MANIFEST_PATH" "$work_dir/release-manifest.json"
+
+object_count=$(jq -s '[.[] | select(.kind == "version")] | length' "$work_dir/objects/index.ndjson")
+delete_marker_count=$(jq -s '[.[] | select(.kind == "delete_marker")] | length' "$work_dir/objects/index.ndjson")
+pg_sha256=$(sha256sum "$work_dir/postgres.dump" | cut -d' ' -f1)
+jq -n \
+  --arg set_id "$stamp" \
+  --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg pg_sha256 "$pg_sha256" \
+  --argjson object_count "$object_count" \
+  --argjson delete_marker_count "$delete_marker_count" \
+  '{set_id:$set_id,created_at:$created_at,postgres_dump_sha256:$pg_sha256,object_version_count:$object_count,delete_marker_count:$delete_marker_count,components:["postgres","object_versions","audit","publication_manifests","config","checksums"]}' \
+  >"$work_dir/inventory.json"
+
+(cd "$work_dir" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum) >"$work_dir/SHA256SUMS"
+tar -C "$work_dir" -czf "$archive" .
+archive_sha256=$(sha256sum "$archive" | cut -d' ' -f1)
+age --encrypt --recipients-file "$BACKUP_ENCRYPTION_RECIPIENT_FILE" --output "$encrypted" "$archive"
+encrypted_sha256=$(sha256sum "$encrypted" | cut -d' ' -f1)
+
+remote_key="recovery/$stamp/recovery-set.tar.gz.age"
+backup_aws s3 cp "$encrypted" "s3://$BACKUP_BUCKET/$remote_key" \
+  --metadata "sha256=$encrypted_sha256,set-id=$stamp" >/dev/null
+remote_metadata=$(backup_aws s3api head-object --bucket "$BACKUP_BUCKET" --key "$remote_key" --output json)
+[[ "$(jq -r '.Metadata.sha256 // ""' <<<"$remote_metadata")" == "$encrypted_sha256" ]]
+
+success_file="$work_dir/SUCCESS.json"
+jq -n \
+  --arg set_id "$stamp" \
+  --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg key "$remote_key" \
+  --arg sha256 "$encrypted_sha256" \
+  --arg archive_sha256 "$archive_sha256" \
+  '{status:"success",set_id:$set_id,completed_at:$completed_at,object_key:$key,encrypted_sha256:$sha256,archive_sha256:$archive_sha256}' \
+  >"$success_file"
+backup_aws s3 cp "$success_file" "s3://$BACKUP_BUCKET/recovery/$stamp/SUCCESS.json" >/dev/null
+backup_aws s3 cp "$success_file" "s3://$BACKUP_BUCKET/recovery/latest-success.json" >/dev/null
+cp "$success_file" "$set_dir/SUCCESS.json"
+cp "$work_dir/inventory.json" "$set_dir/inventory.json"
+cp "$work_dir/SHA256SUMS" "$set_dir/SHA256SUMS"
+printf 'Recovery set %s completed and verified at the independent destination.\n' "$stamp"
