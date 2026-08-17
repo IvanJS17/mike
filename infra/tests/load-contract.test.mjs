@@ -51,7 +51,7 @@ test("CI publishes backend/frontend image digests and a release manifest", () =>
   assert.match(workflow, /backend/);
   assert.match(workflow, /frontend/);
   assert.match(workflow, /outputs\.digest/);
-  assert.match(workflow, /image-lock\.env/);
+  assert.match(workflow, /image-lock.*\.env/);
   const manifest = readFileSync(resolve(root, "scripts/release/write-version-manifest.sh"), "utf8");
   assert.match(manifest, /@sha256:/);
   assert.match(manifest, /source_offer/);

@@ -36,7 +36,11 @@ request() {
   curl_config=$(mktemp "$runtime_dir/curl.XXXXXX")
   response=$(mktemp "$runtime_dir/response.XXXXXX")
   chmod 0600 "$curl_config"
-  printf 'header = "Authorization: Bearer %s"\n' "$token" >"$curl_config"
+  {
+    printf 'header = "Authorization: Bearer '
+    echo -n "$token"
+    printf '"\n'
+  } >"$curl_config"
   if [[ "$operation" == "upload-10mb" ]]; then
     meta=$(curl --silent --show-error --config "$curl_config" --output "$response" \
       --write-out '%{http_code} %{time_total}' -X "$method" \

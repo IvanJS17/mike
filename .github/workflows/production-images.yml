@@ -61,11 +61,11 @@ jobs:
         run: |
           printf 'LITT_%s_IMAGE=%s/%s/litt-%s@%s\n' \
             '${{ matrix.env_name }}' '${{ env.REGISTRY }}' '${{ env.IMAGE_OWNER }}' \
-            '${{ matrix.name }}' '${{ steps.image.outputs.digest }}' >> image-lock.env
+            '${{ matrix.name }}' '${{ steps.image.outputs.digest }}' > "image-lock-${{ matrix.name }}.env"
       - uses: actions/upload-artifact@v4
         with:
           name: production-image-lock-${{ matrix.name }}
-          path: image-lock.env
+          path: image-lock-${{ matrix.name }}.env
           if-no-files-found: error
 
   verify-lock:
@@ -81,5 +81,5 @@ jobs:
       - name: Reject mutable image references
         run: |
           cat image-lock/*.env
-          test "$(grep -Ec '@sha256:[0-9a-f]{64}$' image-lock/*.env)" -eq 2
-          ! grep -E ':latest|:[^@[:space:]]+$' image-lock/*.env
+          test "$(grep -RohE '@sha256:[0-9a-f]{64}$' image-lock | wc -l)" -eq 2
+          ! grep -RE ':latest|:[^@[:space:]]+$' image-lock
