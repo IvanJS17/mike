@@ -17,6 +17,7 @@ import {
 } from "@aws-sdk/client-s3";
 import * as S3Commands from "@aws-sdk/client-s3";
 import { getSignedUrl as awsGetSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { sseCustomerHeaders } from "./storageSse";
 
 const GetObjectCommand = (S3Commands as any).GetObjectCommand;
 
@@ -51,6 +52,7 @@ function requireStorageConfig(): void {
       "R2_ENDPOINT_URL, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY must be set",
     );
   }
+  sseCustomerHeaders();
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +72,7 @@ export async function uploadFile(
       Key: key,
       Body: Buffer.from(content),
       ContentType: contentType,
+      ...sseCustomerHeaders(),
     }),
   );
 }
@@ -89,6 +92,7 @@ export async function uploadFileToBucket(
       Key: key,
       Body: Buffer.isBuffer(content) ? content : Buffer.from(content),
       ContentType: contentType,
+      ...sseCustomerHeaders(),
     }),
   );
 }
@@ -112,7 +116,7 @@ export async function downloadFile(key: string): Promise<ArrayBuffer | null> {
   try {
     const client = getClient();
     const response = (await client.send(
-      new GetObjectCommand({ Bucket: BUCKET, Key: key }),
+      new GetObjectCommand({ Bucket: BUCKET, Key: key, ...sseCustomerHeaders() }),
     )) as any;
     if (!response.Body) return null;
     const bytes = await response.Body.transformToByteArray();
