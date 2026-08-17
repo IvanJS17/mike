@@ -23,17 +23,28 @@ restore_override="$repo_root/infra/production/compose.restore.yml"
 : "${RESTORE_OBJECT_SSE_CUSTOMER_KEY_FILE:?set RESTORE_OBJECT_SSE_CUSTOMER_KEY_FILE to the mode-600 disposable SSE-C key}"
 : "${RESTORE_EXPECTED_COUNTS_FILE:?set RESTORE_EXPECTED_COUNTS_FILE to the mandatory qualification counts}"
 : "${RESTORE_DESIGNATED_USERS_FILE:?set RESTORE_DESIGNATED_USERS_FILE to the two-user mode-600 fixture}"
+: "${RESTORE_PUBLIC_BASE_URL:?set RESTORE_PUBLIC_BASE_URL to the disposable HTTPS URL}"
+: "${RESTORE_PUBLIC_ALLOWED_HOST:?set RESTORE_PUBLIC_ALLOWED_HOST to the disposable host}"
 
 mkdir -p "$RESTORE_ROOT"
 restore_root_real=$(realpath -e "$RESTORE_ROOT")
 [[ "$restore_root_real" != "/" && "$restore_root_real" == */litt-restore* ]] || { printf 'Restore root is not disposable.\n' >&2; exit 1; }
+[[ "$RESTORE_PUBLIC_BASE_URL" =~ ^https:// ]] || { printf 'Restore public URL must use HTTPS.\n' >&2; exit 1; }
+public_host=${RESTORE_PUBLIC_BASE_URL#https://}; public_host=${public_host%%/*}
+[[ "$public_host" == "$RESTORE_PUBLIC_ALLOWED_HOST" ]] || { printf 'Restore public host is not approved.\n' >&2; exit 1; }
 [[ "$(realpath -e "$RESTORE_COMPOSE_FILE")" == "$restore_override" ]] || { printf 'Restore must use the reviewed compose.restore.yml.\n' >&2; exit 1; }
 [[ "$(realpath -e "$RESTORE_ENV_FILE")" == "$restore_root_real/compose.env" ]] || { printf 'Restore env must be inside RESTORE_ROOT.\n' >&2; exit 1; }
 [[ "$RESTORE_PROJECT_NAME" =~ ^litt-restore-[a-z0-9-]{1,40}$ ]] || { printf 'Restore project is not disposable.\n' >&2; exit 1; }
 [[ "$RESTORE_OBJECT_BUCKET" =~ ^litt-restore-[a-z0-9-]{1,50}$ ]] || { printf 'Restore bucket is not disposable.\n' >&2; exit 1; }
 for secret_file in "$AGE_IDENTITY_FILE" "$RESTORE_ENV_FILE" "$RESTORE_OBJECT_SSE_CUSTOMER_KEY_FILE" "$RESTORE_DESIGNATED_USERS_FILE"; do
-  [[ -f "$secret_file" && "$(stat -c '%a' "$secret_file")" == "600" ]] || { printf 'Restore secret fixture must be mode 600.\n' >&2; exit 1; }
+  [[ -f "$secret_file" && ! -L "$secret_file" && "$(stat -c '%a' "$secret_file")" == "600" ]] || { printf 'Restore secret fixture must be regular mode 600.\n' >&2; exit 1; }
 done
+restore_data_root=$(awk -F= '$1 == "LITT_DATA_ROOT" {print substr($0, index($0,"=")+1); exit}' "$RESTORE_ENV_FILE")
+restore_secrets_root=$(awk -F= '$1 == "LITT_SECRETS_ROOT" {print substr($0, index($0,"=")+1); exit}' "$RESTORE_ENV_FILE")
+[[ -n "$restore_data_root" && -n "$restore_secrets_root" ]] || { printf 'Restore env must define data and secret roots.\n' >&2; exit 1; }
+restore_data_real=$(realpath -m "$restore_data_root")
+restore_secrets_real=$(realpath -m "$restore_secrets_root")
+[[ "$restore_data_real" == "$restore_root_real"/* && "$restore_secrets_real" == "$restore_root_real"/* ]] || { printf 'Restore data/secrets roots must be inside RESTORE_ROOT.\n' >&2; exit 1; }
 [[ -f "$RECOVERY_SET_PATH" && -f "$RECOVERY_SUCCESS_PATH" && -f "$RESTORE_EXPECTED_COUNTS_FILE" ]] || { printf 'Recovery input is incomplete.\n' >&2; exit 1; }
 
 runtime_dir=""
@@ -48,6 +59,8 @@ trap 'exit 130' INT TERM
 
 compose=(docker compose --env-file "$RESTORE_ENV_FILE" -f "$base_compose" -f "$restore_override" -p "$RESTORE_PROJECT_NAME")
 compose_config=$("${compose[@]}" config --format json)
+[[ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")" ]] || { printf 'Restore project already exists.\n' >&2; exit 1; }
+[[ -z "$(docker volume ls -q --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")" ]] || { printf 'Restore project has existing volumes.\n' >&2; exit 1; }
 while IFS= read -r source; do
   case "$source" in
     "$restore_root_real"/*|"$repo_root"/*) ;;
@@ -76,6 +89,7 @@ tar -xzf "$archive" --no-same-owner --no-same-permissions -C "$set_dir"
 
 jq -e '.status == "success"' "$RECOVERY_SUCCESS_PATH" >/dev/null
 set_id=$(jq -er '.set_id' "$set_dir/inventory.json")
+[[ "$set_id" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || { printf 'Unsafe recovery set ID.\n' >&2; exit 1; }
 marker_sha=$(jq -er '.encrypted_sha256' "$RECOVERY_SUCCESS_PATH")
 actual_archive_sha=$(sha256sum "$RECOVERY_SET_PATH" | cut -d' ' -f1)
 [[ "$marker_sha" == "$actual_archive_sha" ]] || { printf 'Recovery archive checksum does not match SUCCESS marker.\n' >&2; exit 1; }
@@ -92,7 +106,7 @@ if (( rpo_seconds < 0 || rpo_seconds > 86400 )); then
   exit 1
 fi
 
-compose=(docker compose --env-file "$RESTORE_ENV_FILE" -f "$RESTORE_COMPOSE_FILE" -p "$RESTORE_PROJECT_NAME")
+# Keep the validated base+override Compose array for every lifecycle operation.
 "${compose[@]}" up -d db
 compose_started=1
 for attempt in $(seq 1 60); do
@@ -108,20 +122,11 @@ done
   --username "${PGUSER:-postgres}" --dbname "${PGDATABASE:-postgres}" \
   <"$set_dir/postgres.dump"
 "${compose[@]}" up -d caddy auth rest backend frontend
-[[ "$(jq -er 'length' "$RESTORE_DESIGNATED_USERS_FILE")" == "2" ]] || { printf 'Exactly two designated restore users are required.\n' >&2; exit 1; }
+jq -e 'length == 2 and ([.[].id] | unique | length == 2) and ([.[].email] | unique | length == 2)' "$RESTORE_DESIGNATED_USERS_FILE" >/dev/null || { printf 'Exactly two distinct designated restore users are required.\n' >&2; exit 1; }
 while IFS= read -r user_record; do
-  printf '%s' "$user_record" | "${compose[@]}" exec -T backend node -e '
-let input="";
-process.stdin.on("data", (chunk) => { input += chunk; });
-process.stdin.on("end", async () => {
-  const user = JSON.parse(input);
-  const response = await fetch("http://caddy/supabase/auth/v1/token?grant_type=password", {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email: user.email, password: user.password }),
-  });
-  process.exit(response.ok ? 0 : 1);
-});
-'
+  printf '%s' "$user_record" | curl --silent --show-error --fail \
+    -H 'Content-Type: application/json' --data-binary @- \
+    "$RESTORE_PUBLIC_BASE_URL/supabase/auth/v1/token?grant_type=password" >/dev/null
 done < <(jq -c '.[]' "$RESTORE_DESIGNATED_USERS_FILE")
 
 restore_aws() {
@@ -134,6 +139,7 @@ restore_aws() {
 : >"$runtime_dir/object-restore-map.ndjson"
 while IFS= read -r record; do
   file=$(jq -er '.file' <<<"$record")
+  [[ "$file" =~ ^[0-9a-f]{64}\.object$ ]] || { printf 'Unsafe object member name.\n' >&2; exit 1; }
   key=$(jq -er '.key' <<<"$record")
   source_path="$set_dir/objects/data/$file"
   [[ -f "$source_path" ]] || { printf 'Missing object payload: %s\n' "$file" >&2; exit 1; }
@@ -147,7 +153,8 @@ while IFS= read -r record; do
   new_version=$(jq -r '.VersionId // "null"' <<<"$result")
   jq -cn --arg key "$key" --arg source_version "$(jq -r '.version_id' <<<"$record")" \
     --arg restored_version "$new_version" --arg sha256 "$actual_sha" \
-    '{kind:"version",key:$key,source_version_id:$source_version,restored_version_id:$restored_version,sha256:$sha256}' \
+    --arg file "$file" --argjson is_latest "$(jq -r '.is_latest // false' <<<"$record")" \
+    '{kind:"version",key:$key,source_version_id:$source_version,restored_version_id:$restored_version,sha256:$sha256,file:$file,is_latest:$is_latest}' \
     >>"$runtime_dir/object-restore-map.ndjson"
 done < <(jq -c 'select(.kind == "version")' "$set_dir/objects/index.ndjson")
 
@@ -156,13 +163,30 @@ while IFS= read -r record; do
   result=$(restore_aws s3api delete-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$key")
   jq -cn --arg key "$key" --arg source_version "$(jq -r '.version_id' <<<"$record")" \
     --arg restored_version "$(jq -r '.VersionId // "null"' <<<"$result")" \
-    '{kind:"delete_marker",key:$key,source_version_id:$source_version,restored_version_id:$restored_version}' \
+    --argjson is_latest "$(jq -r '.is_latest // false' <<<"$record")" \
+    '{kind:"delete_marker",key:$key,source_version_id:$source_version,restored_version_id:$restored_version,is_latest:$is_latest}' \
     >>"$runtime_dir/object-restore-map.ndjson"
 done < <(jq -c 'select(.kind == "delete_marker")' "$set_dir/objects/index.ndjson")
 
+# Reapply each key's original latest state after creating all historical entries.
+while IFS= read -r latest; do
+  kind=$(jq -r '.kind' <<<"$latest")
+  key=$(jq -r '.key' <<<"$latest")
+  if [[ "$kind" == "version" ]]; then
+    file=$(jq -r '.file' <<<"$latest")
+    restore_aws s3api put-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$key" \
+      --body "$set_dir/objects/data/$file" --sse-customer-algorithm AES256 \
+      --sse-customer-key "fileb://$RESTORE_OBJECT_SSE_CUSTOMER_KEY_FILE" >/dev/null
+  else
+    restore_aws s3api delete-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$key" >/dev/null
+  fi
+done < <(jq -c 'select(.is_latest == true)' "$set_dir/objects/index.ndjson")
+
 expected_objects=$(jq -s '[.[] | select(.kind == "version")] | length' "$set_dir/objects/index.ndjson")
+expected_markers=$(jq -s '[.[] | select(.kind == "delete_marker")] | length' "$set_dir/objects/index.ndjson")
 restored_objects=$(jq -s '[.[] | select(.kind == "version")] | length' "$runtime_dir/object-restore-map.ndjson")
-[[ "$expected_objects" == "$restored_objects" ]] || { printf 'Object count mismatch.\n' >&2; exit 1; }
+restored_markers=$(jq -s '[.[] | select(.kind == "delete_marker")] | length' "$runtime_dir/object-restore-map.ndjson")
+[[ "$expected_objects" == "$restored_objects" && "$expected_markers" == "$restored_markers" ]] || { printf 'Object/version marker count mismatch.\n' >&2; exit 1; }
 
 # Readiness is checked from inside the restored backend network, not by trusting
 # a process status. The endpoint must report DB, storage, and Auth checks green.

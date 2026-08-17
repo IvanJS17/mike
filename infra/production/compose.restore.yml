@@ -3,7 +3,7 @@
 # network remains project-scoped because compose.prod.yml has no fixed name.
 services:
   caddy:
-    ports: []
+    ports: !reset []
     environment:
       APP_DOMAIN: ":80"
       ACME_EMAIL: restore@example.invalid

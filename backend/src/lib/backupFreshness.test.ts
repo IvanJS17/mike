@@ -16,13 +16,21 @@ afterEach(() => {
 });
 
 describe("backup freshness gate", () => {
-  it("requires backup_freshness_ok=true when production gate is enabled", () => {
+  it("requires a successful recent set when production gate is enabled", () => {
     const file = join(temp, "freshness.json");
     process.env.BACKUP_FRESHNESS_FILE = file;
     process.env.BACKUP_FRESHNESS_REQUIRED = "true";
-    writeFileSync(file, JSON.stringify({ backup_freshness_ok: true }));
+    writeFileSync(file, JSON.stringify({
+      backup_freshness_ok: true,
+      status: "healthy",
+      latest_completed_at: new Date().toISOString(),
+    }));
     expect(isBackupFresh()).toBe(true);
-    writeFileSync(file, JSON.stringify({ backup_freshness_ok: false }));
+    writeFileSync(file, JSON.stringify({
+      backup_freshness_ok: true,
+      status: "healthy",
+      latest_completed_at: "2000-01-01T00:00:00Z",
+    }));
     expect(isBackupFresh()).toBe(false);
   });
 

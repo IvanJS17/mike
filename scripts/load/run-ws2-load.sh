@@ -12,6 +12,8 @@ umask 077
 : "${LOAD_UPLOAD_PATH:?set LOAD_UPLOAD_PATH to the authorized 10 MB upload route}"
 : "${LOAD_DOWNLOAD_PATH_TEMPLATE:?set LOAD_DOWNLOAD_PATH_TEMPLATE to the authorized download path template}"
 : "${LOAD_BATCH_ENDPOINT:?set LOAD_BATCH_ENDPOINT to the CI batch route}"
+: "${LOAD_WORKSPACE_PATH:?set LOAD_WORKSPACE_PATH to the authorized listing route}"
+: "${LOAD_MATTER_PATH:?set LOAD_MATTER_PATH to the authorized matter route}"
 : "${LOAD_WORKSPACE_CREATE_PATH:?set LOAD_WORKSPACE_CREATE_PATH to the workspace creation route}"
 : "${LOAD_MATTER_CREATE_PATH:?set LOAD_MATTER_CREATE_PATH to the matter creation route}"
 : "${LOAD_INTERACTIVE_PATHS:?set LOAD_INTERACTIVE_PATHS to exactly three chat/workflow routes}"
@@ -25,14 +27,15 @@ umask 077
 base_host=${LOAD_BASE_URL#https://}; base_host=${base_host%%/*}
 [[ "$base_host" == "$LOAD_ALLOWED_HOST" ]] || { printf 'Load target host is not approved.\n' >&2; exit 1; }
 [[ -f "$LOAD_APPROVAL_RECEIPT" && "$(stat -c '%a' "$LOAD_APPROVAL_RECEIPT")" == "600" ]] || { printf 'Approval receipt must be mode 600.\n' >&2; exit 1; }
-jq -e --arg host "$LOAD_ALLOWED_HOST" '.approved == true and .synthetic_only == true and .target_host == $host' "$LOAD_APPROVAL_RECEIPT" >/dev/null || { printf 'Synthetic approval receipt is invalid.\n' >&2; exit 1; }
+jq -e --arg host "$LOAD_ALLOWED_HOST" --arg url "$LOAD_BASE_URL" '(.approved == true) and (.synthetic_only == true) and (.target_host == $host) and (.target_url == $url) and ((.expires_at | fromdateiso8601) > now)' "$LOAD_APPROVAL_RECEIPT" >/dev/null || { printf 'Synthetic approval receipt is invalid or expired.\n' >&2; exit 1; }
 duration=${LOAD_DURATION_SECONDS:-1800}
 [[ "$duration" == "1800" ]] || { printf 'WS2 profile must run for exactly 1800 seconds (30 minutes).\n' >&2; exit 1; }
 user_count=$(jq -er 'length' "$LOAD_USERS_FILE")
 [[ "$user_count" == "4" ]] || { printf 'WS2 profile requires exactly 4 accounts.\n' >&2; exit 1; }
-jq -e 'all(.[]; .synthetic == true and (.token | type == "string" and test("^[A-Za-z0-9._~-]+$")))' "$LOAD_USERS_FILE" >/dev/null || { printf 'User fixture must contain synthetic safe tokens.\n' >&2; exit 1; }
+jq -e 'length == 4 and ([.[].id] | unique | length == 4) and ([.[].token] | unique | length == 4) and all(.[]; .synthetic == true and (.token | type == "string" and test("^[A-Za-z0-9._~-]+$")))' "$LOAD_USERS_FILE" >/dev/null || { printf 'User fixture must contain four distinct synthetic safe tokens.\n' >&2; exit 1; }
 IFS=',' read -r -a interactive_paths <<<"$LOAD_INTERACTIVE_PATHS"
 [[ "${#interactive_paths[@]}" == "3" ]] || { printf 'WS2 profile requires three chat/workflow paths.\n' >&2; exit 1; }
+python3 -c 'import re,sys; raise SystemExit(0 if all(re.fullmatch(r"/[A-Za-z0-9._/?=&-]+", value) for value in sys.argv[1:]) else 1)' "$LOAD_WORKSPACE_PATH" "$LOAD_MATTER_PATH" "$LOAD_WORKSPACE_CREATE_PATH" "$LOAD_MATTER_CREATE_PATH" "$LOAD_UPLOAD_PATH" "$LOAD_BATCH_ENDPOINT" || { printf 'Load route is unsafe.\n' >&2; exit 1; }
 python3 -c 'import re,sys; raise SystemExit(0 if re.fullmatch(r"/[A-Za-z0-9._/?=&-]*%s[A-Za-z0-9._/?=&-]*", sys.argv[1]) else 1)' "$LOAD_DOWNLOAD_PATH_TEMPLATE" || { printf 'Download path template is unsafe.\n' >&2; exit 1; }
 
 runtime_dir=$(mktemp -d)
@@ -111,7 +114,7 @@ while (( $(date -u +%s) < deadline )); do
 done
 
 metrics_json=$(cat "$LOAD_METRICS_FILE")
-jq -e '(.ram_percent|type=="number") and (.oom_events|type=="number") and (.swap_minutes|type=="number") and (.disk_percent|type=="number") and (.queue_resume_failures|type=="number") and (.readiness|type=="number")' <<<"$metrics_json" >/dev/null || { printf 'Metrics fixture must contain numeric fields.\n' >&2; exit 1; }
+jq -e 'all([.ram_percent,.oom_events,.swap_minutes,.disk_percent,.queue_resume_failures,.readiness]; type == "number" and . >= 0)' <<<"$metrics_json" >/dev/null || { printf 'Metrics fixture must contain nonnegative numeric fields.\n' >&2; exit 1; }
 ram_percent=$(jq -er '.ram_percent' <<<"$metrics_json")
 oom_events=$(jq -er '.oom_events' <<<"$metrics_json")
 swap_minutes=$(jq -er '.swap_minutes' <<<"$metrics_json")

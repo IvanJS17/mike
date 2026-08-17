@@ -113,7 +113,7 @@ describe("short-lived user-bound downloads", () => {
         const token = signUserDownload("documents/user/file.pdf", "file.pdf", "user-1", 300);
         expect(verifyUserDownload(token)).toMatchObject({ userId: "user-1", path: "documents/user/file.pdf" });
         const url = buildUserDownloadUrl("documents/user/file.pdf", "file.pdf", "user-1");
-        expect(url).toContain("/download-user/");
+        expect(url).toContain("/download/user/");
     });
 
     it("rejects an expired user token", () => {

@@ -59,9 +59,8 @@ jobs:
             NEXT_PUBLIC_API_BASE_URL=/api
       - name: Write immutable image lock entry
         run: |
-          printf 'LITT_%s_IMAGE=%s/%s/litt-%s@%s\n' \
-            '${{ matrix.env_name }}' '${{ env.REGISTRY }}' '${{ env.IMAGE_OWNER }}' \
-            '${{ matrix.name }}' '${{ steps.image.outputs.digest }}' > "image-lock-${{ matrix.name }}.env"
+          printf '%s' "LITT_${{ matrix.env_name }}_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/litt-${{ matrix.name }}@${{ steps.image.outputs.digest }}" > "image-lock-${{ matrix.name }}.env"
+          echo >> "image-lock-${{ matrix.name }}.env"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: production-image-lock-${{ matrix.name }}
@@ -88,10 +87,13 @@ jobs:
           for name in CADDY DB AUTH REST; do
             value="$(printenv "LITT_${name}_IMAGE")"
             [[ "$value" =~ @sha256:[0-9a-f]{64}$ ]]
-            printf 'LITT_%s_IMAGE=%s\\n' "$name" "$value" >> image-lock/upstream.env
+            printf '%s' "LITT_${name}_IMAGE=$value" >> image-lock/upstream.env
+            echo >> image-lock/upstream.env
           done
       - name: Reject mutable image references
         run: |
-          cat image-lock/*.env
-          test "$(grep -RohE '@sha256:[0-9a-f]{64}$' image-lock | wc -l)" -eq 6
-          ! grep -RE ':latest|:[^@[:space:]]+$' image-lock
+          refs=$(grep -Rh '^LITT_[A-Z0-9_]*_IMAGE=' image-lock | cut -d= -f2-)
+          test "$(wc -l <<<"$refs")" -eq 6
+          while IFS= read -r ref; do
+            [[ "$ref" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]]
+          done <<<"$refs"

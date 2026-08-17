@@ -39,6 +39,7 @@ function decodeCustomerKey(encoded: string): Buffer {
 }
 
 export function sseCustomerHeaders(): SseCustomerHeaders | undefined {
+  if (!required()) return undefined;
   const encoded = process.env.R2_SSE_CUSTOMER_KEY?.trim();
   if (!encoded) {
     if (required()) throw new Error(storageSecurityConfigurationError);

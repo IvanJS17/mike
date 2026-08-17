@@ -46,14 +46,18 @@ export const storageEnabled = Boolean(
   process.env.R2_SECRET_ACCESS_KEY,
 );
 
+function validateStorageOperation(): void {
+  validateStorageEndpoint();
+  sseCustomerHeaders();
+}
+
 function requireStorageConfig(): void {
   if (!storageEnabled) {
     throw new Error(
       "R2_ENDPOINT_URL, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY must be set",
     );
   }
-  validateStorageEndpoint();
-  sseCustomerHeaders();
+  validateStorageOperation();
 }
 
 export async function checkStorageReadiness(): Promise<void> {
@@ -111,6 +115,7 @@ export async function deleteFileFromBucket(
   key: string,
 ): Promise<void> {
   if (!storageEnabled) return;
+  validateStorageOperation();
   const client = getClient();
   await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
 }
@@ -121,6 +126,7 @@ export async function deleteFileFromBucket(
 
 export async function downloadFile(key: string): Promise<ArrayBuffer | null> {
   if (!storageEnabled) return null;
+  validateStorageOperation();
   try {
     const client = getClient();
     const response = (await client.send(
@@ -136,6 +142,7 @@ export async function downloadFile(key: string): Promise<ArrayBuffer | null> {
 
 export async function listFiles(prefix: string): Promise<string[]> {
   if (!storageEnabled) return [];
+  validateStorageOperation();
   const client = getClient();
   const keys: string[] = [];
   let ContinuationToken: string | undefined;
@@ -161,6 +168,7 @@ export async function listFilesFromBucket(
   prefix: string,
 ): Promise<string[]> {
   if (!storageEnabled) return [];
+  validateStorageOperation();
   const client = getClient();
   const keys: string[] = [];
   let ContinuationToken: string | undefined;
@@ -186,6 +194,7 @@ export async function listFilesFromBucket(
 
 export async function deleteFile(key: string): Promise<void> {
   if (!storageEnabled) return;
+  validateStorageOperation();
   const client = getClient();
   await client.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
 }

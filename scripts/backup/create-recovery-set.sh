@@ -5,8 +5,11 @@
 set -Eeuo pipefail
 umask 077
 
-: "${COMPOSE_FILE:?set COMPOSE_FILE to compose.prod.yml}"
+: "${COMPOSE_FILE:?set COMPOSE_FILE to the reviewed production Compose file}"
 : "${COMPOSE_ENV_FILE:?set COMPOSE_ENV_FILE to the external 0600 Compose env file}"
+: "${COMPOSE_PROJECT_NAME:?set COMPOSE_PROJECT_NAME=litt-production}"
+: "${OBJECT_ALLOWED_HOST:?set OBJECT_ALLOWED_HOST to the approved object host}"
+: "${BACKUP_ALLOWED_HOST:?set BACKUP_ALLOWED_HOST to the approved backup host}"
 : "${RECOVERY_ROOT:?set RECOVERY_ROOT on the encrypted volume}"
 : "${APP_BUCKET:?set APP_BUCKET to the application object bucket}"
 : "${OBJECT_ENDPOINT:?set OBJECT_ENDPOINT to the application storage endpoint}"
@@ -24,10 +27,12 @@ umask 077
 : "${PUBLICATION_MANIFEST_DIR:?set PUBLICATION_MANIFEST_DIR to publication manifests}"
 : "${RELEASE_MANIFEST_PATH:?set RELEASE_MANIFEST_PATH to the version manifest}"
 
-if [[ ! -f "$COMPOSE_ENV_FILE" || "$(stat -c '%a' "$COMPOSE_ENV_FILE")" != "600" ]]; then
-  printf 'Compose env file must exist with mode 600.\n' >&2
-  exit 1
-fi
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+expected_compose="$root/compose.prod.yml"
+[[ "$(realpath -e "$COMPOSE_FILE")" == "$expected_compose" ]] || { printf 'Non-canonical backup Compose path.\n' >&2; exit 1; }
+[[ "$COMPOSE_PROJECT_NAME" == "litt-production" ]] || { printf 'Backup project must be litt-production.\n' >&2; exit 1; }
+[[ ! -L "$COMPOSE_ENV_FILE" && -f "$COMPOSE_ENV_FILE" && "$(stat -c '%a' "$COMPOSE_ENV_FILE")" == "600" ]] || { printf 'Compose env file must be regular mode 600.\n' >&2; exit 1; }
+python3 -c 'from urllib.parse import urlparse; import sys; [(lambda u,h: (_ for _ in ()).throw(SystemExit(1)) if u.scheme != "https" or u.hostname != h else None)(urlparse(value), host) for value,host in zip(sys.argv[1::2],sys.argv[2::2])]' "$OBJECT_ENDPOINT" "$OBJECT_ALLOWED_HOST" "$BACKUP_ENDPOINT" "$BACKUP_ALLOWED_HOST" || { printf 'Backup endpoints must be HTTPS and allowlisted.\n' >&2; exit 1; }
 if [[ ! -s "$BACKUP_ENCRYPTION_RECIPIENT_FILE" ]]; then
   printf 'Age recipients file is missing or empty.\n' >&2
   exit 1
@@ -37,7 +42,7 @@ if [[ ! -f "$OBJECT_SSE_CUSTOMER_KEY_FILE" || "$(stat -c '%a' "$OBJECT_SSE_CUSTO
   exit 1
 fi
 for path in "$RECOVERY_CONFIG_DIR" "$AUDIT_EXPORT_DIR" "$PUBLICATION_MANIFEST_DIR" "$RELEASE_MANIFEST_PATH"; do
-  [[ -e "$path" ]] || { printf 'Missing recovery source: %s\n' "$path" >&2; exit 1; }
+  [[ -e "$path" && ! -L "$path" ]] || { printf 'Missing or symlinked recovery source: %s\n' "$path" >&2; exit 1; }
 done
 
 notify_failure() {
@@ -73,7 +78,7 @@ trap cleanup EXIT
 mkdir -p "$set_dir"
 mkdir -p "$work_dir/objects/data" "$work_dir/config" "$work_dir/audit" "$work_dir/publication"
 
-compose=(docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE")
+compose=(docker compose --env-file "$COMPOSE_ENV_FILE" -f "$expected_compose" -p litt-production)
 
 # PostgreSQL custom-format dump plus an independent restore-list check.
 "${compose[@]}" exec -T db pg_dump \
@@ -105,8 +110,14 @@ fi
 assert_sanitized_tree() {
   local path=$1
   [[ -d "$path" && ! -L "$path" ]] || { printf 'Recovery source is not a regular directory.\n' >&2; exit 1; }
-  local unsafe
-  unsafe=$(find "$path" \( -type l -o -type f \( -name '*.env' -o -name '*.key' -o -name '*.pem' -o -name '*.age' -o -iname '*secret*' -o -iname '*password*' \) \) -print -quit)
+  local unsafe special hardlinked
+  unsafe=$(find "$path" -type l -print -quit)
+  [[ -z "$unsafe" ]] || { printf 'Symlink in recovery source: %s\n' "$unsafe" >&2; exit 1; }
+  special=$(find "$path" ! -type d ! -type f -print -quit)
+  [[ -z "$special" ]] || { printf 'Special file in recovery source: %s\n' "$special" >&2; exit 1; }
+  hardlinked=$(find "$path" -type f -links +1 -print -quit)
+  [[ -z "$hardlinked" ]] || { printf 'Hardlink in recovery source: %s\n' "$hardlinked" >&2; exit 1; }
+  unsafe=$(find "$path" -type f \( -name '*.env' -o -name '*.key' -o -name '*.pem' -o -name '*.age' -o -iname '*secret*' -o -iname '*password*' \) -print -quit)
   [[ -z "$unsafe" ]] || { printf 'Unsafe recovery source member: %s\n' "$unsafe" >&2; exit 1; }
 }
 assert_sanitized_tree "$RECOVERY_CONFIG_DIR"
@@ -134,6 +145,7 @@ while :; do
   next_key=$(jq -r '.NextKeyMarker // empty' "$page_file")
   next_version=$(jq -r '.NextVersionIdMarker // empty' "$page_file")
   [[ -n "$next_key" && -n "$next_version" ]] || { printf 'Truncated object listing has no next markers.\n' >&2; exit 1; }
+  [[ "$next_key" != "$key_marker" || "$next_version" != "$version_marker" ]] || { printf 'Object listing pagination marker repeated.\n' >&2; exit 1; }
   key_marker="$next_key"
   version_marker="$next_version"
 done
@@ -151,7 +163,8 @@ while IFS= read -r record; do
   digest=$(sha256sum "$object_path" | cut -d' ' -f1)
   jq -cn --arg key "$key" --arg version "$version" --arg file "$file_id.object" \
     --arg sha256 "$digest" --argjson size "$(stat -c '%s' "$object_path")" \
-    '{kind:"version",key:$key,version_id:$version,file:$file,sha256:$sha256,size:$size}' \
+    --argjson is_latest "$(jq -r '.IsLatest // false' <<<"$record")" \
+    '{kind:"version",key:$key,version_id:$version,file:$file,sha256:$sha256,size:$size,is_latest:$is_latest}' \
     >>"$work_dir/objects/index.ndjson"
 done < <(jq -c 'select(.kind == "version")' "$work_dir/objects/versions.ndjson")
 while IFS= read -r record; do

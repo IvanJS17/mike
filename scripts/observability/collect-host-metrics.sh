@@ -5,15 +5,18 @@ set -Eeuo pipefail
 
 : "${COMPOSE_FILE:?set COMPOSE_FILE to compose.prod.yml}"
 : "${COMPOSE_ENV_FILE:?set COMPOSE_ENV_FILE to the external mode-600 env file}"
+: "${COMPOSE_PROJECT_NAME:?set COMPOSE_PROJECT_NAME=litt-production}"
 : "${LITT_DATA_ROOT:?set LITT_DATA_ROOT to the encrypted mount}"
 : "${BACKUP_FRESHNESS_FILE:?set BACKUP_FRESHNESS_FILE to backup-freshness.json}"
 : "${RESTORE_RECEIPT_FILE:?set RESTORE_RECEIPT_FILE to the latest restore receipt}"
 
-[[ "$(basename "$COMPOSE_FILE")" == "compose.prod.yml" ]] || {
-  printf 'Refusing to collect production metrics from the local Compose file.\n' >&2
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+expected_compose="$root/compose.prod.yml"
+[[ "$(realpath -e "$COMPOSE_FILE")" == "$expected_compose" && "$COMPOSE_PROJECT_NAME" == "litt-production" ]] || {
+  printf 'Refusing non-canonical production metrics target.\n' >&2
   exit 1
 }
-compose=(docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE")
+compose=(docker compose --env-file "$COMPOSE_ENV_FILE" -f "$expected_compose" -p litt-production)
 now=$(date -u +%s)
 
 cpu_total=$(awk '/^cpu / {print $2+$3+$4+$5+$6+$7+$8+$9}' /proc/stat)

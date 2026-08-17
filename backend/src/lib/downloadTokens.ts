@@ -106,7 +106,7 @@ export function verifyUserDownload(
 
 export function buildUserDownloadUrl(path: string, filename: string, userId: string): string {
     const base = (process.env.PUBLIC_API_BASE_URL ?? process.env.FRONTEND_URL ?? "").replace(/\/$/, "");
-    return `${base}/download-user/${signUserDownload(path, filename, userId)}`;
+    return `${base}/download/user/${signUserDownload(path, filename, userId)}`;
 }
 
 /**
