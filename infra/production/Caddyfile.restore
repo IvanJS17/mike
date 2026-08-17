@@ -1,6 +1,8 @@
 restore.litt.example.invalid:443 {
     tls internal
     encode zstd gzip
+    @metrics path /api/metrics /api/metrics/*
+    respond @metrics 404
     @api path /api /api/*
     handle @api {
         uri strip_prefix /api

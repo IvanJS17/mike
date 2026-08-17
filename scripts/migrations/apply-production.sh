@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Apply the repository's ordered migrations from the production DB image.
-# MIGRATION_MODE=fresh loads schema.sql before the dated migrations; existing
-# runs only the dated migrations. The caller must create a recovery set first.
+# Apply ordered migrations only after an immutable recovery/rehearsal gate.
 set -Eeuo pipefail
 
 : "${MIGRATION_MODE:?set MIGRATION_MODE=fresh or existing}"
@@ -11,6 +9,21 @@ case "$MIGRATION_MODE" in
 esac
 : "${POSTGRES_USER:?POSTGRES_USER is required}"
 : "${POSTGRES_DB:?POSTGRES_DB is required}"
+: "${MIGRATION_GATE_FILE:?MIGRATION_GATE_FILE is required}"
+: "${MIGRATION_TARGET_PROJECT:?MIGRATION_TARGET_PROJECT is required}"
+: "${RELEASE_SHA:?RELEASE_SHA is required}"
+: "${MIGRATION_TREE_SHA256:?MIGRATION_TREE_SHA256 is required}"
+[[ "$POSTGRES_USER" == postgres && "$POSTGRES_DB" == postgres ]] || { printf 'Migrations require canonical postgres database.\n' >&2; exit 1; }
+[[ -f "$MIGRATION_GATE_FILE" && ! -L "$MIGRATION_GATE_FILE" ]] || { printf 'Migration gate receipt is missing.\n' >&2; exit 1; }
+actual_tree_sha=$(cd /opt/litt/migrations && find . -type f -name '*.sql' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+[[ "$actual_tree_sha" == "$MIGRATION_TREE_SHA256" ]] || { printf 'Migration tree hash does not match the release gate.\n' >&2; exit 1; }
+jq -e --arg project "$MIGRATION_TARGET_PROJECT" --arg release "$RELEASE_SHA" --arg tree "$MIGRATION_TREE_SHA256" \
+  '(.release_sha == $release) and (.migration_tree_sha256 == $tree) and (.target_project == $project) and (.approved == true)' "$MIGRATION_GATE_FILE" >/dev/null || { printf 'Migration gate is not bound to this release/project/tree.\n' >&2; exit 1; }
+if [[ "$MIGRATION_TARGET_PROJECT" == litt-production ]]; then
+  jq -e '(.recovery_set_id | type == "string" and length > 0) and (.rehearsal_receipt_sha256 | test("^[0-9a-f]{64}$"))' "$MIGRATION_GATE_FILE" >/dev/null || { printf 'Production migration requires recovery and rehearsal evidence.\n' >&2; exit 1; }
+else
+  [[ "$MIGRATION_TARGET_PROJECT" =~ ^litt-rehearsal-[a-z0-9-]+$ ]] || { printf 'Non-production migration target is not disposable.\n' >&2; exit 1; }
+fi
 
 psql_cmd=(psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --set=ON_ERROR_STOP=1)
 if [[ "$MIGRATION_MODE" == "fresh" ]]; then

@@ -67,10 +67,13 @@ variable "vpn_cidrs" {
   default     = []
 
   validation {
-    condition = length(var.vpn_cidrs) > 0 && alltrue([
-      for cidr in var.vpn_cidrs : can(cidrhost(cidr, 0)) && cidr != "0.0.0.0/0" && cidr != "::/0"
-    ])
-    error_message = "vpn_cidrs must contain at least one valid VPN CIDR."
+    condition = length(var.vpn_cidrs) >= 2 && alltrue([
+      for cidr in var.vpn_cidrs : can(cidrhost(cidr, 0)) && cidr != "0.0.0.0/0" && cidr != "::/0" && (
+        (!strcontains(cidr, ":") && can(regex("^(10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.)", cidr))) ||
+        (strcontains(cidr, ":") && can(regex("^fd[0-9a-fA-F]{2}:", cidr)))
+      )
+    ]) && anytrue([for cidr in var.vpn_cidrs : !strcontains(cidr, ":")]) && anytrue([for cidr in var.vpn_cidrs : strcontains(cidr, ":")])
+    error_message = "vpn_cidrs must contain private IPv4 and ULA IPv6 VPN CIDRs; public defaults are rejected."
   }
 }
 

@@ -183,7 +183,8 @@ while IFS= read -r record; do
   jq -cn --arg key "$key" --arg version "$version" --arg file "$file_id.object" \
     --arg sha256 "$digest" --argjson size "$(stat -c '%s' "$object_path")" \
     --argjson is_latest "$(jq -r '.IsLatest // false' <<<"$record")" \
-    '{kind:"version",key:$key,version_id:$version,file:$file,sha256:$sha256,size:$size,is_latest:$is_latest}' \
+    --arg last_modified "$(jq -r '.LastModified // empty' <<<"$record")" \
+    '{kind:"version",key:$key,version_id:$version,file:$file,sha256:$sha256,size:$size,is_latest:$is_latest,last_modified:$last_modified}' \
     >>"$work_dir/objects/index.ndjson"
 done < <(jq -c 'select(.kind == "version")' "$work_dir/objects/versions.ndjson")
 while IFS= read -r record; do
@@ -210,7 +211,7 @@ jq -n \
   >"$work_dir/inventory.json"
 
 (cd "$work_dir" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum) >"$work_dir/SHA256SUMS"
-tar -C "$work_dir" -czf "$archive" .
+tar -C "$work_dir" -czf "$archive" postgres.dump postgres.restore.list objects config audit publication release-manifest.json inventory.json SHA256SUMS
 archive_sha256=$(sha256sum "$archive" | cut -d' ' -f1)
 age --encrypt --recipients-file "$BACKUP_ENCRYPTION_RECIPIENT_FILE" --output "$encrypted" "$archive"
 encrypted_sha256=$(sha256sum "$encrypted" | cut -d' ' -f1)

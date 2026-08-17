@@ -48,6 +48,7 @@ auth_path_pattern='^/api/[A-Za-z0-9._/?=&-]+$'
 [[ "$RESTORE_AUTHENTICATED_PATH" =~ $auth_path_pattern && "$RESTORE_AUTHENTICATED_PATH" != *..* ]] || { printf 'Restore authenticated route is unsafe.\n' >&2; exit 1; }
 [[ "$(docker context show)" == "$RESTORE_DOCKER_CONTEXT" ]] || { printf 'Restore is not running on its isolated Docker context.\n' >&2; exit 1; }
 
+[[ "$(realpath -e "$RESTORE_COMPOSE_FILE")" == "$restore_override" ]] || { printf 'Restore must use the reviewed compose.restore.yml.\n' >&2; exit 1; }
 [[ "$(realpath -e "$RESTORE_ENV_FILE")" == "$restore_root_real/compose.env" ]] || { printf 'Restore env must be inside RESTORE_ROOT.\n' >&2; exit 1; }
 [[ "$RESTORE_PROJECT_NAME" =~ ^litt-restore-[a-z0-9-]{1,40}$ ]] || { printf 'Restore project is not disposable.\n' >&2; exit 1; }
 [[ "$RESTORE_OBJECT_BUCKET" =~ ^litt-restore-[a-z0-9-]{1,50}$ ]] || { printf 'Restore bucket is not disposable.\n' >&2; exit 1; }
@@ -68,7 +69,7 @@ jq -e '
   and any(.[]; .table == "workspaces" and .count >= 2)
   and any(.[]; .table == "matters" and .count >= 6)
   and any(.[]; .table == "documents" and .count >= 100)
-  and (map(.table) as $tables | ["project_members","chats","executions","outputs","audit_events","publication_manifests"] | all(.[] as $required; ($tables | index($required)) != null))
+  and (map(.table) as $tables | ["workspace_memberships","matter_memberships","chats","workflows","document_versions","audit_events"] | all(.[] as $required; ($tables | index($required)) != null))
 ' "$RESTORE_EXPECTED_COUNTS_FILE" >/dev/null || { printf 'Restore qualification counts do not meet the mandatory dataset minimum.\n' >&2; exit 1; }
 
 runtime_dir=""
@@ -136,6 +137,20 @@ actual_archive_sha=$(sha256sum "$RECOVERY_SET_PATH" | cut -d' ' -f1)
   printf 'Archive and SUCCESS marker refer to different set IDs.\n' >&2
   exit 1
 }
+release_manifest="$set_dir/release-manifest.json"
+jq -e '.release_sha | type == "string" and test("^[0-9a-f]{40}$")' "$release_manifest" >/dev/null || { printf 'Archived release manifest is invalid.\n' >&2; exit 1; }
+compose_release_config=$("${compose[@]}" config --format json)
+jq -e --arg endpoint "$RESTORE_OBJECT_ENDPOINT" --arg bucket "$RESTORE_OBJECT_BUCKET" \
+  '(.services.backend.environment.R2_ENDPOINT_URL == $endpoint) and (.services.backend.environment.R2_BUCKET_NAME == $bucket) and (.services.backend.environment.R2_SSE_CUSTOMER_KEY_REQUIRED == "true")' <<<"$compose_release_config" >/dev/null || { printf 'Restore backend storage config is not bound to the disposable target.\n' >&2; exit 1; }
+jq -e \
+  --arg source "$(jq -er '.services.caddy.environment.SOURCE_OFFER_URL' <<<"$compose_release_config")" \
+  --arg backend "$(jq -er '.services.backend.image' <<<"$compose_release_config")" \
+  --arg frontend "$(jq -er '.services.frontend.image' <<<"$compose_release_config")" \
+  --arg caddy "$(jq -er '.services.caddy.image' <<<"$compose_release_config")" \
+  --arg db "$(jq -er '.services.db.image' <<<"$compose_release_config")" \
+  --arg auth "$(jq -er '.services.auth.image' <<<"$compose_release_config")" \
+  --arg rest "$(jq -er '.services.rest.image' <<<"$compose_release_config")" \
+  '(.source_offer == $source) and (.images.backend == $backend) and (.images.frontend == $frontend) and (.images.caddy == $caddy) and (.images.postgres == $db) and (.images.auth == $auth) and (.images.rest == $rest)' "$release_manifest" >/dev/null || { printf 'Restore Compose images/source do not match archived release.\n' >&2; exit 1; }
 created_at=$(jq -er '.created_at' "$set_dir/inventory.json")
 created_epoch=$(date -u -d "$created_at" +%s)
 failure_epoch=$(date -u -d "$RESTORE_FAILURE_AT" +%s)
@@ -185,50 +200,32 @@ versioning=$(restore_aws s3api get-bucket-versioning --bucket "$RESTORE_OBJECT_B
 
 : >"$runtime_dir/object-restore-map.ndjson"
 while IFS= read -r record; do
-  file=$(jq -er '.file' <<<"$record")
-  [[ "$file" =~ ^[0-9a-f]{64}\.object$ ]] || { printf 'Unsafe object member name.\n' >&2; exit 1; }
+  kind=$(jq -er '.kind' <<<"$record")
   key=$(jq -er '.key' <<<"$record")
-  source_path="$set_dir/objects/data/$file"
-  [[ -f "$source_path" ]] || { printf 'Missing object payload: %s\n' "$file" >&2; exit 1; }
-  expected_sha=$(jq -er '.sha256' <<<"$record")
-  actual_sha=$(sha256sum "$source_path" | cut -d' ' -f1)
-  [[ "$expected_sha" == "$actual_sha" ]] || { printf 'Object checksum mismatch: %s\n' "$key" >&2; exit 1; }
-  result=$(restore_aws s3api put-object \
-    --bucket "$RESTORE_OBJECT_BUCKET" --key "$key" --body "$source_path" \
-    --sse-customer-algorithm AES256 \
-    --sse-customer-key "fileb://$RESTORE_OBJECT_SSE_CUSTOMER_KEY_FILE")
-  new_version=$(jq -er '.VersionId | select(type == "string" and length > 0)' <<<"$result")
-  jq -cn --arg key "$key" --arg source_version "$(jq -r '.version_id' <<<"$record")" \
-    --arg restored_version "$new_version" --arg sha256 "$actual_sha" \
-    --arg file "$file" --argjson is_latest "$(jq -r '.is_latest // false' <<<"$record")" \
-    '{kind:"version",key:$key,source_version_id:$source_version,restored_version_id:$restored_version,sha256:$sha256,file:$file,is_latest:$is_latest}' \
-    >>"$runtime_dir/object-restore-map.ndjson"
-done < <(jq -c 'select(.kind == "version")' "$set_dir/objects/index.ndjson")
-
-while IFS= read -r record; do
-  key=$(jq -er '.key' <<<"$record")
-  result=$(restore_aws s3api delete-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$key")
-  restored_marker=$(jq -er '.VersionId | select(type == "string" and length > 0)' <<<"$result")
-  jq -cn --arg key "$key" --arg source_version "$(jq -r '.version_id' <<<"$record")" \
-    --arg restored_version "$restored_marker" \
-    --argjson is_latest "$(jq -r '.is_latest // false' <<<"$record")" \
-    '{kind:"delete_marker",key:$key,source_version_id:$source_version,restored_version_id:$restored_version,is_latest:$is_latest}' \
-    >>"$runtime_dir/object-restore-map.ndjson"
-done < <(jq -c 'select(.kind == "delete_marker")' "$set_dir/objects/index.ndjson")
-
-# Reapply each key's original latest state after creating all historical entries.
-while IFS= read -r latest; do
-  kind=$(jq -r '.kind' <<<"$latest")
-  key=$(jq -r '.key' <<<"$latest")
   if [[ "$kind" == "version" ]]; then
-    file=$(jq -r '.file' <<<"$latest")
-    restore_aws s3api put-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$key" \
-      --body "$set_dir/objects/data/$file" --sse-customer-algorithm AES256 \
-      --sse-customer-key "fileb://$RESTORE_OBJECT_SSE_CUSTOMER_KEY_FILE" >/dev/null
+    file=$(jq -er '.file' <<<"$record")
+    [[ "$file" =~ ^[0-9a-f]{64}\.object$ ]] || { printf 'Unsafe object member name.\n' >&2; exit 1; }
+    source_path="$set_dir/objects/data/$file"
+    [[ -f "$source_path" ]] || { printf 'Missing object payload: %s\n' "$file" >&2; exit 1; }
+    expected_sha=$(jq -er '.sha256' <<<"$record")
+    actual_sha=$(sha256sum "$source_path" | cut -d' ' -f1)
+    [[ "$expected_sha" == "$actual_sha" ]] || { printf 'Object checksum mismatch: %s\n' "$key" >&2; exit 1; }
+    result=$(restore_aws s3api put-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$key" --body "$source_path" \
+      --sse-customer-algorithm AES256 --sse-customer-key "fileb://$RESTORE_OBJECT_SSE_CUSTOMER_KEY_FILE")
+    restored_version=$(jq -er '.VersionId | select(type == "string" and length > 0)' <<<"$result")
+    jq -cn --arg key "$key" --arg source_version "$(jq -r '.version_id' <<<"$record")" \
+      --arg restored_version "$restored_version" --arg sha256 "$actual_sha" --arg file "$file" \
+      '{kind:"version",key:$key,source_version_id:$source_version,restored_version_id:$restored_version,sha256:$sha256,file:$file}' \
+      >>"$runtime_dir/object-restore-map.ndjson"
   else
-    restore_aws s3api delete-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$key" >/dev/null
+    result=$(restore_aws s3api delete-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$key")
+    restored_marker=$(jq -er '.VersionId | select(type == "string" and length > 0)' <<<"$result")
+    jq -cn --arg key "$key" --arg source_version "$(jq -r '.version_id' <<<"$record")" \
+      --arg restored_version "$restored_marker" \
+      '{kind:"delete_marker",key:$key,source_version_id:$source_version,restored_version_id:$restored_version}' \
+      >>"$runtime_dir/object-restore-map.ndjson"
   fi
-done < <(jq -c 'select(.is_latest == true)' "$set_dir/objects/index.ndjson")
+done < <(jq -c -s 'sort_by(.key, .last_modified)[]' "$set_dir/objects/index.ndjson")
 
 expected_objects=$(jq -s '[.[] | select(.kind == "version")] | length' "$set_dir/objects/index.ndjson")
 expected_markers=$(jq -s '[.[] | select(.kind == "delete_marker")] | length' "$set_dir/objects/index.ndjson")
@@ -260,14 +257,19 @@ if (( rto_seconds > 14400 )); then
   exit 1
 fi
 receipt="$RESTORE_ROOT/restore-receipts/$set_id-$(date -u +%Y%m%dT%H%M%SZ).json"
+release_sha=$(jq -er '.release_sha' "$release_manifest")
+migration_version=$(jq -er '.migration_version' "$release_manifest")
 jq -n \
   --arg set_id "$set_id" \
+  --arg release_sha "$release_sha" \
+  --arg migration_version "$migration_version" \
   --arg restored_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg project "$RESTORE_PROJECT_NAME" \
   --argjson rpo_seconds "$rpo_seconds" \
   --argjson rto_seconds "$rto_seconds" \
   --argjson object_count "$restored_objects" \
-  '{status:"success",set_id:$set_id,restored_at:$restored_at,disposable_project:$project,rpo_seconds:$rpo_seconds,rto_seconds:$rto_seconds,restored_object_count:$object_count,readiness:"green",secrets_included:false}' \
+  --argjson marker_count "$restored_markers" \
+  '{status:"success",set_id:$set_id,release_sha:$release_sha,migration_version:$migration_version,restored_at:$restored_at,disposable_project:$project,rpo_seconds:$rpo_seconds,rto_seconds:$rto_seconds,restored_object_count:$object_count,restored_delete_marker_count:$marker_count,readiness:"green",secrets_included:false}' \
   >"$receipt"
 chmod 0600 "$receipt"
 printf 'Restore completed on disposable project %s: RPO=%ss RTO=%ss.\n' "$RESTORE_PROJECT_NAME" "$rpo_seconds" "$rto_seconds"

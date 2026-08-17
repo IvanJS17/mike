@@ -105,3 +105,20 @@ test("restore, load, and object probes reject live targets and preserve versione
   assert.match(objectProbe, /version-id|VersionId/);
   assert.match(objectProbe, /delete-marker|DeleteMarkers/);
 });
+
+test("restore and migration contracts match the current schema and runtime routes", () => {
+  const restore = read("scripts/restore/restore-recovery-set.sh");
+  assert.match(restore, /Bearer \$access_token/);
+  assert.match(restore, /workspace_memberships|matter_memberships/);
+  assert.doesNotMatch(restore, /is_latest == true/);
+  const archive = read("scripts/backup/create-recovery-set.sh");
+  assert.doesNotMatch(archive, /tar -C .* -czf .* \\./);
+  const load = read("scripts/load/run-ws2-load.sh");
+  assert.match(load, /single-documents|projects/);
+  assert.match(load, /stat.*download|wc -c|size/);
+  const migration = read("scripts/migrations/rehearse-production.sh");
+  assert.match(migration, /DOCKER_CONTEXT|litt-rehearsal/);
+  assert.match(migration, /realpath/);
+  const apply = read("scripts/migrations/apply-production.sh");
+  assert.match(apply, /RECOVERY.*SUCCESS|recovery.*receipt/i);
+});

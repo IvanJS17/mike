@@ -11,6 +11,7 @@ data_volume_size_gb = 50
 
 vpn_cidrs = [
   "10.42.0.0/24",
+  "fd42:42::/64",
 ]
 
 ssh_keys = {

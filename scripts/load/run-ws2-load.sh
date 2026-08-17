@@ -47,7 +47,7 @@ validate_route() {
   route_pattern='^/api/[A-Za-z0-9._/?=&%-]+$'
   [[ "$route" =~ $route_pattern && "$route" != *..* ]] || return 1
   case "$route" in
-    /api/workspaces*|/api/matters*|/api/documents*|/api/batches*|/api/chat*|/api/workflows*) return 0 ;;
+    /api/projects*|/api/single-documents*|/api/chat*|/api/workflows*|/api/download*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -126,7 +126,8 @@ while (( $(date -u +%s) < deadline )); do
     download_path=$(printf "$LOAD_DOWNLOAD_PATH_TEMPLATE" "$document_id")
     downloaded="$runtime_dir/download-$user.bin"
     request "$token" "$user" "download-10mb" GET "$download_path" "" "$downloaded"
-    [[ -s "$downloaded" ]] || { printf '10 MB download returned no bytes.\n' >&2; exit 1; }
+    [[ "$(stat -c '%s' "$downloaded")" == "$(stat -c '%s' "$upload_body")" ]] || { printf 'Downloaded file size differs from 10 MiB fixture.\n' >&2; exit 1; }
+    cmp -s "$upload_body" "$downloaded" || { printf 'Downloaded bytes differ from upload fixture.\n' >&2; exit 1; }
     for route in "${interactive_paths[@]}"; do
       method=${route%%:*}; path=${route#*:}
       [[ "$method" =~ ^(GET|POST)$ && "$path" == /* ]] || { printf 'Interactive route must be METHOD:/path.\n' >&2; exit 1; }

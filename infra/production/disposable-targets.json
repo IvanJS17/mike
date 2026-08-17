@@ -10,5 +10,10 @@
     "public_base_url": "https://restore.litt.example.invalid",
     "object_host": "objects.restore.litt.example.invalid",
     "object_endpoint": "https://objects.restore.litt.example.invalid"
+  },
+  "migration": {
+    "target_id": "migration-disposable",
+    "root": "/srv/litt-rehearsal",
+    "docker_context": "litt-rehearsal-disposable"
   }
 }
