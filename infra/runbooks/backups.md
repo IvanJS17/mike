@@ -32,7 +32,8 @@ canonical `LITT_APP_ROOT` (the deployed `/srv/<app>/` checkout),
 `COMPOSE_FILE=$LITT_APP_ROOT/compose.prod.yml`,
 `COMPOSE_ENV_FILE=/srv/litt-data/secrets/compose.env`, and
 `COMPOSE_PROJECT_NAME=litt-production`, `LITT_DATA_DEVICE=/dev/...`, and
-`LITT_CRYPT_MAPPER=litt-data`, plus the paths and credentials named by
+`LITT_CRYPT_MAPPER=litt-data`, `BACKUP_ALLOWED_HOST=backup.litt.example.invalid`,
+and `OBJECT_ALLOWED_HOST=objects.production.litt.example.invalid`, plus the paths and credentials named by
 `create-recovery-set.sh` and `check-recovery-freshness.sh`. It must define separate
 object and backup credentials, the mode-600 `OBJECT_SSE_CUSTOMER_KEY_FILE`, the
 canonical `/srv/litt-data/secrets/backup-recipients.age`, the age recipients file,

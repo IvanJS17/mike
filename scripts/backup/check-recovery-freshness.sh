@@ -10,7 +10,13 @@ umask 077
 : "${BACKUP_SECRET_ACCESS_KEY:?set BACKUP_SECRET_ACCESS_KEY}"
 : "${BACKUP_FRESHNESS_FILE:?set BACKUP_FRESHNESS_FILE on the encrypted volume}"
 : "${LITT_DATA_ROOT:?set LITT_DATA_ROOT=/srv/litt-data}"
+: "${LITT_APP_ROOT:?set LITT_APP_ROOT to the deployed checkout}"
 : "${BACKUP_ALERT_WEBHOOK:?set BACKUP_ALERT_WEBHOOK}"
+: "${BACKUP_ALLOWED_HOST:?set BACKUP_ALLOWED_HOST to the versioned backup host}"
+root=$(realpath -e "$LITT_APP_ROOT")
+target_manifest="$root/infra/production/disposable-targets.json"
+jq -e --arg host "$BACKUP_ALLOWED_HOST" --arg bucket "$BACKUP_BUCKET" '(.backup.host == $host) and (.backup.bucket == $bucket)' "$target_manifest" >/dev/null || { printf 'Freshness backup target is not the versioned target.\n' >&2; exit 1; }
+python3 -c 'from urllib.parse import urlparse; import sys; u=urlparse(sys.argv[1]); raise SystemExit(0 if u.scheme == "https" and u.hostname == sys.argv[2] else 1)' "$BACKUP_ENDPOINT" "$BACKUP_ALLOWED_HOST" || { printf 'Freshness backup endpoint must be HTTPS and allowlisted.\n' >&2; exit 1; }
 [[ "$(realpath -m "$LITT_DATA_ROOT")" == "/srv/litt-data" && "$(realpath -m "$BACKUP_FRESHNESS_FILE")" == "/srv/litt-data/state/backup-freshness.json" ]] || { printf 'Freshness state path is not canonical.\n' >&2; exit 1; }
 state_file="$LITT_DATA_ROOT/state/backup-freshness.json"
 readonly max_age_seconds=86400

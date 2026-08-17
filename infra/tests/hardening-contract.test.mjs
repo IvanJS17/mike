@@ -121,4 +121,7 @@ test("restore and migration contracts match the current schema and runtime route
   assert.match(migration, /realpath/);
   const apply = read("scripts/migrations/apply-production.sh");
   assert.match(apply, /RECOVERY.*SUCCESS|recovery.*receipt/i);
+  const app = read("backend/src/app.ts");
+  assert.match(app, /syntheticLoadRouter/);
+  assert.match(read("backend/src/routes/syntheticLoad.ts"), /SYNTHETIC_LOAD_ENABLED/);
 });

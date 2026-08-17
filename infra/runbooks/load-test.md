@@ -27,6 +27,12 @@ Run:
 scripts/load/run-ws2-load.sh
 ```
 
+The disposable backend must set `SYNTHETIC_LOAD_ENABLED=true`; the production
+Compose environment never enables this seam. The runner uses the exact routes and three interactive paths in
+`infra/production/disposable-targets.json`: projects for workspace/matter
+creation/listing, `/api/single-documents` for upload, `/api/download` for
+backend downloads, `/api/test/load/batch` for the gated synthetic seam, and
+`POST:/api/chat`, `POST:/api/workflows`, `GET:/api/projects` for interactive paths.
 The user fixture and metrics fixture are mode-600 files outside Git. The report
 contains only counts, timings, status codes, thresholds, and image/version
 references. It must not contain user tokens or document content.

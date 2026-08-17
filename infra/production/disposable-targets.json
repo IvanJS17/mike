@@ -2,18 +2,48 @@
   "load": {
     "target_id": "staging-load-disposable",
     "host": "load.litt.example.invalid",
-    "base_url": "https://load.litt.example.invalid"
+    "base_url": "https://load.litt.example.invalid",
+    "workspace_path": "/api/projects",
+    "matter_path": "/api/projects",
+    "workspace_create_path": "/api/projects",
+    "matter_create_path": "/api/projects",
+    "upload_path": "/api/single-documents",
+    "download_prefix": "/api/download",
+    "batch_endpoint": "/api/test/load/batch",
+    "interactive_paths": ["POST:/api/chat", "POST:/api/workflows", "GET:/api/projects"]
   },
   "restore": {
     "target_id": "restore-disposable",
+    "root": "/srv/litt-restore",
     "public_host": "restore.litt.example.invalid",
     "public_base_url": "https://restore.litt.example.invalid",
     "object_host": "objects.restore.litt.example.invalid",
-    "object_endpoint": "https://objects.restore.litt.example.invalid"
+    "object_endpoint": "https://objects.restore.litt.example.invalid",
+    "docker_context": "litt-restore-disposable",
+    "project": "litt-restore-disposable",
+    "bucket": "litt-restore-disposable",
+    "authenticated_path": "/api/projects"
   },
   "migration": {
     "target_id": "migration-disposable",
     "root": "/srv/litt-rehearsal",
-    "docker_context": "litt-rehearsal-disposable"
+    "docker_context": "litt-rehearsal-disposable",
+    "project": "litt-rehearsal-disposable"
+  },
+  "probe": {
+    "target_id": "sse-probe-disposable",
+    "endpoint": "https://objects.probe.litt.example.invalid",
+    "host": "objects.probe.litt.example.invalid",
+    "account_id": "probe-account-placeholder",
+    "bucket": "litt-probe-disposable"
+  },
+  "object": {
+    "host": "objects.production.litt.example.invalid",
+    "endpoint": "https://objects.production.litt.example.invalid",
+    "bucket": "litt-production"
+  },
+  "backup": {
+    "host": "backup.litt.example.invalid",
+    "bucket": "litt-recovery-production"
   }
 }

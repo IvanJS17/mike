@@ -20,7 +20,7 @@ for image in "$LITT_BACKEND_IMAGE" "$LITT_FRONTEND_IMAGE" "$LITT_CADDY_IMAGE" "$
   [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] || { printf 'Mutable image reference rejected.\n' >&2; exit 1; }
 done
 [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { printf 'Release SHA must be a full commit.\n' >&2; exit 1; }
-[[ "$SOURCE_OFFER_URL" == *"$RELEASE_SHA"* ]] || { printf 'Source offer must point at RELEASE_SHA.\n' >&2; exit 1; }
+[[ "$SOURCE_OFFER_URL" == "https://github.com/IvanJS17/mike/tree/$RELEASE_SHA" ]] || { printf 'Source offer must be the exact fork tree URL for RELEASE_SHA.\n' >&2; exit 1; }
 [[ -f "$CADDYFILE_PATH" && ! -L "$CADDYFILE_PATH" ]] || { printf 'Caddyfile must be a regular file.\n' >&2; exit 1; }
 caddy_config_sha256=$(sha256sum "$CADDYFILE_PATH" | cut -d' ' -f1)
 mkdir -p "$(dirname "$RELEASE_MANIFEST_PATH")"

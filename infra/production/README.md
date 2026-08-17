@@ -49,12 +49,14 @@ runbook; do not edit a running container by hand.
 ## Operator gates
 
 1. Verify the LUKS2 mount and permissions before starting Compose.
-2. Verify the image lock and `docker compose ... config` before `up -d`.
-3. Run the migration rehearsal and create a recovery set before a migration.
-4. Start only with `scripts/production-up.sh` after the host firewall and VPN
+2. Generate the mode-600 release manifest from the exact clean HEAD, image lock,
+   Caddyfile hash, and migration tree; verify it before startup.
+3. Verify the image lock and `docker compose ... config` before `up -d`.
+4. Run the migration rehearsal and create a recovery set before a migration.
+5. Start only with `scripts/production-up.sh` after the host firewall and VPN
    are verified.
-5. Check `/api/ready` and the external alert targets.
-6. Record the release manifest, migration result, and permission review.
+6. Check `/api/ready` and the external alert targets.
+7. Record the migration result and permission review.
 
 No command in this directory creates a Hetzner server, changes DNS, uploads a
 secret, or applies OpenTofu automatically.

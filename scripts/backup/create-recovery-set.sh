@@ -31,6 +31,9 @@ umask 077
 : "${RELEASE_MANIFEST_PATH:?set RELEASE_MANIFEST_PATH to the version manifest}"
 
 root=$(realpath -e "$LITT_APP_ROOT")
+target_manifest="$root/infra/production/disposable-targets.json"
+jq -e --arg host "$BACKUP_ALLOWED_HOST" --arg bucket "$BACKUP_BUCKET" --arg object_host "$OBJECT_ALLOWED_HOST" --arg object_endpoint "$OBJECT_ENDPOINT" --arg object_bucket "$APP_BUCKET" \
+  '(.backup.host == $host) and (.backup.bucket == $bucket) and (.object.host == $object_host) and (.object.endpoint == $object_endpoint) and (.object.bucket == $object_bucket)' "$target_manifest" >/dev/null || { printf 'Recovery object/backup targets are not the versioned targets.\n' >&2; exit 1; }
 expected_compose="$root/compose.prod.yml"
 data_root=$(realpath -e "$LITT_DATA_ROOT")
 secrets_root=$(realpath -e "$LITT_SECRETS_ROOT")
@@ -143,6 +146,9 @@ assert_sanitized_tree "$RECOVERY_CONFIG_DIR"
 assert_sanitized_tree "$AUDIT_EXPORT_DIR"
 assert_sanitized_tree "$PUBLICATION_MANIFEST_DIR"
 
+source_versioning=$(object_aws s3api get-bucket-versioning --bucket "$APP_BUCKET" --output json)
+[[ "$(jq -r '.Status // empty' <<<"$source_versioning")" == "Enabled" ]] || { printf 'Application bucket versioning is not enabled.\n' >&2; exit 1; }
+
 # Export every object version and delete marker, explicitly following S3 marker
 # pagination. Object contents are addressed by a digest of (key, version).
 mkdir -p "$work_dir/objects/pages"
@@ -157,6 +163,7 @@ while :; do
   [[ -n "$key_marker" ]] && args+=(--key-marker "$key_marker")
   [[ -n "$version_marker" ]] && args+=(--version-id-marker "$version_marker")
   object_aws "${args[@]}" >"$page_file"
+  jq -e 'all((.Versions // [])[]; (.VersionId | type == "string" and length > 0) and (.IsLatest | type == "boolean")) and all((.DeleteMarkers // [])[]; (.VersionId | type == "string" and length > 0) and (.IsLatest | type == "boolean"))' "$page_file" >/dev/null || { printf 'Object version listing has missing IDs or latest metadata.\n' >&2; exit 1; }
   jq -c '.Versions[]? | {kind:"version",Key,VersionId,IsLatest,LastModified,ETag,Size}' "$page_file" >>"$work_dir/objects/versions.ndjson"
   jq -c '.DeleteMarkers[]? | {kind:"delete_marker",Key,VersionId,IsLatest,LastModified}' "$page_file" >>"$work_dir/objects/versions.ndjson"
   truncated=$(jq -er 'if has("IsTruncated") and (.IsTruncated | type == "boolean") then .IsTruncated else error("missing boolean IsTruncated") end' "$page_file")
@@ -168,6 +175,7 @@ while :; do
   key_marker="$next_key"
   version_marker="$next_version"
 done
+jq -s 'group_by([.Key, .LastModified]) | all(.[]; length == 1)' "$work_dir/objects/versions.ndjson" >/dev/null || { printf 'Object version ordering is ambiguous for a key/timestamp pair.\n' >&2; exit 1; }
 : >"$work_dir/objects/index.ndjson"
 while IFS= read -r record; do
   key=$(jq -r '.Key' <<<"$record")

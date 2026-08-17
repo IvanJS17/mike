@@ -8,8 +8,11 @@ never runs `docker compose down -v`.
 
 Download the encrypted archive and its separately written `SUCCESS.json` marker
 from the independent destination. Prepare mode-600 files for the age identity,
-disposable Compose env, and disposable Object Storage SSE-C key. Set
-`RESTORE_FAILURE_AT` to the declared failure time before running the script.
+disposable Compose env, disposable Object Storage SSE-C key, and
+`RESTORE_DESIGNATED_USERS_FILE`; provide `RESTORE_CA_CERT_FILE` for the
+internal disposable TLS CA. Set `RESTORE_AUTHENTICATED_PATH` to the protected
+route recorded for the target before running the script. Set
+`RESTORE_FAILURE_AT` to the declared failure time before the run.
 Keep the live application credentials and Socium recovery identity out of the
 restore receipt.
 
@@ -34,14 +37,16 @@ restore receipt.
    object contents into a disposable versioned bucket with SSE-C, and verifies
    backend `/ready` reports database, storage, and Auth green.
 4. Supply `RESTORE_EXPECTED_COUNTS_FILE` when the qualification dataset is
-   loaded. The minimum dataset is **4 users, 2 workspaces, 6 matters, 100 documents**, memberships/roles, chats, executions, outputs/receipts,
-   adversarial reviews, batches/sources/fragments/embeddings, audit events, and
-   publication manifests. Record counts and SHA-256s, not customer text or
-   secrets.
-5. Reconcile object count, content hashes, object-to-row references, execution
-   and receipt links, current versions, a positive synonym search, negative
-   cross-matter/revoked searches, and publication-manifest state. Verify the
-   restored Auth users can sign in through the disposable public route.
+   loaded. The minimum dataset is **4 user profiles, 2 workspaces, 6 matters,
+   100 documents**, plus `workspace_memberships`, `matter_memberships`,
+   `document_versions`, `chats`, `workflows`, and `audit_events`. Record counts
+   and SHA-256s, not customer text or secrets.
+5. The script automatically verifies object checksums, version/delete-marker
+   counts, database counts, readiness, two designated-user sign-ins, and RPO/RTO.
+   Before promoting the receipt, also provide mode-600
+`RESTORE_MANUAL_QUALIFICATION_FILE` and set
+`RESTORE_MANUAL_QUALIFICATION_APPROVAL=YES`; it must record the five manual
+qualification booleans as true.
 6. Preserve the generated restore receipt, timing, image lock, migration
    version, and sanitized logs. Destroy the disposable project only after the
    receipt is copied to the approved evidence store.

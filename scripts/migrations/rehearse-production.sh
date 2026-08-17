@@ -12,8 +12,8 @@ umask 077
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 expected="$root/compose.prod.yml"
 target_manifest="$root/infra/production/disposable-targets.json"
-jq -e --arg id "$MIGRATION_TARGET_ID" --arg root "/srv/litt-rehearsal" --arg context "$MIGRATION_DOCKER_CONTEXT" \
-  '(.migration.target_id == $id) and (.migration.root == $root) and (.migration.docker_context == $context)' "$target_manifest" >/dev/null || { printf 'Migration target is not the versioned disposable target.\n' >&2; exit 1; }
+jq -e --arg id "$MIGRATION_TARGET_ID" --arg root "/srv/litt-rehearsal" --arg context "$MIGRATION_DOCKER_CONTEXT" --arg project "$MIGRATION_REHEARSAL_PROJECT" \
+  '(.migration.target_id == $id) and (.migration.root == $root) and (.migration.docker_context == $context) and (.migration.project == $project)' "$target_manifest" >/dev/null || { printf 'Migration target is not the versioned disposable target.\n' >&2; exit 1; }
 [[ "$(realpath -e "$COMPOSE_FILE")" == "$expected" ]] || { printf 'Non-canonical migration Compose path.\n' >&2; exit 1; }
 [[ "$MIGRATION_REHEARSAL_PROJECT" =~ ^litt-rehearsal-[a-z0-9-]{1,40}$ ]] || { printf 'Non-disposable migration project.\n' >&2; exit 1; }
 [[ "$MIGRATION_DOCKER_CONTEXT" =~ ^litt-rehearsal-[a-z0-9-]+$ && "$(docker context show)" == "$MIGRATION_DOCKER_CONTEXT" ]] || { printf 'Migration Docker context is not disposable.\n' >&2; exit 1; }
@@ -29,6 +29,10 @@ release_sha=$(git -C "$root" rev-parse HEAD)
 export LITT_DATA_ROOT="$rehearsal_root/data"
 export LITT_SECRETS_ROOT="$rehearsal_root/secrets"
 mkdir -p "$LITT_DATA_ROOT/state" "$LITT_SECRETS_ROOT"
+for service in backend db auth rest; do
+  env_file="$LITT_SECRETS_ROOT/$service.env"
+  [[ -f "$env_file" && ! -L "$env_file" && "$(stat -c '%a' "$env_file")" == "600" ]] || { printf 'Missing disposable %s.env mode-600 file.\n' "$service" >&2; exit 1; }
+done
 export MIGRATION_TARGET_PROJECT="$MIGRATION_REHEARSAL_PROJECT"
 export RELEASE_SHA="$release_sha"
 export MIGRATION_TREE_SHA256="$migration_tree_sha256"

@@ -42,12 +42,16 @@ user_count=$(jq -er 'length' "$LOAD_USERS_FILE")
 jq -e 'length == 4 and ([.[].id] | unique | length == 4) and ([.[].token] | unique | length == 4) and all(.[]; (.id | test("^[A-Za-z0-9._-]+$")) and .synthetic == true and (.token | type == "string" and test("^[A-Za-z0-9._~-]+$")))' "$LOAD_USERS_FILE" >/dev/null || { printf 'User fixture must contain four distinct synthetic safe IDs/tokens.\n' >&2; exit 1; }
 IFS=',' read -r -a interactive_paths <<<"$LOAD_INTERACTIVE_PATHS"
 [[ "${#interactive_paths[@]}" == "3" ]] || { printf 'WS2 profile requires three chat/workflow paths.\n' >&2; exit 1; }
+interactive_json=$(printf '%s\n' "${interactive_paths[@]}" | jq -R . | jq -s .)
+jq -e --arg workspace "$LOAD_WORKSPACE_PATH" --arg matter "$LOAD_MATTER_PATH" --arg workspace_create "$LOAD_WORKSPACE_CREATE_PATH" --arg matter_create "$LOAD_MATTER_CREATE_PATH" --arg upload "$LOAD_UPLOAD_PATH" --arg batch "$LOAD_BATCH_ENDPOINT" --argjson interactive "$interactive_json" \
+  '(.load.workspace_path == $workspace) and (.load.matter_path == $matter) and (.load.workspace_create_path == $workspace_create) and (.load.matter_create_path == $matter_create) and (.load.upload_path == $upload) and (.load.batch_endpoint == $batch) and (.load.interactive_paths == $interactive)' "$target_manifest" >/dev/null || { printf 'Load routes do not match the versioned target manifest.\n' >&2; exit 1; }
+download_prefix=$(jq -er '.load.download_prefix' "$target_manifest")
 validate_route() {
   local route=$1
   route_pattern='^/api/[A-Za-z0-9._/?=&%-]+$'
   [[ "$route" =~ $route_pattern && "$route" != *..* ]] || return 1
   case "$route" in
-    /api/projects*|/api/single-documents*|/api/chat*|/api/workflows*|/api/download*) return 0 ;;
+    /api/projects*|/api/single-documents*|/api/chat*|/api/workflows*|/api/download*|/api/test/load*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -55,13 +59,15 @@ for route in "$LOAD_WORKSPACE_PATH" "$LOAD_MATTER_PATH" "$LOAD_WORKSPACE_CREATE_
   validate_route "$route" || { printf 'Load route is outside the immutable synthetic allowlist.\n' >&2; exit 1; }
 done
 python3 -c 'import re,sys; raise SystemExit(0 if re.fullmatch(r"/api/[A-Za-z0-9._/?=&%-]*%s[A-Za-z0-9._/?=&%-]*", sys.argv[1]) else 1)' "$LOAD_DOWNLOAD_PATH_TEMPLATE" || { printf 'Download path template is unsafe.\n' >&2; exit 1; }
+[[ "$LOAD_DOWNLOAD_PATH_TEMPLATE" == "$download_prefix"* ]] || { printf 'Download path template is outside the versioned prefix.\n' >&2; exit 1; }
 
 runtime_dir=$(mktemp -d)
 requests_csv="$runtime_dir/requests.csv"
-upload_body="$runtime_dir/upload-10mb.bin"
+upload_body="$runtime_dir/upload-10mb.pdf"
 trap 'rm -rf "$runtime_dir"' EXIT
 printf 'timestamp,user,operation,status,time_seconds\n' >"$requests_csv"
-dd if=/dev/zero of="$upload_body" bs=1M count=10 status=none
+printf '%s\n' '%PDF-1.4' '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj' '2 0 obj << /Type /Pages /Kids [] /Count 0 >> endobj' 'trailer << /Root 1 0 R >>' '%%EOF' >"$upload_body"
+truncate -s 10485760 "$upload_body"
 
 request() {
   local token=$1 user=$2 operation=$3 method=$4 path=$5 body=${6:-} capture=${7:-} allow_failure=${8:-0}
@@ -115,7 +121,7 @@ while (( $(date -u +%s) < deadline )); do
   while IFS= read -r user_record; do
     user=$(jq -er '.id' <<<"$user_record")
     token=$(jq -er '.token' <<<"$user_record")
-    create_body=$(jq -cn --arg run "ws2-$start" --arg user "$user" '{synthetic:true,load_run:$run,owner:$user}')
+    create_body=$(jq -cn --arg run "ws2-$start" --arg user "$user" --arg name "WS2 synthetic $user" '{synthetic:true,load_run:$run,owner:$user,name:$name,practice:"synthetic"}')
     request "$token" "$user" "create-workspace" POST "$LOAD_WORKSPACE_CREATE_PATH" "$create_body" "$runtime_dir/workspace-$user.json"
     request "$token" "$user" "create-matter" POST "$LOAD_MATTER_CREATE_PATH" "$create_body" "$runtime_dir/matter-$user.json"
     request "$token" "$user" "list-workspaces" GET "$LOAD_WORKSPACE_PATH"
@@ -123,7 +129,12 @@ while (( $(date -u +%s) < deadline )); do
     upload_response="$runtime_dir/upload-$user.json"
     request "$token" "$user" "upload-10mb" POST "$LOAD_UPLOAD_PATH" "$upload_body" "$upload_response"
     document_id=$(jq -er '.id // .document_id' "$upload_response")
-    download_path=$(printf "$LOAD_DOWNLOAD_PATH_TEMPLATE" "$document_id")
+    download_path=$(jq -er '.download_url // .url // empty' "$upload_response" 2>/dev/null || true)
+    if [[ -z "$download_path" ]]; then
+      download_path=$(printf "$LOAD_DOWNLOAD_PATH_TEMPLATE" "$document_id")
+    fi
+    validate_route "$download_path" || { printf 'Backend download URL is outside the synthetic allowlist.\n' >&2; exit 1; }
+    [[ "$download_path" == "$download_prefix"* ]] || { printf 'Backend download URL is outside the versioned prefix.\n' >&2; exit 1; }
     downloaded="$runtime_dir/download-$user.bin"
     request "$token" "$user" "download-10mb" GET "$download_path" "" "$downloaded"
     [[ "$(stat -c '%s' "$downloaded")" == "$(stat -c '%s' "$upload_body")" ]] || { printf 'Downloaded file size differs from 10 MiB fixture.\n' >&2; exit 1; }

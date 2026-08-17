@@ -153,9 +153,11 @@ services:
     environment:
       MIGRATION_MODE: ${MIGRATION_MODE:-existing}
       MIGRATION_GATE_FILE: /run/litt-state/migration-gate.json
-      MIGRATION_TARGET_PROJECT: ${MIGRATION_TARGET_PROJECT:-litt-production}
+      MIGRATION_TARGET_PROJECT: litt-production
       RELEASE_SHA: ${RELEASE_SHA:-REPLACE_WITH_RELEASE_SHA}
       MIGRATION_TREE_SHA256: ${MIGRATION_TREE_SHA256:-REPLACE_WITH_MIGRATION_TREE_SHA256}
+      MIGRATION_RECOVERY_SUCCESS_FILE: /run/litt-state/latest-success.json
+      MIGRATION_REHEARSAL_RECEIPT_FILE: /run/litt-state/migration-rehearsal.json
     volumes:
       - type: bind
         source: ${LITT_DATA_ROOT:?LITT_DATA_ROOT is required}/state

@@ -42,7 +42,7 @@ export function metricsMiddleware(
   next: NextFunction,
 ): void {
   const started = process.hrtime.bigint();
-  const queueRequest = /\/(batches|workflows|chat)(\/|$)/.test(req.path);
+  const queueRequest = /\/(batches?|workflows|chat)(\/|$)/.test(req.path);
   const publicationRequest = /publication/i.test(req.path);
   if (queueRequest) recordQueueEvent("enqueued");
   res.once("finish", () => {

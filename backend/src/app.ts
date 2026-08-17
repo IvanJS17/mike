@@ -13,6 +13,7 @@ import { workflowsRouter } from "./routes/workflows";
 import { userRouter } from "./routes/user";
 import { modelsRouter } from "./routes/models";
 import { downloadsRouter } from "./routes/downloads";
+import { syntheticLoadRouter } from "./routes/syntheticLoad";
 import { manifestPublicKey } from "./lib/manifestSigning";
 import { safeErrorLog } from "./lib/safeError";
 import { evaluateReadiness } from "./lib/readiness";
@@ -166,6 +167,7 @@ app.delete("/user/projects", dataDeleteLimiter);
 app.delete("/user/tabular-reviews", dataDeleteLimiter);
 
 app.use(express.json({ limit: JSON_BODY_LIMIT }));
+app.use("/test/load", syntheticLoadRouter);
 
 app.use("/chat", chatRouter);
 app.use("/models", modelsRouter);

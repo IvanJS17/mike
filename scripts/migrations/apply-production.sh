@@ -20,7 +20,15 @@ actual_tree_sha=$(cd /opt/litt/migrations && find . -type f -name '*.sql' -print
 jq -e --arg project "$MIGRATION_TARGET_PROJECT" --arg release "$RELEASE_SHA" --arg tree "$MIGRATION_TREE_SHA256" \
   '(.release_sha == $release) and (.migration_tree_sha256 == $tree) and (.target_project == $project) and (.approved == true)' "$MIGRATION_GATE_FILE" >/dev/null || { printf 'Migration gate is not bound to this release/project/tree.\n' >&2; exit 1; }
 if [[ "$MIGRATION_TARGET_PROJECT" == litt-production ]]; then
-  jq -e '(.recovery_set_id | type == "string" and length > 0) and (.rehearsal_receipt_sha256 | test("^[0-9a-f]{64}$"))' "$MIGRATION_GATE_FILE" >/dev/null || { printf 'Production migration requires recovery and rehearsal evidence.\n' >&2; exit 1; }
+  : "${MIGRATION_RECOVERY_SUCCESS_FILE:?MIGRATION_RECOVERY_SUCCESS_FILE is required for production migrations}"
+  : "${MIGRATION_REHEARSAL_RECEIPT_FILE:?MIGRATION_REHEARSAL_RECEIPT_FILE is required for production migrations}"
+  [[ -f "$MIGRATION_RECOVERY_SUCCESS_FILE" && ! -L "$MIGRATION_RECOVERY_SUCCESS_FILE" ]] || { printf 'Production recovery SUCCESS marker is missing.\n' >&2; exit 1; }
+  [[ -f "$MIGRATION_REHEARSAL_RECEIPT_FILE" && ! -L "$MIGRATION_REHEARSAL_RECEIPT_FILE" ]] || { printf 'Migration rehearsal receipt is missing.\n' >&2; exit 1; }
+  jq -e --arg set_id "$(jq -er '.recovery_set_id' "$MIGRATION_GATE_FILE")" --arg release "$RELEASE_SHA" \
+    '(.status == "success") and (.set_id == $set_id) and (.release_sha == $release)' "$MIGRATION_RECOVERY_SUCCESS_FILE" >/dev/null || { printf 'Recovery SUCCESS marker does not match production migration gate.\n' >&2; exit 1; }
+  rehearsal_sha=$(sha256sum "$MIGRATION_REHEARSAL_RECEIPT_FILE" | cut -d' ' -f1)
+  [[ "$rehearsal_sha" == "$(jq -er '.rehearsal_receipt_sha256' "$MIGRATION_GATE_FILE")" ]] || { printf 'Migration rehearsal receipt hash does not match gate.\n' >&2; exit 1; }
+  jq -e --arg release "$RELEASE_SHA" --arg tree "$MIGRATION_TREE_SHA256" '(.status == "success") and (.release_sha == $release) and (.migration_tree_sha256 == $tree)' "$MIGRATION_REHEARSAL_RECEIPT_FILE" >/dev/null || { printf 'Migration rehearsal receipt is not bound to this release/tree.\n' >&2; exit 1; }
 else
   [[ "$MIGRATION_TARGET_PROJECT" =~ ^litt-rehearsal-[a-z0-9-]+$ ]] || { printf 'Non-production migration target is not disposable.\n' >&2; exit 1; }
 fi

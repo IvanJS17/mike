@@ -7,6 +7,8 @@ set -Eeuo pipefail
 : "${LITT_SECRETS_ROOT:?set LITT_SECRETS_ROOT}"
 : "${COMPOSE_ENV_FILE:?set COMPOSE_ENV_FILE to encrypted secrets/compose.env}"
 : "${LUKS2_CONFIRM:?set LUKS2_CONFIRM=YES}"
+[[ "$(realpath -m "$LITT_DATA_ROOT")" == "/srv/litt-data" && ! -L "$LITT_DATA_ROOT" ]] || { printf 'Non-canonical production data root.\n' >&2; exit 1; }
+[[ "$(realpath -m "$LITT_SECRETS_ROOT")" == "/srv/litt-data/secrets" && ! -L "$LITT_SECRETS_ROOT" ]] || { printf 'Non-canonical production secrets root.\n' >&2; exit 1; }
 [[ "$LUKS2_CONFIRM" == YES ]] || { printf 'Explicit LUKS2_CONFIRM=YES is required.\n' >&2; exit 2; }
 (( EUID == 0 )) || { printf 'Run as root.\n' >&2; exit 1; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

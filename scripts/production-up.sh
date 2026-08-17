@@ -36,7 +36,7 @@ done
   exit 1
 }
 caddy_sha=$(sha256sum "$root/infra/production/Caddyfile" | cut -d' ' -f1)
-jq -e --arg sha "$RELEASE_SHA" --arg caddy "$caddy_sha" '(.release_sha == $sha) and (.source_offer | endswith($sha)) and (.caddy_config_sha256 == $caddy)' "$RELEASE_MANIFEST_PATH" >/dev/null || {
+jq -e --arg sha "$RELEASE_SHA" --arg caddy "$caddy_sha" '(.release_sha == $sha) and (.source_offer == ("https://github.com/IvanJS17/mike/tree/" + $sha)) and (.caddy_config_sha256 == $caddy)' "$RELEASE_MANIFEST_PATH" >/dev/null || {
   printf 'Release manifest does not match SHA/source/Caddyfile.\n' >&2
   exit 1
 }

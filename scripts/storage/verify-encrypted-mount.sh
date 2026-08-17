@@ -8,8 +8,9 @@ set -Eeuo pipefail
 : "${LITT_DATA_DEVICE:?set LITT_DATA_DEVICE to the verified block device}"
 
 if (( EUID != 0 )); then printf 'The encrypted-mount guard must run as root.\n' >&2; exit 1; fi
-if [[ "$LITT_DATA_ROOT" == "/" || "$LITT_DATA_ROOT" != /* ]]; then printf 'Invalid LITT_DATA_ROOT.\n' >&2; exit 1; fi
-if [[ ! -d "$LITT_DATA_ROOT" || -L "$LITT_DATA_ROOT" ]]; then printf 'Invalid encrypted data directory.\n' >&2; exit 1; fi
+if [[ "$(realpath -m "$LITT_DATA_ROOT")" != "/srv/litt-data" || -L "$LITT_DATA_ROOT" ]]; then printf 'Refusing non-canonical LITT_DATA_ROOT.\n' >&2; exit 1; fi
+if [[ "$(realpath -m "$LITT_SECRETS_ROOT")" != "/srv/litt-data/secrets" || -L "$LITT_SECRETS_ROOT" ]]; then printf 'Refusing non-canonical LITT_SECRETS_ROOT.\n' >&2; exit 1; fi
+if [[ ! -d "$LITT_DATA_ROOT" ]]; then printf 'Invalid encrypted data directory.\n' >&2; exit 1; fi
 root_device=$(realpath -e "$LITT_DATA_DEVICE")
 root_source=$(findmnt -n -o SOURCE --target /)
 if ! cryptsetup isLuks "$root_device" >/dev/null 2>&1; then

@@ -32,10 +32,10 @@ restore_override="$repo_root/infra/production/compose.restore.yml"
 : "${RESTORE_CA_CERT_FILE:?set RESTORE_CA_CERT_FILE to the disposable TLS CA certificate}"
 
 target_manifest="$repo_root/infra/production/disposable-targets.json"
-jq -e --arg id "$RESTORE_TARGET_ID" --arg public "$RESTORE_PUBLIC_BASE_URL" --arg public_host "$RESTORE_PUBLIC_ALLOWED_HOST" --arg object "$RESTORE_OBJECT_ENDPOINT" --arg object_host "$RESTORE_OBJECT_ALLOWED_HOST" \
-  '(.restore.target_id == $id) and (.restore.public_base_url == $public) and (.restore.public_host == $public_host) and (.restore.object_endpoint == $object) and (.restore.object_host == $object_host)' "$target_manifest" >/dev/null || { printf 'Restore target is not the versioned disposable target.\n' >&2; exit 1; }
+jq -e --arg id "$RESTORE_TARGET_ID" --arg root "/srv/litt-restore" --arg context "$RESTORE_DOCKER_CONTEXT" --arg project "$RESTORE_PROJECT_NAME" --arg bucket "$RESTORE_OBJECT_BUCKET" --arg auth "$RESTORE_AUTHENTICATED_PATH" --arg public "$RESTORE_PUBLIC_BASE_URL" --arg public_host "$RESTORE_PUBLIC_ALLOWED_HOST" --arg object "$RESTORE_OBJECT_ENDPOINT" --arg object_host "$RESTORE_OBJECT_ALLOWED_HOST" \
+  '(.restore.target_id == $id) and (.restore.root == $root) and (.restore.docker_context == $context) and (.restore.project == $project) and (.restore.bucket == $bucket) and (.restore.authenticated_path == $auth) and (.restore.public_base_url == $public) and (.restore.public_host == $public_host) and (.restore.object_endpoint == $object) and (.restore.object_host == $object_host)' "$target_manifest" >/dev/null || { printf 'Restore target is not the versioned disposable target.\n' >&2; exit 1; }
 restore_root_real=$(realpath -e "$RESTORE_ROOT")
-[[ "$restore_root_real" != "/" && "$restore_root_real" == */litt-restore* ]] || { printf 'Restore root is not disposable.\n' >&2; exit 1; }
+[[ "$restore_root_real" == "/srv/litt-restore" && ! -L "$RESTORE_ROOT" ]] || { printf 'Restore root is not the versioned disposable root.\n' >&2; exit 1; }
 [[ "$RESTORE_PUBLIC_BASE_URL" =~ ^https:// ]] || { printf 'Restore public URL must use HTTPS.\n' >&2; exit 1; }
 public_host=${RESTORE_PUBLIC_BASE_URL#https://}; public_host=${public_host%%/*}
 object_host=${RESTORE_OBJECT_ENDPOINT#https://}; object_host=${object_host%%/*}
@@ -69,7 +69,7 @@ jq -e '
   and any(.[]; .table == "workspaces" and .count >= 2)
   and any(.[]; .table == "matters" and .count >= 6)
   and any(.[]; .table == "documents" and .count >= 100)
-  and (map(.table) as $tables | ["workspace_memberships","matter_memberships","chats","workflows","document_versions","audit_events"] | all(.[] as $required; ($tables | index($required)) != null))
+  and (map(.table) as $tables | ["workspace_memberships","matter_memberships","chats","workflows","document_versions","audit_events"] as $required | all($required[]; . as $name | ($tables | index($name)) != null))
 ' "$RESTORE_EXPECTED_COUNTS_FILE" >/dev/null || { printf 'Restore qualification counts do not meet the mandatory dataset minimum.\n' >&2; exit 1; }
 
 runtime_dir=""
@@ -117,9 +117,12 @@ with tarfile.open(sys.argv[1], 'r:gz') as archive:
         path = PurePosixPath(member.name)
         if path.is_absolute() or '..' in path.parts or member.issym() or member.islnk() or not (member.isdir() or member.isfile()):
             raise SystemExit(f'unsafe archive member: {member.name}')
-        if not path.parts or path.parts[0] not in allowed_roots or member.name in seen:
+        canonical_name = "/".join(path.parts) + ("/" if member.isdir() else "")
+        if member.name != canonical_name:
+            raise SystemExit(f'non-canonical archive member: {member.name}')
+        if not path.parts or path.parts[0] not in allowed_roots or canonical_name in seen:
             raise SystemExit(f'unallowlisted or duplicate archive member: {member.name}')
-        seen.add(member.name)
+        seen.add(canonical_name)
         total_size += member.size
         if total_size > 5 * 1024 * 1024 * 1024:
             raise SystemExit('archive expands beyond the 5 GiB restore bound')

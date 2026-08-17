@@ -12,8 +12,13 @@ umask 077
 : "${SSE_C_PROBE_ENDPOINT_URL:?set SSE_C_PROBE_ENDPOINT_URL to the isolated scratch endpoint}"
 : "${SSE_C_PROBE_ALLOWED_HOST:?set SSE_C_PROBE_ALLOWED_HOST to the isolated scratch host}"
 : "${SSE_C_PROBE_ACCOUNT_ID:?set SSE_C_PROBE_ACCOUNT_ID to the isolated scratch account}"
+: "${SSE_C_PROBE_TARGET_ID:?set SSE_C_PROBE_TARGET_ID to the versioned probe target}"
 : "${SSE_C_PROBE_ACCESS_KEY_ID:?set SSE_C_PROBE_ACCESS_KEY_ID to the separate scratch credential}"
 : "${SSE_C_PROBE_SECRET_ACCESS_KEY:?set SSE_C_PROBE_SECRET_ACCESS_KEY to the separate scratch credential}"
+: "${LITT_APP_ROOT:?set LITT_APP_ROOT to the reviewed checkout}"
+target_manifest="$(realpath -e "$LITT_APP_ROOT")/infra/production/disposable-targets.json"
+jq -e --arg endpoint "$SSE_C_PROBE_ENDPOINT_URL" --arg host "$SSE_C_PROBE_ALLOWED_HOST" --arg account "$SSE_C_PROBE_ACCOUNT_ID" --arg bucket "$SSE_C_PROBE_BUCKET_NAME" --arg id "$SSE_C_PROBE_TARGET_ID" \
+  '(.probe.target_id == $id) and (.probe.endpoint == $endpoint) and (.probe.host == $host) and (.probe.account_id == $account) and (.probe.bucket == $bucket)' "$target_manifest" >/dev/null || { printf 'SSE-C probe target is not the versioned disposable target.\n' >&2; exit 1; }
 [[ "$SSE_C_PROBE_APPROVAL" == YES ]] || { printf 'Explicit scratch probe approval is required.\n' >&2; exit 2; }
 [[ "$SSE_C_PROBE_BUCKET_NAME" =~ ^litt-probe-[a-z0-9-]+$ && "$SSE_C_PROBE_BUCKET_NAME" != "$AWS_BUCKET_NAME" ]] || { printf 'Probe bucket must be distinct and litt-probe-*.\n' >&2; exit 1; }
 [[ "$AWS_ENDPOINT_URL" =~ ^https:// && "$SSE_C_PROBE_ENDPOINT_URL" =~ ^https:// ]] || { printf 'Object endpoints must use HTTPS.\n' >&2; exit 1; }

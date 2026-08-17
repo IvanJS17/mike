@@ -29,7 +29,7 @@ test("restore decrypts and verifies an immutable recovery set before loading it"
 
 test("restore runbook requires the qualification dataset and measured objectives", () => {
   const runbook = readFileSync(resolve(root, "infra/runbooks/restore.md"), "utf8");
-  for (const phrase of ["disposable", "4 users", "2 workspaces", "6 matters", "100 documents", "RPO", "RTO", "rollback"]) {
+  for (const phrase of ["disposable", "4 user profiles", "2 workspaces", "6 matters", "100 documents", "RPO", "RTO", "rollback"]) {
     assert.match(runbook, new RegExp(phrase, "i"));
   }
 });
