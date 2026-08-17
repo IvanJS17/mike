@@ -55,6 +55,13 @@ function requireStorageConfig(): void {
   sseCustomerHeaders();
 }
 
+export async function checkStorageReadiness(): Promise<void> {
+  requireStorageConfig();
+  await getClient().send(
+    new ListObjectsV2Command({ Bucket: BUCKET, MaxKeys: 1 }),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Upload
 // ---------------------------------------------------------------------------

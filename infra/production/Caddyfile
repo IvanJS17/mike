@@ -16,6 +16,9 @@
         X-LiTT-Source-Offer {$SOURCE_OFFER_URL}
     }
 
+    @metrics path /api/metrics
+    respond @metrics 404
+
     @api path /api /api/*
     handle @api {
         uri strip_prefix /api

@@ -1,0 +1,66 @@
+groups:
+  - name: litt-runtime
+    rules:
+      - alert: LittAvailabilityUnavailable
+        expr: probe_success{job="litt-readiness"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LiTT readiness is unavailable"
+          description: "The DB/storage/Auth readiness probe has failed for two minutes."
+
+      - alert: LittDiskSpaceLow
+        expr: litt_host_disk_used_percent >= 70
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LiTT encrypted data disk is above 70%"
+
+      - alert: LittMemoryPressure
+        expr: (1 - litt_host_memory_bytes{state="available"} / litt_host_memory_bytes{state="total"}) >= 0.75
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LiTT host RAM is above 75%"
+
+      - alert: LittContainerOOM
+        expr: increase(container_memory_failcnt[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "LiTT container experienced an OOM event"
+
+      - alert: LittBackupStale
+        expr: time() - litt_backup_last_success_timestamp_seconds > 86400
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LiTT has no complete recovery set in 24 hours"
+          description: "Real-data acceptance must remain disabled until backup freshness is restored."
+
+      - alert: LittRestoreFailed
+        expr: litt_restore_last_success == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The latest LiTT restore qualification failed"
+
+      - alert: LittPublicationFailed
+        expr: increase(litt_publication_failures_total[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "A LiTT publication/reconciliation attempt failed"
+
+      - alert: LittQueueStalled
+        expr: litt_queue_depth > 0 and rate(litt_queue_completed_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LiTT queue has work but no completions"

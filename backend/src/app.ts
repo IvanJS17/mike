@@ -15,6 +15,8 @@ import { modelsRouter } from "./routes/models";
 import { downloadsRouter } from "./routes/downloads";
 import { manifestPublicKey } from "./lib/manifestSigning";
 import { safeErrorLog } from "./lib/safeError";
+import { evaluateReadiness } from "./lib/readiness";
+import { metricsMiddleware, renderMetrics } from "./lib/metrics";
 
 export const app = express();
 const isProduction = process.env.NODE_ENV === "production";
@@ -92,6 +94,7 @@ const dataDeleteLimiter = makeLimiter({
 
 app.disable("x-powered-by");
 app.set("trust proxy", envInt("TRUST_PROXY_HOPS", 1));
+app.use(metricsMiddleware);
 
 app.use(
   helmet({
@@ -175,6 +178,15 @@ app.use("/users", userRouter);
 app.use("/download", downloadsRouter);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+app.get("/ready", async (_req, res) => {
+  const result = await evaluateReadiness();
+  res.status(result.ok ? 200 : 503).json(result);
+});
+
+app.get("/metrics", (_req, res) => {
+  res.type("text/plain; version=0.0.4").send(renderMetrics());
+});
 
 // The Ed25519 public key this deployment signs project export manifests with,
 // or null when no key is configured. Deliberately open: whoever checks a
