@@ -101,6 +101,9 @@ jobs:
           done
       - name: Reject mutable image references
         run: |
+          for name in BACKEND FRONTEND CADDY DB AUTH REST; do
+            test "$(grep -Rch "^LITT_${name}_IMAGE=" image-lock | awk '{sum += $1} END {print sum+0}')" -eq 1
+          done
           refs=$(grep -Rh '^LITT_[A-Z0-9_]*_IMAGE=' image-lock | cut -d= -f2-)
           test "$(wc -l <<<"$refs")" -eq 6
           while IFS= read -r ref; do

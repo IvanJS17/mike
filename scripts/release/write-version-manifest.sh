@@ -6,7 +6,8 @@ umask 077
 : "${RELEASE_MANIFEST_PATH:?set RELEASE_MANIFEST_PATH to the encrypted config path}"
 : "${RELEASE_SHA:?set RELEASE_SHA to the reviewed Git commit}"
 : "${SOURCE_OFFER_URL:?set SOURCE_OFFER_URL to the public AGPL source offer}"
-: "${CADDYFILE_PATH:?set CADDYFILE_PATH to the reviewed Caddyfile}"
+: "${CADDYFILE_PATH:?set CADDYFILE_PATH to the reviewed production Caddyfile}"
+: "${RESTORE_CADDYFILE_PATH:?set RESTORE_CADDYFILE_PATH to the reviewed restore Caddyfile}"
 : "${LITT_BACKEND_IMAGE:?set LITT_BACKEND_IMAGE to a digest reference}"
 : "${LITT_FRONTEND_IMAGE:?set LITT_FRONTEND_IMAGE to a digest reference}"
 : "${LITT_CADDY_IMAGE:?set LITT_CADDY_IMAGE to a digest reference}"
@@ -21,8 +22,9 @@ for image in "$LITT_BACKEND_IMAGE" "$LITT_FRONTEND_IMAGE" "$LITT_CADDY_IMAGE" "$
 done
 [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { printf 'Release SHA must be a full commit.\n' >&2; exit 1; }
 [[ "$SOURCE_OFFER_URL" == "https://github.com/IvanJS17/mike/tree/$RELEASE_SHA" ]] || { printf 'Source offer must be the exact fork tree URL for RELEASE_SHA.\n' >&2; exit 1; }
-[[ -f "$CADDYFILE_PATH" && ! -L "$CADDYFILE_PATH" ]] || { printf 'Caddyfile must be a regular file.\n' >&2; exit 1; }
+[[ -f "$CADDYFILE_PATH" && ! -L "$CADDYFILE_PATH" && -f "$RESTORE_CADDYFILE_PATH" && ! -L "$RESTORE_CADDYFILE_PATH" ]] || { printf 'Caddyfiles must be regular files.\n' >&2; exit 1; }
 caddy_config_sha256=$(sha256sum "$CADDYFILE_PATH" | cut -d' ' -f1)
+restore_caddy_config_sha256=$(sha256sum "$RESTORE_CADDYFILE_PATH" | cut -d' ' -f1)
 mkdir -p "$(dirname "$RELEASE_MANIFEST_PATH")"
 jq -n \
   --arg application "litt" \
@@ -38,6 +40,7 @@ jq -n \
   --arg opentofu "$OPENTOFU_VERSION" \
   --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg caddy_config_sha256 "$caddy_config_sha256" \
-  '{application:$application,license:"AGPL-3.0-only",release_sha:$release_sha,source_offer:$source_offer,caddy_config_sha256:$caddy_config_sha256,images:{backend:$backend,frontend:$frontend,caddy:$caddy,postgres:$db,auth:$auth,rest:$rest},migration_version:$migration,opentofu_version:$opentofu,generated_at:$generated_at}' \
+  --arg restore_caddy_config_sha256 "$restore_caddy_config_sha256" \
+  '{application:$application,license:"AGPL-3.0-only",release_sha:$release_sha,source_offer:$source_offer,caddy_config_sha256:$caddy_config_sha256,restore_caddy_config_sha256:$restore_caddy_config_sha256,images:{backend:$backend,frontend:$frontend,caddy:$caddy,postgres:$db,auth:$auth,rest:$rest},migration_version:$migration,opentofu_version:$opentofu,generated_at:$generated_at}' \
   >"$RELEASE_MANIFEST_PATH"
 chmod 0600 "$RELEASE_MANIFEST_PATH"

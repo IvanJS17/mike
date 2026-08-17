@@ -72,6 +72,7 @@ services:
       NODE_ENV: production
       PORT: "3001"
       R2_SSE_CUSTOMER_KEY_REQUIRED: "true"
+      SYNTHETIC_LOAD_ENABLED: "false"
       PUBLIC_API_BASE_URL: "https://${APP_DOMAIN}/api"
       BACKUP_FRESHNESS_REQUIRED: "true"
       BACKUP_FRESHNESS_FILE: /run/litt-state/backup-freshness.json
@@ -154,6 +155,7 @@ services:
       MIGRATION_MODE: ${MIGRATION_MODE:-existing}
       MIGRATION_GATE_FILE: /run/litt-state/migration-gate.json
       MIGRATION_TARGET_PROJECT: litt-production
+      MIGRATION_DOCKER_CONTEXT: litt-production
       RELEASE_SHA: ${RELEASE_SHA:-REPLACE_WITH_RELEASE_SHA}
       MIGRATION_TREE_SHA256: ${MIGRATION_TREE_SHA256:-REPLACE_WITH_MIGRATION_TREE_SHA256}
       MIGRATION_RECOVERY_SUCCESS_FILE: /run/litt-state/latest-success.json

@@ -38,8 +38,8 @@ export RELEASE_SHA="$release_sha"
 export MIGRATION_TREE_SHA256="$migration_tree_sha256"
 MIGRATION_RECEIPT="$rehearsal_root/state/migration-rehearsal.json"
 export MIGRATION_RECEIPT
-jq -n --arg project "$MIGRATION_REHEARSAL_PROJECT" --arg release "$RELEASE_SHA" --arg tree "$MIGRATION_TREE_SHA256" \
-  '{approved:true,status:"rehearsal-approved",target_project:$project,release_sha:$release,migration_tree_sha256:$tree}' \
+jq -n --arg project "$MIGRATION_REHEARSAL_PROJECT" --arg context "$MIGRATION_DOCKER_CONTEXT" --arg release "$RELEASE_SHA" --arg tree "$MIGRATION_TREE_SHA256" \
+  '{approved:true,status:"rehearsal-approved",target_project:$project,docker_context:$context,release_sha:$release,migration_tree_sha256:$tree}' \
   >"$LITT_DATA_ROOT/state/migration-gate.json"
 chmod 0600 "$LITT_DATA_ROOT/state/migration-gate.json"
 
@@ -65,8 +65,8 @@ cleanup() {
 trap cleanup EXIT
 started=1
 "${compose[@]}" up -d db auth rest
-"${compose[@]}" --profile ops run --rm -e MIGRATION_MODE=fresh migrations
-"${compose[@]}" --profile ops run --rm -e MIGRATION_MODE=existing migrations
+"${compose[@]}" --profile ops run --rm -e MIGRATION_MODE=fresh -e MIGRATION_TARGET_PROJECT="$MIGRATION_REHEARSAL_PROJECT" -e MIGRATION_DOCKER_CONTEXT="$MIGRATION_DOCKER_CONTEXT" migrations
+"${compose[@]}" --profile ops run --rm -e MIGRATION_MODE=existing -e MIGRATION_TARGET_PROJECT="$MIGRATION_REHEARSAL_PROJECT" -e MIGRATION_DOCKER_CONTEXT="$MIGRATION_DOCKER_CONTEXT" migrations
 migration_version=$(find "$root/backend/migrations" -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | sort | awk 'END {print}')
 jq -n \
   --arg project "$MIGRATION_REHEARSAL_PROJECT" --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

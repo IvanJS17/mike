@@ -17,8 +17,8 @@ umask 077
 : "${SSE_C_PROBE_SECRET_ACCESS_KEY:?set SSE_C_PROBE_SECRET_ACCESS_KEY to the separate scratch credential}"
 : "${LITT_APP_ROOT:?set LITT_APP_ROOT to the reviewed checkout}"
 target_manifest="$(realpath -e "$LITT_APP_ROOT")/infra/production/disposable-targets.json"
-jq -e --arg endpoint "$SSE_C_PROBE_ENDPOINT_URL" --arg host "$SSE_C_PROBE_ALLOWED_HOST" --arg account "$SSE_C_PROBE_ACCOUNT_ID" --arg bucket "$SSE_C_PROBE_BUCKET_NAME" --arg id "$SSE_C_PROBE_TARGET_ID" \
-  '(.probe.target_id == $id) and (.probe.endpoint == $endpoint) and (.probe.host == $host) and (.probe.account_id == $account) and (.probe.bucket == $bucket)' "$target_manifest" >/dev/null || { printf 'SSE-C probe target is not the versioned disposable target.\n' >&2; exit 1; }
+jq -e --arg endpoint "$SSE_C_PROBE_ENDPOINT_URL" --arg host "$SSE_C_PROBE_ALLOWED_HOST" --arg account "$SSE_C_PROBE_ACCOUNT_ID" --arg bucket "$SSE_C_PROBE_BUCKET_NAME" --arg id "$SSE_C_PROBE_TARGET_ID" --arg prod_endpoint "$AWS_ENDPOINT_URL" --arg prod_bucket "$AWS_BUCKET_NAME" --arg prod_account "$AWS_ACCOUNT_ID" \
+  '(.probe.target_id == $id) and (.probe.endpoint == $endpoint) and (.probe.host == $host) and (.probe.account_id == $account) and (.probe.bucket == $bucket) and (.object.endpoint == $prod_endpoint) and (.object.bucket == $prod_bucket) and (.object.account_id == $prod_account)' "$target_manifest" >/dev/null || { printf 'SSE-C probe/production targets are not the versioned targets.\n' >&2; exit 1; }
 [[ "$SSE_C_PROBE_APPROVAL" == YES ]] || { printf 'Explicit scratch probe approval is required.\n' >&2; exit 2; }
 [[ "$SSE_C_PROBE_BUCKET_NAME" =~ ^litt-probe-[a-z0-9-]+$ && "$SSE_C_PROBE_BUCKET_NAME" != "$AWS_BUCKET_NAME" ]] || { printf 'Probe bucket must be distinct and litt-probe-*.\n' >&2; exit 1; }
 [[ "$AWS_ENDPOINT_URL" =~ ^https:// && "$SSE_C_PROBE_ENDPOINT_URL" =~ ^https:// ]] || { printf 'Object endpoints must use HTTPS.\n' >&2; exit 1; }
@@ -44,10 +44,22 @@ without_key=$(mktemp)
 with_key=$(mktemp)
 version_id=""
 cleanup() {
+  cleanup_failed=0
   if [[ -n "$version_id" ]]; then
-    probe_aws s3api delete-object --bucket "$SSE_C_PROBE_BUCKET_NAME" --key "$key" --version-id "$version_id" >/dev/null 2>&1 || true
+    probe_aws s3api delete-object --bucket "$SSE_C_PROBE_BUCKET_NAME" --key "$key" --version-id "$version_id" >/dev/null 2>&1 || cleanup_failed=1
   fi
-  residue=$(probe_aws s3api list-object-versions --bucket "$SSE_C_PROBE_BUCKET_NAME" --prefix "$key" --output json 2>/dev/null || printf '{}')
+  if (( cleanup_failed == 1 )); then
+    printf 'SSE-C probe version cleanup failed.\n' >&2
+    rm -f "$body" "$without_key" "$with_key"
+    trap - EXIT
+    exit 1
+  fi
+  if ! residue=$(probe_aws s3api list-object-versions --bucket "$SSE_C_PROBE_BUCKET_NAME" --prefix "$key" --output json); then
+    printf 'SSE-C probe cleanup listing failed.\n' >&2
+    rm -f "$body" "$without_key" "$with_key"
+    trap - EXIT
+    exit 1
+  fi
   if [[ "$(jq '[.Versions[]?, .DeleteMarkers[]?] | length' <<<"$residue")" != "0" ]]; then
     printf 'SSE-C probe left versioned residue.\n' >&2
     rm -f "$body" "$without_key" "$with_key"

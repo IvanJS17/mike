@@ -10,14 +10,14 @@ python3 -c 'import ipaddress,sys; [(_ for _ in ()).throw(SystemExit(1)) for valu
 rules_file=$(mktemp)
 trap 'rm -f "$rules_file"' EXIT
 nft -nn list ruleset >"$rules_file"
-python3 - "$rules_file" "$VPN_CIDR" "$VPN_IPV6_CIDR" <<'PY'
+python3 - "$rules_file" "$VPN_CIDR" "$VPN_IPV6_CIDR" "$VPN_UDP_PORT" <<'PY'
 import ipaddress
 import re
 import sys
 from pathlib import Path
 
 text = Path(sys.argv[1]).read_text()
-ipv4, ipv6 = sys.argv[2:]
+ipv4, ipv6, udp_port = sys.argv[2:]
 
 def block_after(pattern: str, source: str) -> str:
     match = re.search(pattern, source)
@@ -39,6 +39,16 @@ if not re.search(r"type\s+filter\s+hook\s+input", chain) or not re.search(r"poli
 if not (re.search(r"tcp\s+dport\s+\{\s*80,\s*443\s*\}\s+accept", chain) or
         (re.search(r"tcp\s+dport\s+80\s+accept", chain) and re.search(r"tcp\s+dport\s+443\s+accept", chain))):
     raise SystemExit("HTTP/HTTPS rule is absent")
+for line in chain.splitlines():
+    if "accept" not in line or "dport" not in line:
+        continue
+    values = re.findall(r"dport\s+\{([^}]+)\}|dport\s+(\d+)", line)
+    for group, scalar in values:
+        ports = [int(x) for x in re.findall(r"\d+", group if group else scalar)]
+        protocol = "udp" if re.search(r"\budp\b", line) else "tcp"
+        allowed = {22, 80, 443} if protocol == "tcp" else {int(udp_port)}
+        if any(port not in allowed for port in ports):
+            raise SystemExit(f"unapproved {protocol} accept port")
 ssh = [line.strip() for line in chain.splitlines() if re.search(r"tcp\s+dport\s+22\s+accept", line)]
 if len(ssh) != 2:
     raise SystemExit("exactly two SSH rules are required")

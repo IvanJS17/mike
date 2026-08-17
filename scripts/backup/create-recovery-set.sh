@@ -32,8 +32,8 @@ umask 077
 
 root=$(realpath -e "$LITT_APP_ROOT")
 target_manifest="$root/infra/production/disposable-targets.json"
-jq -e --arg host "$BACKUP_ALLOWED_HOST" --arg bucket "$BACKUP_BUCKET" --arg object_host "$OBJECT_ALLOWED_HOST" --arg object_endpoint "$OBJECT_ENDPOINT" --arg object_bucket "$APP_BUCKET" \
-  '(.backup.host == $host) and (.backup.bucket == $bucket) and (.object.host == $object_host) and (.object.endpoint == $object_endpoint) and (.object.bucket == $object_bucket)' "$target_manifest" >/dev/null || { printf 'Recovery object/backup targets are not the versioned targets.\n' >&2; exit 1; }
+jq -e --arg host "$BACKUP_ALLOWED_HOST" --arg endpoint "$BACKUP_ENDPOINT" --arg bucket "$BACKUP_BUCKET" --arg object_host "$OBJECT_ALLOWED_HOST" --arg object_endpoint "$OBJECT_ENDPOINT" --arg object_bucket "$APP_BUCKET" \
+  '(.backup.host == $host) and (.backup.endpoint == $endpoint) and (.backup.bucket == $bucket) and (.object.host == $object_host) and (.object.endpoint == $object_endpoint) and (.object.bucket == $object_bucket)' "$target_manifest" >/dev/null || { printf 'Recovery object/backup targets are not the versioned targets.\n' >&2; exit 1; }
 expected_compose="$root/compose.prod.yml"
 data_root=$(realpath -e "$LITT_DATA_ROOT")
 secrets_root=$(realpath -e "$LITT_SECRETS_ROOT")
@@ -101,6 +101,12 @@ mkdir -p "$set_dir"
 mkdir -p "$work_dir/objects/data" "$work_dir/config" "$work_dir/audit" "$work_dir/publication"
 
 compose=(docker compose --env-file "$COMPOSE_ENV_FILE" -f "$expected_compose" -p litt-production)
+[[ "$(git -C "$root" rev-parse HEAD)" == "$(jq -er '.release_sha' "$RELEASE_MANIFEST_PATH")" && -z "$(git -C "$root" status --porcelain --untracked-files=all)" ]] || { printf 'Backup source checkout is not the clean manifest release.\n' >&2; exit 1; }
+compose_config=$("${compose[@]}" config --format json)
+caddy_sha=$(sha256sum "$root/infra/production/Caddyfile" | cut -d' ' -f1)
+jq -e --arg source "$(jq -er '.services.caddy.environment.SOURCE_OFFER_URL' <<<"$compose_config")" --arg caddy_sha "$caddy_sha" \
+  --arg backend "$(jq -er '.services.backend.image' <<<"$compose_config")" --arg frontend "$(jq -er '.services.frontend.image' <<<"$compose_config")" --arg caddy "$(jq -er '.services.caddy.image' <<<"$compose_config")" --arg db "$(jq -er '.services.db.image' <<<"$compose_config")" --arg auth "$(jq -er '.services.auth.image' <<<"$compose_config")" --arg rest "$(jq -er '.services.rest.image' <<<"$compose_config")" \
+  '(.source_offer == $source) and (.caddy_config_sha256 == $caddy_sha) and (.images.backend == $backend) and (.images.frontend == $frontend) and (.images.caddy == $caddy) and (.images.postgres == $db) and (.images.auth == $auth) and (.images.rest == $rest)' "$RELEASE_MANIFEST_PATH" >/dev/null || { printf 'Backup release manifest does not match effective source/images/Caddy.\n' >&2; exit 1; }
 
 # PostgreSQL custom-format dump plus an independent restore-list check.
 "${compose[@]}" exec -T db pg_dump \

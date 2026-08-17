@@ -13,12 +13,22 @@ esac
 : "${MIGRATION_TARGET_PROJECT:?MIGRATION_TARGET_PROJECT is required}"
 : "${RELEASE_SHA:?RELEASE_SHA is required}"
 : "${MIGRATION_TREE_SHA256:?MIGRATION_TREE_SHA256 is required}"
+: "${MIGRATION_DOCKER_CONTEXT:?MIGRATION_DOCKER_CONTEXT is required}"
+[[ "$MIGRATION_GATE_FILE" == "/run/litt-state/migration-gate.json" ]] || { printf 'Migration gate path is not canonical.\n' >&2; exit 1; }
+if [[ "$MIGRATION_TARGET_PROJECT" == "litt-production" ]]; then
+  [[ "$MIGRATION_DOCKER_CONTEXT" == "litt-production" ]] || { printf 'Production migration context is not canonical.\n' >&2; exit 1; }
+elif [[ "$MIGRATION_TARGET_PROJECT" == "litt-rehearsal-disposable" ]]; then
+  [[ "$MIGRATION_DOCKER_CONTEXT" == "litt-rehearsal-disposable" ]] || { printf 'Rehearsal migration context is not canonical.\n' >&2; exit 1; }
+else
+  printf 'Migration project is not an approved target.\n' >&2
+  exit 1
+fi
 [[ "$POSTGRES_USER" == postgres && "$POSTGRES_DB" == postgres ]] || { printf 'Migrations require canonical postgres database.\n' >&2; exit 1; }
 [[ -f "$MIGRATION_GATE_FILE" && ! -L "$MIGRATION_GATE_FILE" ]] || { printf 'Migration gate receipt is missing.\n' >&2; exit 1; }
 actual_tree_sha=$(cd /opt/litt/migrations && find . -type f -name '*.sql' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
 [[ "$actual_tree_sha" == "$MIGRATION_TREE_SHA256" ]] || { printf 'Migration tree hash does not match the release gate.\n' >&2; exit 1; }
-jq -e --arg project "$MIGRATION_TARGET_PROJECT" --arg release "$RELEASE_SHA" --arg tree "$MIGRATION_TREE_SHA256" \
-  '(.release_sha == $release) and (.migration_tree_sha256 == $tree) and (.target_project == $project) and (.approved == true)' "$MIGRATION_GATE_FILE" >/dev/null || { printf 'Migration gate is not bound to this release/project/tree.\n' >&2; exit 1; }
+jq -e --arg project "$MIGRATION_TARGET_PROJECT" --arg context "$MIGRATION_DOCKER_CONTEXT" --arg release "$RELEASE_SHA" --arg tree "$MIGRATION_TREE_SHA256" \
+  '(.release_sha == $release) and (.migration_tree_sha256 == $tree) and (.target_project == $project) and (.docker_context == $context) and (.approved == true)' "$MIGRATION_GATE_FILE" >/dev/null || { printf 'Migration gate is not bound to this release/project/context/tree.\n' >&2; exit 1; }
 if [[ "$MIGRATION_TARGET_PROJECT" == litt-production ]]; then
   : "${MIGRATION_RECOVERY_SUCCESS_FILE:?MIGRATION_RECOVERY_SUCCESS_FILE is required for production migrations}"
   : "${MIGRATION_REHEARSAL_RECEIPT_FILE:?MIGRATION_REHEARSAL_RECEIPT_FILE is required for production migrations}"

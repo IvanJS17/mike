@@ -74,11 +74,15 @@ jq -e '
 
 runtime_dir=""
 compose_started=0
+object_mutated=0
 cleanup() {
   local status=$?
   if (( compose_started == 1 )); then
     "${compose[@]}" down --remove-orphans >/dev/null 2>&1 || status=1
     [[ -z "$("${docker_prefix[@]}" ps -aq --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")" ]] || status=1
+  fi
+  if (( object_mutated == 1 )); then
+    bucket_cleanup || status=1
   fi
   [[ -z "$runtime_dir" ]] || rm -rf "$runtime_dir"
   trap - EXIT
@@ -117,8 +121,9 @@ with tarfile.open(sys.argv[1], 'r:gz') as archive:
         path = PurePosixPath(member.name)
         if path.is_absolute() or '..' in path.parts or member.issym() or member.islnk() or not (member.isdir() or member.isfile()):
             raise SystemExit(f'unsafe archive member: {member.name}')
-        canonical_name = "/".join(path.parts) + ("/" if member.isdir() else "")
-        if member.name != canonical_name:
+        canonical_name = "/".join(path.parts)
+        raw_name = member.name[:-1] if member.isdir() and member.name.endswith("/") else member.name
+        if raw_name != canonical_name:
             raise SystemExit(f'non-canonical archive member: {member.name}')
         if not path.parts or path.parts[0] not in allowed_roots or canonical_name in seen:
             raise SystemExit(f'unallowlisted or duplicate archive member: {member.name}')
@@ -141,7 +146,10 @@ actual_archive_sha=$(sha256sum "$RECOVERY_SET_PATH" | cut -d' ' -f1)
   exit 1
 }
 release_manifest="$set_dir/release-manifest.json"
-jq -e '.release_sha | type == "string" and test("^[0-9a-f]{40}$")' "$release_manifest" >/dev/null || { printf 'Archived release manifest is invalid.\n' >&2; exit 1; }
+release_sha=$(jq -er '.release_sha | select(type == "string" and test("^[0-9a-f]{40}$"))' "$release_manifest")
+[[ "$(git -C "$repo_root" rev-parse HEAD)" == "$release_sha" && -z "$(git -C "$repo_root" status --porcelain --untracked-files=all)" ]] || { printf 'Restore checkout is not the archived release.\n' >&2; exit 1; }
+restore_caddy_sha=$(sha256sum "$repo_root/infra/production/Caddyfile.restore" | cut -d' ' -f1)
+jq -e --arg caddy "$restore_caddy_sha" '.restore_caddy_config_sha256 == $caddy' "$release_manifest" >/dev/null || { printf 'Restore Caddyfile does not match archived release.\n' >&2; exit 1; }
 compose_release_config=$("${compose[@]}" config --format json)
 jq -e --arg endpoint "$RESTORE_OBJECT_ENDPOINT" --arg bucket "$RESTORE_OBJECT_BUCKET" \
   '(.services.backend.environment.R2_ENDPOINT_URL == $endpoint) and (.services.backend.environment.R2_BUCKET_NAME == $bucket) and (.services.backend.environment.R2_SSE_CUSTOMER_KEY_REQUIRED == "true")' <<<"$compose_release_config" >/dev/null || { printf 'Restore backend storage config is not bound to the disposable target.\n' >&2; exit 1; }
@@ -181,14 +189,13 @@ done
 "${compose[@]}" up -d caddy auth rest backend frontend
 jq -e 'length == 2 and ([.[].id] | unique | length == 2) and ([.[].email] | unique | length == 2) and all(.[]; .id | test("^[A-Za-z0-9._-]+$"))' "$RESTORE_DESIGNATED_USERS_FILE" >/dev/null || { printf 'Exactly two distinct safe designated restore users are required.\n' >&2; exit 1; }
 while IFS= read -r user_record; do
-  auth_response="$runtime_dir/auth-$(jq -er '.id' <<<"$user_record").json"
   user_payload=$(jq -c '{email,password}' <<<"$user_record")
-  printf '%s' "$user_payload" | curl --silent --show-error --fail --cacert "$RESTORE_CA_CERT_FILE" \
+  auth_response=$(printf '%s' "$user_payload" | curl --silent --show-error --fail --cacert "$RESTORE_CA_CERT_FILE" \
     -H 'Content-Type: application/json' --data-binary @- \
-    --output "$auth_response" "$RESTORE_PUBLIC_BASE_URL/supabase/auth/v1/token?grant_type=password"
-  access_token=$(jq -er '.access_token | select(type == "string" and length > 0)' "$auth_response")
+    "$RESTORE_PUBLIC_BASE_URL/supabase/auth/v1/token?grant_type=password")
+  access_token=$(jq -er '.access_token | select(type == "string" and length > 0)' <<<"$auth_response")
   curl --silent --show-error --fail --cacert "$RESTORE_CA_CERT_FILE" \
-    -H "Authorization: Bearer $access_token" \
+    --config <(printf 'header = "Authorization: Bearer %s"\n' "$access_token") \
     "$RESTORE_PUBLIC_BASE_URL$RESTORE_AUTHENTICATED_PATH" >/dev/null
 done < <(jq -c '.[]' "$RESTORE_DESIGNATED_USERS_FILE")
 
@@ -198,8 +205,21 @@ restore_aws() {
   AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}" \
     aws --endpoint-url "$RESTORE_OBJECT_ENDPOINT" "$@"
 }
+bucket_cleanup() {
+  listing=$(restore_aws s3api list-object-versions --bucket "$RESTORE_OBJECT_BUCKET" --output json)
+  while IFS= read -r version; do
+    restore_aws s3api delete-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$(jq -r '.Key' <<<"$version")" --version-id "$(jq -r '.VersionId' <<<"$version")" >/dev/null
+  done < <(jq -c '.Versions[]?' <<<"$listing")
+  while IFS= read -r marker; do
+    restore_aws s3api delete-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$(jq -r '.Key' <<<"$marker")" --version-id "$(jq -r '.VersionId' <<<"$marker")" >/dev/null
+  done < <(jq -c '.DeleteMarkers[]?' <<<"$listing")
+  residue=$(restore_aws s3api list-object-versions --bucket "$RESTORE_OBJECT_BUCKET" --output json)
+  [[ "$(jq '[.Versions[]?, .DeleteMarkers[]?] | length' <<<"$residue")" == "0" ]]
+}
 versioning=$(restore_aws s3api get-bucket-versioning --bucket "$RESTORE_OBJECT_BUCKET" --output json)
 [[ "$(jq -r '.Status // empty' <<<"$versioning")" == "Enabled" ]] || { printf 'Restore bucket versioning is not enabled.\n' >&2; exit 1; }
+initial_objects=$(restore_aws s3api list-object-versions --bucket "$RESTORE_OBJECT_BUCKET" --output json)
+[[ "$(jq '[.Versions[]?, .DeleteMarkers[]?] | length' <<<"$initial_objects")" == "0" ]] || { printf 'Restore bucket must be empty before mutation.\n' >&2; exit 1; }
 
 : >"$runtime_dir/object-restore-map.ndjson"
 while IFS= read -r record; do
@@ -213,6 +233,7 @@ while IFS= read -r record; do
     expected_sha=$(jq -er '.sha256' <<<"$record")
     actual_sha=$(sha256sum "$source_path" | cut -d' ' -f1)
     [[ "$expected_sha" == "$actual_sha" ]] || { printf 'Object checksum mismatch: %s\n' "$key" >&2; exit 1; }
+    object_mutated=1
     result=$(restore_aws s3api put-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$key" --body "$source_path" \
       --sse-customer-algorithm AES256 --sse-customer-key "fileb://$RESTORE_OBJECT_SSE_CUSTOMER_KEY_FILE")
     restored_version=$(jq -er '.VersionId | select(type == "string" and length > 0)' <<<"$result")
@@ -221,6 +242,7 @@ while IFS= read -r record; do
       '{kind:"version",key:$key,source_version_id:$source_version,restored_version_id:$restored_version,sha256:$sha256,file:$file}' \
       >>"$runtime_dir/object-restore-map.ndjson"
   else
+    object_mutated=1
     result=$(restore_aws s3api delete-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$key")
     restored_marker=$(jq -er '.VersionId | select(type == "string" and length > 0)' <<<"$result")
     jq -cn --arg key "$key" --arg source_version "$(jq -r '.version_id' <<<"$record")" \

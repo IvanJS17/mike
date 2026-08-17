@@ -108,7 +108,7 @@ test("restore, load, and object probes reject live targets and preserve versione
 
 test("restore and migration contracts match the current schema and runtime routes", () => {
   const restore = read("scripts/restore/restore-recovery-set.sh");
-  assert.match(restore, /Bearer \$access_token/);
+  assert.match(restore, /Bearer (\\$access_token|%s)/);
   assert.match(restore, /workspace_memberships|matter_memberships/);
   assert.doesNotMatch(restore, /is_latest == true/);
   const archive = read("scripts/backup/create-recovery-set.sh");

@@ -40,10 +40,12 @@
   "object": {
     "host": "objects.production.litt.example.invalid",
     "endpoint": "https://objects.production.litt.example.invalid",
+    "account_id": "production-account-placeholder",
     "bucket": "litt-production"
   },
   "backup": {
     "host": "backup.litt.example.invalid",
+    "endpoint": "https://backup.litt.example.invalid",
     "bucket": "litt-recovery-production"
   }
 }

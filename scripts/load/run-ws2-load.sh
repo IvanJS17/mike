@@ -29,6 +29,7 @@ jq -e --arg id "$LOAD_DISPOSABLE_TARGET_ID" --arg host "$LOAD_ALLOWED_HOST" --ar
 [[ "$LOAD_APPROVAL" == "YES" ]] || { printf 'Synthetic load approval is required.\n' >&2; exit 2; }
 [[ "$(stat -c '%a' "$LOAD_USERS_FILE")" == "600" ]] || { printf 'User fixture must be mode 600.\n' >&2; exit 1; }
 [[ "$(stat -c '%a' "$LOAD_METRICS_FILE")" == "600" ]] || { printf 'Metrics fixture must be mode 600.\n' >&2; exit 1; }
+jq -e --arg id "$LOAD_DISPOSABLE_TARGET_ID" --arg url "$LOAD_BASE_URL" '(.target_id == $id) and (.target_url == $url) and ((.collected_at | fromdateiso8601) > (now - 1800))' "$LOAD_METRICS_FILE" >/dev/null || { printf 'Metrics fixture is not fresh/bound to the load target.\n' >&2; exit 1; }
 [[ "$LOAD_BASE_URL" =~ ^https:// ]] || { printf 'Load target must use HTTPS.\n' >&2; exit 1; }
 base_host=${LOAD_BASE_URL#https://}; base_host=${base_host%%/*}
 [[ "$base_host" == "$LOAD_ALLOWED_HOST" ]] || { printf 'Load target host is not approved.\n' >&2; exit 1; }
@@ -64,7 +65,8 @@ python3 -c 'import re,sys; raise SystemExit(0 if re.fullmatch(r"/api/[A-Za-z0-9.
 runtime_dir=$(mktemp -d)
 requests_csv="$runtime_dir/requests.csv"
 upload_body="$runtime_dir/upload-10mb.pdf"
-trap 'rm -rf "$runtime_dir"' EXIT
+pending_file="$runtime_dir/pending-resources.tsv"
+trap - EXIT
 printf 'timestamp,user,operation,status,time_seconds\n' >"$requests_csv"
 printf '%s\n' '%PDF-1.4' '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj' '2 0 obj << /Type /Pages /Kids [] /Count 0 >> endobj' 'trailer << /Root 1 0 R >>' '%%EOF' >"$upload_body"
 truncate -s 10485760 "$upload_body"
@@ -106,6 +108,23 @@ request() {
   fi
 }
 
+cleanup_resources() {
+  local status=$? user project document token
+  if [[ -f "$pending_file" ]]; then
+    while IFS=$'\t' read -r user project document; do
+      [[ -n "$user" ]] || continue
+      token=$(jq -er --arg user "$user" '.[] | select(.id == $user) | .token' "$LOAD_USERS_FILE" 2>/dev/null || true)
+      [[ -n "$token" ]] || { status=1; continue; }
+      if [[ -n "$document" ]]; then request "$token" "$user" "cleanup-document" DELETE "/api/single-documents/$document" || status=1; fi
+      if [[ -n "$project" ]]; then request "$token" "$user" "cleanup-project" DELETE "/api/projects/$project" || status=1; fi
+    done <"$pending_file"
+  fi
+  rm -rf "$runtime_dir"
+  trap - EXIT
+  exit "$status"
+}
+trap cleanup_resources EXIT
+
 start=$(date -u +%s)
 deadline=$((start + duration))
 first_user=$(jq -er '.[0]' "$LOAD_USERS_FILE")
@@ -123,12 +142,17 @@ while (( $(date -u +%s) < deadline )); do
     token=$(jq -er '.token' <<<"$user_record")
     create_body=$(jq -cn --arg run "ws2-$start" --arg user "$user" --arg name "WS2 synthetic $user" '{synthetic:true,load_run:$run,owner:$user,name:$name,practice:"synthetic"}')
     request "$token" "$user" "create-workspace" POST "$LOAD_WORKSPACE_CREATE_PATH" "$create_body" "$runtime_dir/workspace-$user.json"
+    workspace_id=$(jq -er '.id' "$runtime_dir/workspace-$user.json")
+    printf '%s\t%s\t\n' "$user" "$workspace_id" >>"$pending_file"
     request "$token" "$user" "create-matter" POST "$LOAD_MATTER_CREATE_PATH" "$create_body" "$runtime_dir/matter-$user.json"
+    matter_id=$(jq -er '.id' "$runtime_dir/matter-$user.json")
+    printf '%s\t%s\t\n' "$user" "$matter_id" >>"$pending_file"
     request "$token" "$user" "list-workspaces" GET "$LOAD_WORKSPACE_PATH"
     request "$token" "$user" "open-matter" GET "$LOAD_MATTER_PATH"
     upload_response="$runtime_dir/upload-$user.json"
     request "$token" "$user" "upload-10mb" POST "$LOAD_UPLOAD_PATH" "$upload_body" "$upload_response"
     document_id=$(jq -er '.id // .document_id' "$upload_response")
+    printf '%s\t\t%s\n' "$user" "$document_id" >>"$pending_file"
     download_path=$(jq -er '.download_url // .url // empty' "$upload_response" 2>/dev/null || true)
     if [[ -z "$download_path" ]]; then
       download_path=$(printf "$LOAD_DOWNLOAD_PATH_TEMPLATE" "$document_id")
@@ -139,11 +163,21 @@ while (( $(date -u +%s) < deadline )); do
     request "$token" "$user" "download-10mb" GET "$download_path" "" "$downloaded"
     [[ "$(stat -c '%s' "$downloaded")" == "$(stat -c '%s' "$upload_body")" ]] || { printf 'Downloaded file size differs from 10 MiB fixture.\n' >&2; exit 1; }
     cmp -s "$upload_body" "$downloaded" || { printf 'Downloaded bytes differ from upload fixture.\n' >&2; exit 1; }
+    request "$token" "$user" "delete-document" DELETE "/api/single-documents/$document_id"
+    request "$token" "$user" "delete-project" DELETE "/api/projects/$workspace_id"
+    request "$token" "$user" "delete-project" DELETE "/api/projects/$matter_id"
+    awk -F '\t' -v user="$user" '$1 != user' "$pending_file" >"$pending_file.next"
+    mv -f "$pending_file.next" "$pending_file"
     for route in "${interactive_paths[@]}"; do
       method=${route%%:*}; path=${route#*:}
       [[ "$method" =~ ^(GET|POST)$ && "$path" == /* ]] || { printf 'Interactive route must be METHOD:/path.\n' >&2; exit 1; }
       validate_route "$path" || { printf 'Interactive route is outside the immutable synthetic allowlist.\n' >&2; exit 1; }
-      request "$token" "$user" "interactive-${path##*/}" "$method" "$path" "$create_body"
+      case "$path" in
+        /api/chat*) interactive_body=$(jq -cn --arg text "WS2 synthetic chat $start" '{messages:[{role:"user",content:$text}]}') ;;
+        /api/workflows*) interactive_body=$(jq -cn --arg title "WS2 synthetic workflow" '{metadata:{title:$title,type:"synthetic"}}') ;;
+        *) interactive_body="" ;;
+      esac
+      request "$token" "$user" "interactive-${path##*/}" "$method" "$path" "$interactive_body"
     done
   done < <(jq -c '.[]' "$LOAD_USERS_FILE")
   sleep "${LOAD_INTERVAL_SECONDS:-30}"
