@@ -1,0 +1,18 @@
+# Copy this file to terraform.tfvars only in a private operator workspace.
+# Supply the token through TF_VAR_hcloud_token or the approved secret manager.
+# The example intentionally contains a non-functional public-key placeholder.
+
+project_name        = "litt-production"
+server_name        = "litt-runtime-01"
+location            = "nbg1"
+server_type        = "cx23"
+image               = "ubuntu-24.04"
+data_volume_size_gb = 50
+
+vpn_cidrs = [
+  "10.42.0.0/24",
+]
+
+ssh_keys = {
+  ivan = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI_REPLACE_WITH_IVAN_PUBLIC_KEY ivan"
+}

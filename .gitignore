@@ -28,3 +28,11 @@ e2e/.auth/
 # harness only; CI scaffolds its own fresh copy on every run
 /supabase/
 backend/supabase/
+
+# OpenTofu state, plugins, plans, and local variable files
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+infra/tofu/*.tfvars
+!infra/tofu/terraform.tfvars.example
