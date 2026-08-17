@@ -1,0 +1,30 @@
+# Host firewall template. Replace the VPN CIDR before applying on an approved
+# host; do not copy this file to a live system without the permission receipt.
+
+flush ruleset
+
+define vpn4 = 10.42.0.0/24
+
+define public_web = { 80, 443 }
+
+table inet litt_host {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    iifname "lo" accept
+    ct state established,related accept
+    ip protocol icmp accept
+    ip6 nexthdr icmpv6 accept
+    tcp dport $public_web accept
+    ip saddr $vpn4 tcp dport 22 accept
+    # Add the approved IPv6 VPN CIDR explicitly; never use ::/0 for SSH.
+  }
+
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+    ct state established,related accept
+  }
+
+  chain output {
+    type filter hook output priority 0; policy accept;
+  }
+}

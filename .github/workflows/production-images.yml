@@ -1,0 +1,85 @@
+name: Production images
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: ${{ github.repository_owner }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }} image
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: backend
+            env_name: BACKEND
+            context: backend
+            dockerfile: backend/Dockerfile
+          - name: frontend
+            env_name: FRONTEND
+            context: frontend
+            dockerfile: frontend/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Validate frontend release variables
+        if: matrix.name == 'frontend'
+        env:
+          LITT_PRODUCTION_SUPABASE_URL: ${{ vars.LITT_PRODUCTION_SUPABASE_URL }}
+          LITT_PRODUCTION_SUPABASE_PUBLISHABLE_KEY: ${{ vars.LITT_PRODUCTION_SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          test -n "$LITT_PRODUCTION_SUPABASE_URL"
+          test -n "$LITT_PRODUCTION_SUPABASE_PUBLISHABLE_KEY"
+      - id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/litt-${{ matrix.name }}:${{ github.sha }}
+          build-args: |
+            NEXT_PUBLIC_SUPABASE_URL=${{ vars.LITT_PRODUCTION_SUPABASE_URL }}
+            NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY=${{ vars.LITT_PRODUCTION_SUPABASE_PUBLISHABLE_KEY }}
+            NEXT_PUBLIC_API_BASE_URL=/api
+      - name: Write immutable image lock entry
+        run: |
+          printf 'LITT_%s_IMAGE=%s/%s/litt-%s@%s\n' \
+            '${{ matrix.env_name }}' '${{ env.REGISTRY }}' '${{ env.IMAGE_OWNER }}' \
+            '${{ matrix.name }}' '${{ steps.image.outputs.digest }}' >> image-lock.env
+      - uses: actions/upload-artifact@v4
+        with:
+          name: production-image-lock-${{ matrix.name }}
+          path: image-lock.env
+          if-no-files-found: error
+
+  verify-lock:
+    name: Verify immutable image lock
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: production-image-lock-*
+          merge-multiple: true
+          path: image-lock
+      - name: Reject mutable image references
+        run: |
+          cat image-lock/*.env
+          test "$(grep -Ec '@sha256:[0-9a-f]{64}$' image-lock/*.env)" -eq 2
+          ! grep -E ':latest|:[^@[:space:]]+$' image-lock/*.env
