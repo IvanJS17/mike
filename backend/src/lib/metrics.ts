@@ -2,28 +2,59 @@ import type { NextFunction, Request, Response } from "express";
 
 let requestCount = 0;
 let serverErrorCount = 0;
+let queueDepth = 0;
+let queueRetries = 0;
+let queueCompleted = 0;
+let publicationFailures = 0;
 const durations: number[] = [];
 const MAX_SAMPLES = 1000;
 
+type QueueEvent = "reset" | "enqueued" | "completed" | "retry" | "publication_failed";
+
+export function recordQueueEvent(event: QueueEvent): void {
+  switch (event) {
+    case "reset":
+      queueDepth = 0;
+      queueRetries = 0;
+      queueCompleted = 0;
+      publicationFailures = 0;
+      break;
+    case "enqueued":
+      queueDepth += 1;
+      break;
+    case "completed":
+      queueDepth = Math.max(0, queueDepth - 1);
+      queueCompleted += 1;
+      break;
+    case "retry":
+      queueDepth = Math.max(0, queueDepth - 1);
+      queueRetries += 1;
+      break;
+    case "publication_failed":
+      publicationFailures += 1;
+      break;
+  }
+}
+
 export function metricsMiddleware(
-  _req: Request,
+  req: Request,
   res: Response,
   next: NextFunction,
 ): void {
   const started = process.hrtime.bigint();
+  const queueRequest = /\/(batches|workflows|chat)(\/|$)/.test(req.path);
+  const publicationRequest = /publication/i.test(req.path);
+  if (queueRequest) recordQueueEvent("enqueued");
   res.once("finish", () => {
     requestCount += 1;
     if (res.statusCode >= 500) serverErrorCount += 1;
+    if (queueRequest) recordQueueEvent(res.statusCode >= 500 ? "retry" : "completed");
+    if (publicationRequest && res.statusCode >= 500) recordQueueEvent("publication_failed");
     const durationMs = Number(process.hrtime.bigint() - started) / 1_000_000;
     durations.push(durationMs);
     if (durations.length > MAX_SAMPLES) durations.shift();
   });
   next();
-}
-
-function numberEnv(name: string): number {
-  const value = Number(process.env[name] ?? 0);
-  return Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
 function percentile(values: number[], ratio: number): number {
@@ -54,13 +85,13 @@ export function renderMetrics(): string {
     "# TYPE litt_http_request_duration_ms_p95 gauge",
     `litt_http_request_duration_ms_p95 ${p95}`,
     "# TYPE litt_queue_depth gauge",
-    `litt_queue_depth ${numberEnv("LITT_QUEUE_DEPTH")}`,
+    `litt_queue_depth ${queueDepth}`,
     "# TYPE litt_queue_retries_total counter",
-    `litt_queue_retries_total ${numberEnv("LITT_QUEUE_RETRIES_TOTAL")}`,
+    `litt_queue_retries_total ${queueRetries}`,
     "# TYPE litt_queue_completed_total counter",
-    `litt_queue_completed_total ${numberEnv("LITT_QUEUE_COMPLETED_TOTAL")}`,
+    `litt_queue_completed_total ${queueCompleted}`,
     "# TYPE litt_publication_failures_total counter",
-    `litt_publication_failures_total ${numberEnv("LITT_PUBLICATION_FAILURES_TOTAL")}`,
+    `litt_publication_failures_total ${publicationFailures}`,
     "",
   ].join("\n");
 }

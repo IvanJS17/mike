@@ -76,3 +76,32 @@ test("release manifest binds source offer to release SHA and Caddy digest", () =
   assert.match(manifest, /CADDYFILE_PATH/);
   assert.match(manifest, /caddy_config_sha256/);
 });
+
+test("release, backup, and metrics are bound to one immutable production identity", () => {
+  const startup = read("scripts/production-up.sh");
+  assert.match(startup, /git .*rev-parse|rev-parse .*HEAD/);
+  assert.match(startup, /config --format json/);
+  assert.match(startup, /manifest.*images|images.*manifest/i);
+  const backup = read("scripts/backup/create-recovery-set.sh");
+  assert.match(backup, /LITT_APP_ROOT/);
+  assert.match(backup, /IsTruncated.*boolean|type.*boolean/);
+  assert.match(backup, /PGUSER.*postgres|postgres.*PGUSER/);
+  const metrics = read("scripts/observability/collect-host-metrics.sh");
+  assert.match(metrics, /LITT_APP_ROOT/);
+});
+
+test("restore, load, and object probes reject live targets and preserve versioned cleanup", () => {
+  const restore = read("scripts/restore/restore-recovery-set.sh");
+  for (const pattern of ["RESTORE_OBJECT_ALLOWED_HOST", "RESTORE_PUBLIC_ALLOWED_HOST", "Status.*Enabled", "VersionId", "count >= 100|documents", "access_token", "compose_started=1"]) {
+    assert.match(restore, new RegExp(pattern, "i"));
+  }
+  const load = read("scripts/load/run-ws2-load.sh");
+  assert.match(load, /LOAD_DISPOSABLE_TARGET|staging.*allowlist|canonical.*target/i);
+  assert.match(load, /localhost|127\\.0\\.0\\.1|resembles a live\/local/i);
+  assert.match(load, /id.*^[A-Za-z0-9._-]+|safe.*id/i);
+  assert.match(load, /status.*[234]\\d\\d|000.*fail|transport.*fail/i);
+  const objectProbe = read("scripts/object-storage/verify-private-versioning.sh");
+  assert.match(objectProbe, /AWS_BUCKET_NAME/);
+  assert.match(objectProbe, /version-id|VersionId/);
+  assert.match(objectProbe, /delete-marker|DeleteMarkers/);
+});

@@ -5,6 +5,8 @@ set -Eeuo pipefail
 : "${LITT_CRYPT_MAPPER:?set LITT_CRYPT_MAPPER}"
 : "${LITT_DATA_ROOT:?set LITT_DATA_ROOT}"
 : "${LUKS2_CONFIRM:?set LUKS2_CONFIRM=YES}"
+[[ "$LITT_DATA_ROOT" != "/" && "$(realpath -m "$LITT_DATA_ROOT")" == "/srv/litt-data" && ! -L "$LITT_DATA_ROOT" ]] || { printf 'LITT_DATA_ROOT must be the canonical non-symlink /srv/litt-data.\n' >&2; exit 1; }
+[[ "$LITT_DATA_ROOT" != /srv/litt-data/* ]] || { printf 'LITT_DATA_ROOT must not be nested under itself.\n' >&2; exit 1; }
 [[ "$LUKS2_CONFIRM" == YES ]] || { printf 'Explicit LUKS2_CONFIRM=YES is required.\n' >&2; exit 2; }
 (( EUID == 0 )) || { printf 'Run as root.\n' >&2; exit 1; }
 [[ -b "$LITT_DATA_DEVICE" && "$LITT_DATA_DEVICE" != /dev/mapper/* ]] || { printf 'Physical block device required.\n' >&2; exit 1; }

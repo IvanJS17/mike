@@ -84,8 +84,17 @@ jobs:
           LITT_AUTH_IMAGE: ${{ vars.LITT_AUTH_IMAGE }}
           LITT_REST_IMAGE: ${{ vars.LITT_REST_IMAGE }}
         run: |
+          declare -A expected=(
+            [CADDY]=caddy
+            [DB]=supabase/postgres
+            [AUTH]=supabase/gotrue
+            [REST]=postgrest/postgrest
+          )
           for name in CADDY DB AUTH REST; do
             value="$(printenv "LITT_${name}_IMAGE")"
+            repository="${value%@*}"
+            repository="${repository%%:*}"
+            [[ "$repository" == "${expected[$name]}" ]]
             [[ "$value" =~ @sha256:[0-9a-f]{64}$ ]]
             printf '%s' "LITT_${name}_IMAGE=$value" >> image-lock/upstream.env
             echo >> image-lock/upstream.env

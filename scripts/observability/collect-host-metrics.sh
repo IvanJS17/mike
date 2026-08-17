@@ -6,16 +6,24 @@ set -Eeuo pipefail
 : "${COMPOSE_FILE:?set COMPOSE_FILE to compose.prod.yml}"
 : "${COMPOSE_ENV_FILE:?set COMPOSE_ENV_FILE to the external mode-600 env file}"
 : "${COMPOSE_PROJECT_NAME:?set COMPOSE_PROJECT_NAME=litt-production}"
-: "${LITT_DATA_ROOT:?set LITT_DATA_ROOT to the encrypted mount}"
+: "${LITT_APP_ROOT:?set LITT_APP_ROOT to the deployed production checkout}"
+: "${LITT_DATA_ROOT:?set LITT_DATA_ROOT to /srv/litt-data}"
+: "${LITT_SECRETS_ROOT:?set LITT_SECRETS_ROOT to /srv/litt-data/secrets}"
 : "${BACKUP_FRESHNESS_FILE:?set BACKUP_FRESHNESS_FILE to backup-freshness.json}"
 : "${RESTORE_RECEIPT_FILE:?set RESTORE_RECEIPT_FILE to the latest restore receipt}"
 
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+root=$(realpath -e "$LITT_APP_ROOT")
 expected_compose="$root/compose.prod.yml"
+data_root=$(realpath -e "$LITT_DATA_ROOT")
+secrets_root=$(realpath -e "$LITT_SECRETS_ROOT")
+[[ "$data_root" == "/srv/litt-data" && "$secrets_root" == "/srv/litt-data/secrets" ]] || { printf 'Metrics data/secrets roots are not canonical.\n' >&2; exit 1; }
 [[ "$(realpath -e "$COMPOSE_FILE")" == "$expected_compose" && "$COMPOSE_PROJECT_NAME" == "litt-production" ]] || {
   printf 'Refusing non-canonical production metrics target.\n' >&2
   exit 1
 }
+[[ "$(realpath -e "$COMPOSE_ENV_FILE")" == "$secrets_root/compose.env" && "$(stat -c '%a' "$COMPOSE_ENV_FILE")" == "600" ]] || { printf 'Metrics Compose env is not canonical mode 600.\n' >&2; exit 1; }
+[[ "$(realpath -m "$BACKUP_FRESHNESS_FILE")" == "$data_root/state/backup-freshness.json" ]] || { printf 'Metrics freshness path is not canonical.\n' >&2; exit 1; }
+[[ "$(realpath -m "$RESTORE_RECEIPT_FILE")" == "$data_root/state/restore-receipt.json" ]] || { printf 'Metrics restore receipt path is not canonical.\n' >&2; exit 1; }
 compose=(docker compose --env-file "$COMPOSE_ENV_FILE" -f "$expected_compose" -p litt-production)
 now=$(date -u +%s)
 

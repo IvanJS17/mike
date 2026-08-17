@@ -1,13 +1,13 @@
 # Compose override for restore-only disposable projects. It removes Caddy's
-# host bindings and uses an HTTP-only internal config; the base production
-# network remains project-scoped because compose.prod.yml has no fixed name.
+# host bindings and uses an internal TLS config; the approved disposable ingress
+# may proxy HTTPS to this project without touching the live host.
 services:
   caddy:
     ports: !reset []
     environment:
-      APP_DOMAIN: ":80"
+      APP_DOMAIN: "restore.litt.example.invalid:443"
       ACME_EMAIL: restore@example.invalid
-      SOURCE_OFFER_URL: https://github.com/IvanJS17/mike
+      SOURCE_OFFER_URL: https://github.com/IvanJS17/mike/tree/REPLACE_WITH_RELEASE_SHA
     volumes:
       - type: bind
         source: ./infra/production/Caddyfile.restore

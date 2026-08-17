@@ -23,6 +23,7 @@ Run the read-only verification after every firewall, SSH, or Compose change:
 
 ```bash
 export VPN_CIDR=10.42.0.0/24
+export VPN_IPV6_CIDR=fd42:42::/64
 scripts/production/verify-host-firewall.sh
 ss -lntup
 nft -nn list ruleset

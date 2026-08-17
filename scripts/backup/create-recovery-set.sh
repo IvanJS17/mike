@@ -8,6 +8,9 @@ umask 077
 : "${COMPOSE_FILE:?set COMPOSE_FILE to the reviewed production Compose file}"
 : "${COMPOSE_ENV_FILE:?set COMPOSE_ENV_FILE to the external 0600 Compose env file}"
 : "${COMPOSE_PROJECT_NAME:?set COMPOSE_PROJECT_NAME=litt-production}"
+: "${LITT_APP_ROOT:?set LITT_APP_ROOT to the deployed production checkout}"
+: "${LITT_DATA_ROOT:?set LITT_DATA_ROOT to /srv/litt-data}"
+: "${LITT_SECRETS_ROOT:?set LITT_SECRETS_ROOT to /srv/litt-data/secrets}"
 : "${OBJECT_ALLOWED_HOST:?set OBJECT_ALLOWED_HOST to the approved object host}"
 : "${BACKUP_ALLOWED_HOST:?set BACKUP_ALLOWED_HOST to the approved backup host}"
 : "${RECOVERY_ROOT:?set RECOVERY_ROOT on the encrypted volume}"
@@ -27,12 +30,28 @@ umask 077
 : "${PUBLICATION_MANIFEST_DIR:?set PUBLICATION_MANIFEST_DIR to publication manifests}"
 : "${RELEASE_MANIFEST_PATH:?set RELEASE_MANIFEST_PATH to the version manifest}"
 
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+root=$(realpath -e "$LITT_APP_ROOT")
 expected_compose="$root/compose.prod.yml"
+data_root=$(realpath -e "$LITT_DATA_ROOT")
+secrets_root=$(realpath -e "$LITT_SECRETS_ROOT")
+[[ "$data_root" == "/srv/litt-data" && "$secrets_root" == "/srv/litt-data/secrets" ]] || { printf 'Backup data/secrets roots are not canonical.\n' >&2; exit 1; }
 [[ "$(realpath -e "$COMPOSE_FILE")" == "$expected_compose" ]] || { printf 'Non-canonical backup Compose path.\n' >&2; exit 1; }
 [[ "$COMPOSE_PROJECT_NAME" == "litt-production" ]] || { printf 'Backup project must be litt-production.\n' >&2; exit 1; }
+[[ "$(realpath -e "$COMPOSE_ENV_FILE")" == "$secrets_root/compose.env" ]] || { printf 'Backup Compose env is not canonical.\n' >&2; exit 1; }
 [[ ! -L "$COMPOSE_ENV_FILE" && -f "$COMPOSE_ENV_FILE" && "$(stat -c '%a' "$COMPOSE_ENV_FILE")" == "600" ]] || { printf 'Compose env file must be regular mode 600.\n' >&2; exit 1; }
+[[ "$(realpath -m "$RECOVERY_ROOT")" == "$data_root/recovery" ]] || { printf 'Recovery root is not canonical.\n' >&2; exit 1; }
+for source in "$RECOVERY_CONFIG_DIR" "$AUDIT_EXPORT_DIR" "$PUBLICATION_MANIFEST_DIR"; do
+  source_real=$(realpath -e "$source")
+  [[ "$source_real" == "$data_root"/* ]] || { printf 'Recovery source is outside encrypted data.\n' >&2; exit 1; }
+done
+[[ "$(realpath -e "$RELEASE_MANIFEST_PATH")" == "$data_root/state/release-manifest.json" ]] || { printf 'Release manifest is not canonical.\n' >&2; exit 1; }
+[[ "$(realpath -e "$OBJECT_SSE_CUSTOMER_KEY_FILE")" == "$secrets_root/object-storage-sse-c.key" ]] || { printf 'Object SSE-C key is not canonical.\n' >&2; exit 1; }
+[[ -f "$RELEASE_MANIFEST_PATH" && ! -L "$RELEASE_MANIFEST_PATH" && "$(stat -c '%a' "$RELEASE_MANIFEST_PATH")" == "600" ]] || { printf 'Release manifest must be a regular mode-600 file.\n' >&2; exit 1; }
+[[ "$(realpath -e "$BACKUP_ENCRYPTION_RECIPIENT_FILE")" == "$secrets_root/backup-recipients.age" ]] || { printf 'Backup recipient file is not canonical.\n' >&2; exit 1; }
 python3 -c 'from urllib.parse import urlparse; import sys; [(lambda u,h: (_ for _ in ()).throw(SystemExit(1)) if u.scheme != "https" or u.hostname != h else None)(urlparse(value), host) for value,host in zip(sys.argv[1::2],sys.argv[2::2])]' "$OBJECT_ENDPOINT" "$OBJECT_ALLOWED_HOST" "$BACKUP_ENDPOINT" "$BACKUP_ALLOWED_HOST" || { printf 'Backup endpoints must be HTTPS and allowlisted.\n' >&2; exit 1; }
+
+[[ "${PGUSER:-postgres}" == "postgres" && "${PGDATABASE:-postgres}" == "postgres" ]] || { printf 'Recovery dump must use canonical production postgres database.\n' >&2; exit 1; }
+
 if [[ ! -s "$BACKUP_ENCRYPTION_RECIPIENT_FILE" ]]; then
   printf 'Age recipients file is missing or empty.\n' >&2
   exit 1
@@ -140,7 +159,7 @@ while :; do
   object_aws "${args[@]}" >"$page_file"
   jq -c '.Versions[]? | {kind:"version",Key,VersionId,IsLatest,LastModified,ETag,Size}' "$page_file" >>"$work_dir/objects/versions.ndjson"
   jq -c '.DeleteMarkers[]? | {kind:"delete_marker",Key,VersionId,IsLatest,LastModified}' "$page_file" >>"$work_dir/objects/versions.ndjson"
-  truncated=$(jq -r '.IsTruncated // false' "$page_file")
+  truncated=$(jq -er 'if has("IsTruncated") and (.IsTruncated | type == "boolean") then .IsTruncated else error("missing boolean IsTruncated") end' "$page_file")
   [[ "$truncated" == "true" ]] || break
   next_key=$(jq -r '.NextKeyMarker // empty' "$page_file")
   next_version=$(jq -r '.NextVersionIdMarker // empty' "$page_file")

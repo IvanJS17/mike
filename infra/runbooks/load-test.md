@@ -1,9 +1,10 @@
 # WS2 Gate B load profile
 
-Run only against the approved private staging/Hetzner candidate with synthetic
-or anonymized fixtures. Set `LOAD_APPROVAL=YES` after recording the owner,
-window, source IP, and cleanup plan. The runner refuses the local Compose file
-and does not read credentials from Git.
+Run only against the versioned target in `infra/production/disposable-targets.json`:
+`LOAD_DISPOSABLE_TARGET_ID=staging-load-disposable`, with
+`LOAD_BASE_URL` and `LOAD_ALLOWED_HOST` equal to that manifest. The target must
+not be localhost, production, or the governed local demo. Set `LOAD_APPROVAL=YES`
+only after recording the owner, window, source IP, and cleanup plan.
 
 ## Fixed profile
 

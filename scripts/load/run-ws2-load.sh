@@ -18,7 +18,13 @@ umask 077
 : "${LOAD_MATTER_CREATE_PATH:?set LOAD_MATTER_CREATE_PATH to the matter creation route}"
 : "${LOAD_INTERACTIVE_PATHS:?set LOAD_INTERACTIVE_PATHS to exactly three chat/workflow routes}"
 : "${LOAD_ALLOWED_HOST:?set LOAD_ALLOWED_HOST to the approved synthetic host}"
+: "${LOAD_DISPOSABLE_TARGET_ID:?set LOAD_DISPOSABLE_TARGET_ID to the versioned disposable load target}"
 : "${LOAD_APPROVAL_RECEIPT:?set LOAD_APPROVAL_RECEIPT to the mode-600 owner approval file}"
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+target_manifest="$repo_root/infra/production/disposable-targets.json"
+jq -e --arg id "$LOAD_DISPOSABLE_TARGET_ID" --arg host "$LOAD_ALLOWED_HOST" --arg url "$LOAD_BASE_URL" \
+  '(.load.target_id == $id) and (.load.host == $host) and (.load.base_url == $url)' "$target_manifest" >/dev/null || { printf 'Load target is not the versioned disposable target.\n' >&2; exit 1; }
 
 [[ "$LOAD_APPROVAL" == "YES" ]] || { printf 'Synthetic load approval is required.\n' >&2; exit 2; }
 [[ "$(stat -c '%a' "$LOAD_USERS_FILE")" == "600" ]] || { printf 'User fixture must be mode 600.\n' >&2; exit 1; }
@@ -26,17 +32,29 @@ umask 077
 [[ "$LOAD_BASE_URL" =~ ^https:// ]] || { printf 'Load target must use HTTPS.\n' >&2; exit 1; }
 base_host=${LOAD_BASE_URL#https://}; base_host=${base_host%%/*}
 [[ "$base_host" == "$LOAD_ALLOWED_HOST" ]] || { printf 'Load target host is not approved.\n' >&2; exit 1; }
+[[ "$base_host" != localhost && "$base_host" != 127.0.0.1 && "$base_host" != *production* && "$base_host" != *prod* ]] || { printf 'Load target resembles a live/local host.\n' >&2; exit 1; }
 [[ -f "$LOAD_APPROVAL_RECEIPT" && "$(stat -c '%a' "$LOAD_APPROVAL_RECEIPT")" == "600" ]] || { printf 'Approval receipt must be mode 600.\n' >&2; exit 1; }
 jq -e --arg host "$LOAD_ALLOWED_HOST" --arg url "$LOAD_BASE_URL" '(.approved == true) and (.synthetic_only == true) and (.target_host == $host) and (.target_url == $url) and ((.expires_at | fromdateiso8601) > now)' "$LOAD_APPROVAL_RECEIPT" >/dev/null || { printf 'Synthetic approval receipt is invalid or expired.\n' >&2; exit 1; }
 duration=${LOAD_DURATION_SECONDS:-1800}
 [[ "$duration" == "1800" ]] || { printf 'WS2 profile must run for exactly 1800 seconds (30 minutes).\n' >&2; exit 1; }
 user_count=$(jq -er 'length' "$LOAD_USERS_FILE")
 [[ "$user_count" == "4" ]] || { printf 'WS2 profile requires exactly 4 accounts.\n' >&2; exit 1; }
-jq -e 'length == 4 and ([.[].id] | unique | length == 4) and ([.[].token] | unique | length == 4) and all(.[]; .synthetic == true and (.token | type == "string" and test("^[A-Za-z0-9._~-]+$")))' "$LOAD_USERS_FILE" >/dev/null || { printf 'User fixture must contain four distinct synthetic safe tokens.\n' >&2; exit 1; }
+jq -e 'length == 4 and ([.[].id] | unique | length == 4) and ([.[].token] | unique | length == 4) and all(.[]; (.id | test("^[A-Za-z0-9._-]+$")) and .synthetic == true and (.token | type == "string" and test("^[A-Za-z0-9._~-]+$")))' "$LOAD_USERS_FILE" >/dev/null || { printf 'User fixture must contain four distinct synthetic safe IDs/tokens.\n' >&2; exit 1; }
 IFS=',' read -r -a interactive_paths <<<"$LOAD_INTERACTIVE_PATHS"
 [[ "${#interactive_paths[@]}" == "3" ]] || { printf 'WS2 profile requires three chat/workflow paths.\n' >&2; exit 1; }
-python3 -c 'import re,sys; raise SystemExit(0 if all(re.fullmatch(r"/[A-Za-z0-9._/?=&-]+", value) for value in sys.argv[1:]) else 1)' "$LOAD_WORKSPACE_PATH" "$LOAD_MATTER_PATH" "$LOAD_WORKSPACE_CREATE_PATH" "$LOAD_MATTER_CREATE_PATH" "$LOAD_UPLOAD_PATH" "$LOAD_BATCH_ENDPOINT" || { printf 'Load route is unsafe.\n' >&2; exit 1; }
-python3 -c 'import re,sys; raise SystemExit(0 if re.fullmatch(r"/[A-Za-z0-9._/?=&-]*%s[A-Za-z0-9._/?=&-]*", sys.argv[1]) else 1)' "$LOAD_DOWNLOAD_PATH_TEMPLATE" || { printf 'Download path template is unsafe.\n' >&2; exit 1; }
+validate_route() {
+  local route=$1
+  route_pattern='^/api/[A-Za-z0-9._/?=&%-]+$'
+  [[ "$route" =~ $route_pattern && "$route" != *..* ]] || return 1
+  case "$route" in
+    /api/workspaces*|/api/matters*|/api/documents*|/api/batches*|/api/chat*|/api/workflows*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+for route in "$LOAD_WORKSPACE_PATH" "$LOAD_MATTER_PATH" "$LOAD_WORKSPACE_CREATE_PATH" "$LOAD_MATTER_CREATE_PATH" "$LOAD_UPLOAD_PATH" "$LOAD_BATCH_ENDPOINT"; do
+  validate_route "$route" || { printf 'Load route is outside the immutable synthetic allowlist.\n' >&2; exit 1; }
+done
+python3 -c 'import re,sys; raise SystemExit(0 if re.fullmatch(r"/api/[A-Za-z0-9._/?=&%-]*%s[A-Za-z0-9._/?=&%-]*", sys.argv[1]) else 1)' "$LOAD_DOWNLOAD_PATH_TEMPLATE" || { printf 'Download path template is unsafe.\n' >&2; exit 1; }
 
 runtime_dir=$(mktemp -d)
 requests_csv="$runtime_dir/requests.csv"
@@ -46,7 +64,7 @@ printf 'timestamp,user,operation,status,time_seconds\n' >"$requests_csv"
 dd if=/dev/zero of="$upload_body" bs=1M count=10 status=none
 
 request() {
-  local token=$1 user=$2 operation=$3 method=$4 path=$5 body=${6:-} capture=${7:-}
+  local token=$1 user=$2 operation=$3 method=$4 path=$5 body=${6:-} capture=${7:-} allow_failure=${8:-0}
   local curl_config response meta status elapsed
   curl_config=$(mktemp "$runtime_dir/curl.XXXXXX")
   response=$(mktemp "$runtime_dir/response.XXXXXX")
@@ -76,6 +94,10 @@ request() {
   if [[ -n "$capture" ]]; then cp "$response" "$capture"; fi
   LAST_STATUS="$status"
   rm -f "$curl_config" "$response"
+  if [[ "$allow_failure" != "1" && ! "$status" =~ ^2[0-9][0-9]$ ]]; then
+    printf 'Load operation %s failed with HTTP/transport status %s.\n' "$operation" "$status" >&2
+    return 1
+  fi
 }
 
 start=$(date -u +%s)
@@ -85,7 +107,8 @@ first_token=$(jq -er '.token' <<<"$first_user")
 first_id=$(jq -er '.id' <<<"$first_user")
 batch_body=$(jq -cn --arg run "ws2-$start" '{documents:100,pages:1000,synthetic:true,load_run:$run}')
 for failure in $(seq 0 9); do
-  request "$first_token" "$first_id" "batch-induced-failure-$failure" POST "$LOAD_BATCH_ENDPOINT?induced_failure=$failure" "$batch_body"
+  request "$first_token" "$first_id" "batch-induced-failure-$failure" POST "$LOAD_BATCH_ENDPOINT?induced_failure=$failure" "$batch_body" "" 1
+  [[ "$LAST_STATUS" =~ ^5[0-9][0-9]$ ]] || { printf 'Induced failure did not produce a server failure.\n' >&2; exit 1; }
 done
 request "$first_token" "$first_id" "batch-resume" POST "$LOAD_BATCH_ENDPOINT/resume" "$batch_body"
 while (( $(date -u +%s) < deadline )); do
@@ -107,6 +130,7 @@ while (( $(date -u +%s) < deadline )); do
     for route in "${interactive_paths[@]}"; do
       method=${route%%:*}; path=${route#*:}
       [[ "$method" =~ ^(GET|POST)$ && "$path" == /* ]] || { printf 'Interactive route must be METHOD:/path.\n' >&2; exit 1; }
+      validate_route "$path" || { printf 'Interactive route is outside the immutable synthetic allowlist.\n' >&2; exit 1; }
       request "$token" "$user" "interactive-${path##*/}" "$method" "$path" "$create_body"
     done
   done < <(jq -c '.[]' "$LOAD_USERS_FILE")

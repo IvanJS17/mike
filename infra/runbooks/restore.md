@@ -20,7 +20,16 @@ restore receipt.
    CI image digests.
 2. Unlock a disposable LUKS2 data volume using the LUKS runbook. Point
    `RESTORE_ROOT` and the Compose bind paths exclusively at that volume.
-3. Run `scripts/restore/restore-recovery-set.sh`. It decrypts with `age`, checks
+3. Run `scripts/restore/restore-recovery-set.sh` with the versioned target
+   `RESTORE_TARGET_ID=restore-disposable`,
+   `RESTORE_DOCKER_CONTEXT=litt-restore-<approved-id>`,
+   `RESTORE_PUBLIC_BASE_URL`, `RESTORE_PUBLIC_ALLOWED_HOST`,
+   `RESTORE_OBJECT_ENDPOINT`, and `RESTORE_OBJECT_ALLOWED_HOST` exactly matching
+   `infra/production/disposable-targets.json`. Provide
+   `RESTORE_CA_CERT_FILE` for the disposable Caddy `tls internal` certificate;
+   never use `--insecure`. The approved disposable ingress may proxy the HTTPS
+   host to Caddy, but no production host port is published. The script decrypts with
+   `age`, checks
    `SHA256SUMS`, matches the archive to `SUCCESS.json`, loads PostgreSQL, restores
    object contents into a disposable versioned bucket with SSE-C, and verifies
    backend `/ready` reports database, storage, and Auth green.

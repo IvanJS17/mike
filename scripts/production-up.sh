@@ -11,6 +11,13 @@ compose_env_file=${COMPOSE_ENV_FILE:?set COMPOSE_ENV_FILE to the external 0600 i
 : "${RELEASE_SHA:?set RELEASE_SHA to the reviewed full commit}"
 : "${RELEASE_MANIFEST_PATH:?set RELEASE_MANIFEST_PATH to the encrypted release manifest}"
 
+[[ "$(git -C "$root" rev-parse HEAD)" == "$RELEASE_SHA" ]] || { printf 'Release SHA does not match the checked-out HEAD.\n' >&2; exit 1; }
+git -C "$root" cat-file -e "$RELEASE_SHA^{commit}" || { printf 'Release SHA is not a commit in this checkout.\n' >&2; exit 1; }
+[[ -z "$(git -C "$root" status --porcelain --untracked-files=all)" ]] || { printf 'Production source checkout is not clean.\n' >&2; exit 1; }
+for source_path in backend/schema.sql backend/migrations scripts/migrations/apply-production.sh; do
+  git -C "$root" ls-files --error-unmatch "$source_path" >/dev/null || { printf 'Migration source is not tracked: %s\n' "$source_path" >&2; exit 1; }
+done
+
 [[ "$(realpath -e "$compose_file")" == "$expected_compose" ]] || {
   printf 'Refusing a non-canonical production Compose path.\n' >&2
   exit 1
@@ -31,6 +38,22 @@ compose_env_file=${COMPOSE_ENV_FILE:?set COMPOSE_ENV_FILE to the external 0600 i
 caddy_sha=$(sha256sum "$root/infra/production/Caddyfile" | cut -d' ' -f1)
 jq -e --arg sha "$RELEASE_SHA" --arg caddy "$caddy_sha" '(.release_sha == $sha) and (.source_offer | endswith($sha)) and (.caddy_config_sha256 == $caddy)' "$RELEASE_MANIFEST_PATH" >/dev/null || {
   printf 'Release manifest does not match SHA/source/Caddyfile.\n' >&2
+  exit 1
+}
+
+compose_config=$(docker compose --env-file "$compose_env_file" -f "$expected_compose" -p litt-production config --format json)
+effective_source=$(jq -er '.services.caddy.environment.SOURCE_OFFER_URL' <<<"$compose_config")
+jq -e \
+  --arg source "$effective_source" \
+  --arg backend "$(jq -er '.services.backend.image' <<<"$compose_config")" \
+  --arg frontend "$(jq -er '.services.frontend.image' <<<"$compose_config")" \
+  --arg caddy "$(jq -er '.services.caddy.image' <<<"$compose_config")" \
+  --arg db "$(jq -er '.services.db.image' <<<"$compose_config")" \
+  --arg auth "$(jq -er '.services.auth.image' <<<"$compose_config")" \
+  --arg rest "$(jq -er '.services.rest.image' <<<"$compose_config")" \
+  '(.source_offer == $source) and (.images.backend == $backend) and (.images.frontend == $frontend) and (.images.caddy == $caddy) and (.images.postgres == $db) and (.images.auth == $auth) and (.images.rest == $rest)' \
+  "$RELEASE_MANIFEST_PATH" >/dev/null || {
+  printf 'Release manifest does not match effective Compose source/images.\n' >&2
   exit 1
 }
 

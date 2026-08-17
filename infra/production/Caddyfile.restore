@@ -1,4 +1,5 @@
-:80 {
+restore.litt.example.invalid:443 {
+    tls internal
     encode zstd gzip
     @api path /api /api/*
     handle @api {

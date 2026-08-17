@@ -8,7 +8,22 @@ compose_file="$root/compose.prod.yml"
 [[ "$(realpath -e "$compose_file")" == "$compose_file" ]] || { printf 'Production Compose path is not canonical.\n' >&2; exit 1; }
 [[ -f "$COMPOSE_ENV_FILE" && "$(stat -c '%a' "$COMPOSE_ENV_FILE")" == "600" ]] || { printf 'Compose env file must be mode 600.\n' >&2; exit 1; }
 
-config=$(docker compose --env-file "$COMPOSE_ENV_FILE" -f "$compose_file" config --format json)
+config=$(docker compose --env-file "$COMPOSE_ENV_FILE" -f "$compose_file" -p litt-production config --format json)
+declare -A expected_repositories=(
+  [caddy]=caddy
+  [frontend]=ghcr.io/ivanjs17/litt-frontend
+  [backend]=ghcr.io/ivanjs17/litt-backend
+  [db]=supabase/postgres
+  [auth]=supabase/gotrue
+  [rest]=postgrest/postgrest
+)
+for service in caddy frontend backend db auth rest; do
+  image=$(jq -er --arg service "$service" '.services[$service].image' <<<"$config")
+  prefix=${image%@*}
+  repository=${prefix%%:*}
+  repository=${repository,,}
+  [[ "$repository" == "${expected_repositories[$service]}" ]] || { printf 'Unexpected image repository for %s.\n' "$service" >&2; exit 1; }
+done
 images=$(jq -r '.services | to_entries[] | select(.value.image != null) | .value.image' <<<"$config")
 count=$(sort -u <<<"$images" | wc -l)
 [[ "$count" == "6" ]] || { printf 'Expected six immutable production images, got %s.\n' "$count" >&2; exit 1; }

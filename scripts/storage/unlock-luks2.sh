@@ -6,6 +6,7 @@ set -Eeuo pipefail
 : "${LITT_CRYPT_MAPPER:?set LITT_CRYPT_MAPPER to the mapper name}"
 : "${LITT_DATA_ROOT:?set LITT_DATA_ROOT to the encrypted mount point}"
 if (( EUID != 0 )); then printf 'Run as root through the approved break-glass procedure.\n' >&2; exit 1; fi
+[[ "$LITT_DATA_ROOT" != "/" && "$(realpath -m "$LITT_DATA_ROOT")" == "/srv/litt-data" && ! -L "$LITT_DATA_ROOT" ]] || { printf 'LITT_DATA_ROOT must be the canonical non-symlink /srv/litt-data.\n' >&2; exit 1; }
 [[ -b "$LITT_DATA_DEVICE" ]] || { printf 'Not a block device.\n' >&2; exit 1; }
 device_real=$(realpath -e "$LITT_DATA_DEVICE")
 root_source=$(findmnt -n -o SOURCE --target /)
@@ -14,6 +15,8 @@ root_disk=$(lsblk -ndo PKNAME "$root_real" || true); root_disk=${root_disk:+/dev
 selected_disk=$(lsblk -ndo PKNAME "$device_real" || true); selected_disk=${selected_disk:+/dev/$selected_disk}
 [[ "$device_real" != "$root_real" && "$selected_disk" != "$root_disk" ]] || { printf 'Refusing root filesystem device.\n' >&2; exit 1; }
 cryptsetup isLuks "$device_real" >/dev/null 2>&1 || { printf 'Configured device is not LUKS.\n' >&2; exit 1; }
+luks_version=$(cryptsetup luksDump "$device_real" | awk -F: '/Version:/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')
+[[ "$luks_version" == "2" ]] || { printf 'Configured device is not LUKS2.\n' >&2; exit 1; }
 install -d -m 0700 "$LITT_DATA_ROOT"
 if cryptsetup status "$LITT_CRYPT_MAPPER" >/dev/null 2>&1; then
   mapped=$(cryptsetup status "$LITT_CRYPT_MAPPER" | awk '/device:/ {print $2}')

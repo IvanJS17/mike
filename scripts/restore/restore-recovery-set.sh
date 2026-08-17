@@ -25,17 +25,33 @@ restore_override="$repo_root/infra/production/compose.restore.yml"
 : "${RESTORE_DESIGNATED_USERS_FILE:?set RESTORE_DESIGNATED_USERS_FILE to the two-user mode-600 fixture}"
 : "${RESTORE_PUBLIC_BASE_URL:?set RESTORE_PUBLIC_BASE_URL to the disposable HTTPS URL}"
 : "${RESTORE_PUBLIC_ALLOWED_HOST:?set RESTORE_PUBLIC_ALLOWED_HOST to the disposable host}"
+: "${RESTORE_TARGET_ID:?set RESTORE_TARGET_ID to the versioned disposable target}"
+: "${RESTORE_DOCKER_CONTEXT:?set RESTORE_DOCKER_CONTEXT to the isolated litt-restore-* Docker context}"
+: "${RESTORE_OBJECT_ALLOWED_HOST:?set RESTORE_OBJECT_ALLOWED_HOST to the disposable object host}"
+: "${RESTORE_AUTHENTICATED_PATH:?set RESTORE_AUTHENTICATED_PATH to the protected disposable route}"
+: "${RESTORE_CA_CERT_FILE:?set RESTORE_CA_CERT_FILE to the disposable TLS CA certificate}"
 
-mkdir -p "$RESTORE_ROOT"
+target_manifest="$repo_root/infra/production/disposable-targets.json"
+jq -e --arg id "$RESTORE_TARGET_ID" --arg public "$RESTORE_PUBLIC_BASE_URL" --arg public_host "$RESTORE_PUBLIC_ALLOWED_HOST" --arg object "$RESTORE_OBJECT_ENDPOINT" --arg object_host "$RESTORE_OBJECT_ALLOWED_HOST" \
+  '(.restore.target_id == $id) and (.restore.public_base_url == $public) and (.restore.public_host == $public_host) and (.restore.object_endpoint == $object) and (.restore.object_host == $object_host)' "$target_manifest" >/dev/null || { printf 'Restore target is not the versioned disposable target.\n' >&2; exit 1; }
 restore_root_real=$(realpath -e "$RESTORE_ROOT")
 [[ "$restore_root_real" != "/" && "$restore_root_real" == */litt-restore* ]] || { printf 'Restore root is not disposable.\n' >&2; exit 1; }
 [[ "$RESTORE_PUBLIC_BASE_URL" =~ ^https:// ]] || { printf 'Restore public URL must use HTTPS.\n' >&2; exit 1; }
 public_host=${RESTORE_PUBLIC_BASE_URL#https://}; public_host=${public_host%%/*}
+object_host=${RESTORE_OBJECT_ENDPOINT#https://}; object_host=${object_host%%/*}
 [[ "$public_host" == "$RESTORE_PUBLIC_ALLOWED_HOST" ]] || { printf 'Restore public host is not approved.\n' >&2; exit 1; }
-[[ "$(realpath -e "$RESTORE_COMPOSE_FILE")" == "$restore_override" ]] || { printf 'Restore must use the reviewed compose.restore.yml.\n' >&2; exit 1; }
+[[ "$object_host" == "$RESTORE_OBJECT_ALLOWED_HOST" && "$RESTORE_OBJECT_ENDPOINT" =~ ^https:// ]] || { printf 'Restore object endpoint is not the approved HTTPS target.\n' >&2; exit 1; }
+[[ "$public_host" != localhost && "$public_host" != 127.0.0.1 && "$public_host" != *production* && "$public_host" != *prod* ]] || { printf 'Restore public target resembles a live/local host.\n' >&2; exit 1; }
+[[ "$object_host" != localhost && "$object_host" != 127.0.0.1 && "$object_host" != *production* && "$object_host" != *prod* ]] || { printf 'Restore object target resembles a live/local host.\n' >&2; exit 1; }
+[[ "$RESTORE_DOCKER_CONTEXT" =~ ^litt-restore-[a-z0-9-]+$ ]] || { printf 'Restore Docker context is not disposable.\n' >&2; exit 1; }
+auth_path_pattern='^/api/[A-Za-z0-9._/?=&-]+$'
+[[ "$RESTORE_AUTHENTICATED_PATH" =~ $auth_path_pattern && "$RESTORE_AUTHENTICATED_PATH" != *..* ]] || { printf 'Restore authenticated route is unsafe.\n' >&2; exit 1; }
+[[ "$(docker context show)" == "$RESTORE_DOCKER_CONTEXT" ]] || { printf 'Restore is not running on its isolated Docker context.\n' >&2; exit 1; }
+
 [[ "$(realpath -e "$RESTORE_ENV_FILE")" == "$restore_root_real/compose.env" ]] || { printf 'Restore env must be inside RESTORE_ROOT.\n' >&2; exit 1; }
 [[ "$RESTORE_PROJECT_NAME" =~ ^litt-restore-[a-z0-9-]{1,40}$ ]] || { printf 'Restore project is not disposable.\n' >&2; exit 1; }
 [[ "$RESTORE_OBJECT_BUCKET" =~ ^litt-restore-[a-z0-9-]{1,50}$ ]] || { printf 'Restore bucket is not disposable.\n' >&2; exit 1; }
+[[ -f "$RESTORE_CA_CERT_FILE" && ! -L "$RESTORE_CA_CERT_FILE" && "$(stat -c '%a' "$RESTORE_CA_CERT_FILE")" =~ ^(600|644)$ ]] || { printf 'Restore TLS CA certificate must be regular mode 600 or 644.\n' >&2; exit 1; }
 for secret_file in "$AGE_IDENTITY_FILE" "$RESTORE_ENV_FILE" "$RESTORE_OBJECT_SSE_CUSTOMER_KEY_FILE" "$RESTORE_DESIGNATED_USERS_FILE"; do
   [[ -f "$secret_file" && ! -L "$secret_file" && "$(stat -c '%a' "$secret_file")" == "600" ]] || { printf 'Restore secret fixture must be regular mode 600.\n' >&2; exit 1; }
 done
@@ -46,21 +62,35 @@ restore_data_real=$(realpath -m "$restore_data_root")
 restore_secrets_real=$(realpath -m "$restore_secrets_root")
 [[ "$restore_data_real" == "$restore_root_real"/* && "$restore_secrets_real" == "$restore_root_real"/* ]] || { printf 'Restore data/secrets roots must be inside RESTORE_ROOT.\n' >&2; exit 1; }
 [[ -f "$RECOVERY_SET_PATH" && -f "$RECOVERY_SUCCESS_PATH" && -f "$RESTORE_EXPECTED_COUNTS_FILE" ]] || { printf 'Recovery input is incomplete.\n' >&2; exit 1; }
+jq -e '
+  length >= 10
+  and any(.[]; .table == "user_profiles" and .count >= 4)
+  and any(.[]; .table == "workspaces" and .count >= 2)
+  and any(.[]; .table == "matters" and .count >= 6)
+  and any(.[]; .table == "documents" and .count >= 100)
+  and (map(.table) as $tables | ["project_members","chats","executions","outputs","audit_events","publication_manifests"] | all(.[] as $required; ($tables | index($required)) != null))
+' "$RESTORE_EXPECTED_COUNTS_FILE" >/dev/null || { printf 'Restore qualification counts do not meet the mandatory dataset minimum.\n' >&2; exit 1; }
 
 runtime_dir=""
-compose=()
 compose_started=0
 cleanup() {
-  if (( compose_started == 1 )); then "${compose[@]}" down --remove-orphans >/dev/null 2>&1 || true; fi
+  local status=$?
+  if (( compose_started == 1 )); then
+    "${compose[@]}" down --remove-orphans >/dev/null 2>&1 || status=1
+    [[ -z "$("${docker_prefix[@]}" ps -aq --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")" ]] || status=1
+  fi
   [[ -z "$runtime_dir" ]] || rm -rf "$runtime_dir"
+  trap - EXIT
+  exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-compose=(docker compose --env-file "$RESTORE_ENV_FILE" -f "$base_compose" -f "$restore_override" -p "$RESTORE_PROJECT_NAME")
+docker_prefix=(docker --context "$RESTORE_DOCKER_CONTEXT")
+compose=("${docker_prefix[@]}" compose --env-file "$RESTORE_ENV_FILE" -f "$base_compose" -f "$restore_override" -p "$RESTORE_PROJECT_NAME")
 compose_config=$("${compose[@]}" config --format json)
-[[ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")" ]] || { printf 'Restore project already exists.\n' >&2; exit 1; }
-[[ -z "$(docker volume ls -q --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")" ]] || { printf 'Restore project has existing volumes.\n' >&2; exit 1; }
+[[ -z "$("${docker_prefix[@]}" ps -aq --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")" ]] || { printf 'Restore project already exists.\n' >&2; exit 1; }
+[[ -z "$("${docker_prefix[@]}" volume ls -q --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")" ]] || { printf 'Restore project has existing volumes.\n' >&2; exit 1; }
 while IFS= read -r source; do
   case "$source" in
     "$restore_root_real"/*|"$repo_root"/*) ;;
@@ -79,10 +109,19 @@ python3 - "$archive" <<'PY'
 import sys, tarfile
 from pathlib import PurePosixPath
 with tarfile.open(sys.argv[1], 'r:gz') as archive:
+    seen = set()
+    total_size = 0
+    allowed_roots = {'postgres.dump', 'postgres.restore.list', 'objects', 'config', 'audit', 'publication', 'release-manifest.json', 'inventory.json', 'SHA256SUMS'}
     for member in archive.getmembers():
         path = PurePosixPath(member.name)
         if path.is_absolute() or '..' in path.parts or member.issym() or member.islnk() or not (member.isdir() or member.isfile()):
             raise SystemExit(f'unsafe archive member: {member.name}')
+        if not path.parts or path.parts[0] not in allowed_roots or member.name in seen:
+            raise SystemExit(f'unallowlisted or duplicate archive member: {member.name}')
+        seen.add(member.name)
+        total_size += member.size
+        if total_size > 5 * 1024 * 1024 * 1024:
+            raise SystemExit('archive expands beyond the 5 GiB restore bound')
 PY
 tar -xzf "$archive" --no-same-owner --no-same-permissions -C "$set_dir"
 (cd "$set_dir" && sha256sum -c SHA256SUMS)
@@ -107,8 +146,8 @@ if (( rpo_seconds < 0 || rpo_seconds > 86400 )); then
 fi
 
 # Keep the validated base+override Compose array for every lifecycle operation.
-"${compose[@]}" up -d db
 compose_started=1
+"${compose[@]}" up -d db
 for attempt in $(seq 1 60); do
   if "${compose[@]}" exec -T db pg_isready -U postgres -d postgres >/dev/null 2>&1; then
     break
@@ -122,11 +161,17 @@ done
   --username "${PGUSER:-postgres}" --dbname "${PGDATABASE:-postgres}" \
   <"$set_dir/postgres.dump"
 "${compose[@]}" up -d caddy auth rest backend frontend
-jq -e 'length == 2 and ([.[].id] | unique | length == 2) and ([.[].email] | unique | length == 2)' "$RESTORE_DESIGNATED_USERS_FILE" >/dev/null || { printf 'Exactly two distinct designated restore users are required.\n' >&2; exit 1; }
+jq -e 'length == 2 and ([.[].id] | unique | length == 2) and ([.[].email] | unique | length == 2) and all(.[]; .id | test("^[A-Za-z0-9._-]+$"))' "$RESTORE_DESIGNATED_USERS_FILE" >/dev/null || { printf 'Exactly two distinct safe designated restore users are required.\n' >&2; exit 1; }
 while IFS= read -r user_record; do
-  printf '%s' "$user_record" | curl --silent --show-error --fail \
+  auth_response="$runtime_dir/auth-$(jq -er '.id' <<<"$user_record").json"
+  user_payload=$(jq -c '{email,password}' <<<"$user_record")
+  printf '%s' "$user_payload" | curl --silent --show-error --fail --cacert "$RESTORE_CA_CERT_FILE" \
     -H 'Content-Type: application/json' --data-binary @- \
-    "$RESTORE_PUBLIC_BASE_URL/supabase/auth/v1/token?grant_type=password" >/dev/null
+    --output "$auth_response" "$RESTORE_PUBLIC_BASE_URL/supabase/auth/v1/token?grant_type=password"
+  access_token=$(jq -er '.access_token | select(type == "string" and length > 0)' "$auth_response")
+  curl --silent --show-error --fail --cacert "$RESTORE_CA_CERT_FILE" \
+    -H "Authorization: Bearer $access_token" \
+    "$RESTORE_PUBLIC_BASE_URL$RESTORE_AUTHENTICATED_PATH" >/dev/null
 done < <(jq -c '.[]' "$RESTORE_DESIGNATED_USERS_FILE")
 
 restore_aws() {
@@ -135,6 +180,8 @@ restore_aws() {
   AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}" \
     aws --endpoint-url "$RESTORE_OBJECT_ENDPOINT" "$@"
 }
+versioning=$(restore_aws s3api get-bucket-versioning --bucket "$RESTORE_OBJECT_BUCKET" --output json)
+[[ "$(jq -r '.Status // empty' <<<"$versioning")" == "Enabled" ]] || { printf 'Restore bucket versioning is not enabled.\n' >&2; exit 1; }
 
 : >"$runtime_dir/object-restore-map.ndjson"
 while IFS= read -r record; do
@@ -150,7 +197,7 @@ while IFS= read -r record; do
     --bucket "$RESTORE_OBJECT_BUCKET" --key "$key" --body "$source_path" \
     --sse-customer-algorithm AES256 \
     --sse-customer-key "fileb://$RESTORE_OBJECT_SSE_CUSTOMER_KEY_FILE")
-  new_version=$(jq -r '.VersionId // "null"' <<<"$result")
+  new_version=$(jq -er '.VersionId | select(type == "string" and length > 0)' <<<"$result")
   jq -cn --arg key "$key" --arg source_version "$(jq -r '.version_id' <<<"$record")" \
     --arg restored_version "$new_version" --arg sha256 "$actual_sha" \
     --arg file "$file" --argjson is_latest "$(jq -r '.is_latest // false' <<<"$record")" \
@@ -161,8 +208,9 @@ done < <(jq -c 'select(.kind == "version")' "$set_dir/objects/index.ndjson")
 while IFS= read -r record; do
   key=$(jq -er '.key' <<<"$record")
   result=$(restore_aws s3api delete-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$key")
+  restored_marker=$(jq -er '.VersionId | select(type == "string" and length > 0)' <<<"$result")
   jq -cn --arg key "$key" --arg source_version "$(jq -r '.version_id' <<<"$record")" \
-    --arg restored_version "$(jq -r '.VersionId // "null"' <<<"$result")" \
+    --arg restored_version "$restored_marker" \
     --argjson is_latest "$(jq -r '.is_latest // false' <<<"$record")" \
     '{kind:"delete_marker",key:$key,source_version_id:$source_version,restored_version_id:$restored_version,is_latest:$is_latest}' \
     >>"$runtime_dir/object-restore-map.ndjson"

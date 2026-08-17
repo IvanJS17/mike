@@ -1,0 +1,14 @@
+{
+  "load": {
+    "target_id": "staging-load-disposable",
+    "host": "load.litt.example.invalid",
+    "base_url": "https://load.litt.example.invalid"
+  },
+  "restore": {
+    "target_id": "restore-disposable",
+    "public_host": "restore.litt.example.invalid",
+    "public_base_url": "https://restore.litt.example.invalid",
+    "object_host": "objects.restore.litt.example.invalid",
+    "object_endpoint": "https://objects.restore.litt.example.invalid"
+  }
+}

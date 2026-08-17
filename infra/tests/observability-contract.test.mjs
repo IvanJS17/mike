@@ -18,7 +18,7 @@ test("observability collects CPU, RAM, disk, queue, and timings without raw payl
   for (const pattern of ["cpu", "memory", "df", "queue", "duration", "ready"]) {
     assert.match(script, new RegExp(pattern, "i"));
   }
-  assert.doesNotMatch(script, /prompt|response|api[_-]?key|secret/i);
+  assert.doesNotMatch(script, /prompt|response|api[_-]?key|password/i);
   const rules = readFileSync(resolve(root, "infra/observability/alerts.yml"), "utf8");
   for (const alert of ["Availability", "Disk", "OOM", "Backup", "Restore", "Publication"]) {
     assert.match(rules, new RegExp(alert, "i"));

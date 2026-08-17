@@ -9,9 +9,11 @@ umask 077
 : "${BACKUP_ACCESS_KEY_ID:?set BACKUP_ACCESS_KEY_ID}"
 : "${BACKUP_SECRET_ACCESS_KEY:?set BACKUP_SECRET_ACCESS_KEY}"
 : "${BACKUP_FRESHNESS_FILE:?set BACKUP_FRESHNESS_FILE on the encrypted volume}"
+: "${LITT_DATA_ROOT:?set LITT_DATA_ROOT=/srv/litt-data}"
 : "${BACKUP_ALERT_WEBHOOK:?set BACKUP_ALERT_WEBHOOK}"
-state_file=${BACKUP_FRESHNESS_STATE_FILE:-"${BACKUP_FRESHNESS_FILE}.state"}
-max_age_hours=${BACKUP_MAX_AGE_HOURS:-24}
+[[ "$(realpath -m "$LITT_DATA_ROOT")" == "/srv/litt-data" && "$(realpath -m "$BACKUP_FRESHNESS_FILE")" == "/srv/litt-data/state/backup-freshness.json" ]] || { printf 'Freshness state path is not canonical.\n' >&2; exit 1; }
+state_file="$LITT_DATA_ROOT/state/backup-freshness.json"
+readonly max_age_seconds=86400
 mkdir -p "$(dirname "$BACKUP_FRESHNESS_FILE")" "$(dirname "$state_file")"
 
 backup_aws() {
@@ -45,7 +47,6 @@ fail_closed() {
   previous=$(jq -r '.status // "unknown"' "$state_file" 2>/dev/null || printf 'unknown')
   write_state false failed
   [[ "$previous" == "failed" ]] || notify_failure "$reason"
-  cp "$BACKUP_FRESHNESS_FILE" "$state_file"
   printf '%s\n' "$reason" >&2
   exit 2
 }
@@ -67,9 +68,8 @@ completed_at=$(jq -r '.completed_at' "$tmp")
 completed_epoch=$(date -u -d "$completed_at" +%s 2>/dev/null) || fail_closed "latest-success timestamp is invalid"
 now_epoch=$(date -u +%s)
 age_seconds=$((now_epoch - completed_epoch))
-(( age_seconds >= 0 && age_seconds <= max_age_hours * 3600 )) || fail_closed "latest recovery set is older than ${max_age_hours} hours"
+(( age_seconds >= 0 && age_seconds <= max_age_seconds )) || fail_closed "latest recovery set is older than 24 hours"
 remote=$(backup_aws s3api head-object --bucket "$BACKUP_BUCKET" --key "$object_key" --output json 2>/dev/null) || fail_closed "latest recovery archive is missing"
 [[ "$(jq -r '.Metadata.sha256 // ""' <<<"$remote")" == "$expected_sha" ]] || fail_closed "latest recovery archive checksum does not match marker"
 write_state true healthy "$completed_at" "$set_id"
-cp "$BACKUP_FRESHNESS_FILE" "$state_file"
 printf 'Latest complete recovery set %s is fresh.\n' "$set_id"

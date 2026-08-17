@@ -27,10 +27,16 @@ custody record, and rotation receipt.
 ## Configuration and credentials
 
 Place one mode-600 `/srv/litt-data/secrets/backup.env` outside Git. It contains the
-paths and credentials named by `create-recovery-set.sh` and
-`check-recovery-freshness.sh`. It must define separate object and backup
-credentials, the mode-600 `OBJECT_SSE_CUSTOMER_KEY_FILE`, the age recipients file, the alert webhook, and the sanitized
-config/audit/publication paths. Never print or paste the file.
+canonical `LITT_APP_ROOT` (the deployed `/srv/<app>/` checkout),
+`LITT_DATA_ROOT=/srv/litt-data`, `LITT_SECRETS_ROOT=/srv/litt-data/secrets`,
+`COMPOSE_FILE=$LITT_APP_ROOT/compose.prod.yml`,
+`COMPOSE_ENV_FILE=/srv/litt-data/secrets/compose.env`, and
+`COMPOSE_PROJECT_NAME=litt-production`, plus the paths and credentials named by
+`create-recovery-set.sh` and `check-recovery-freshness.sh`. It must define separate
+object and backup credentials, the mode-600 `OBJECT_SSE_CUSTOMER_KEY_FILE`, the
+canonical `/srv/litt-data/secrets/backup-recipients.age`, the age recipients file,
+the alert webhook, and the sanitized config/audit/publication paths. Never print or
+paste the file.
 
 Install the scripts as `/usr/local/sbin/litt-create-recovery-set` and
 `litt-check-recovery-freshness`; install the four systemd units from
