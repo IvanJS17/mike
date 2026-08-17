@@ -25,10 +25,13 @@ Before a production migration:
 1. create and verify a complete recovery set;
 2. freeze the current image lock and record the schema/migration version;
 3. create a disposable env/project named `litt-rehearsal-*`;
-4. run `scripts/migrations/rehearse-production.sh`, which applies fresh schema
-   and then all migrations a second time to exercise idempotency;
-5. run readiness, the targeted authorization suite, and the smoke workflow;
-6. preserve the sanitized receipt with image digests and migration version.
+4. install the scripts as `/usr/local/sbin/litt-create-recovery-set`,
+   `/usr/local/sbin/litt-check-recovery-freshness`, and
+   `/usr/local/sbin/litt-verify-encrypted-mount` (mode 0755);
+5. run `bash scripts/migrations/rehearse-production.sh`, which applies fresh
+   schema and then all migrations a second time to exercise idempotency;
+6. run readiness, the targeted authorization suite, and the smoke workflow;
+7. preserve the sanitized receipt with image digests and migration version.
 
 `apply-production.sh` is used only through the `ops` Compose profile. It does
 not run as part of ordinary `up -d`, and it never uses `docker-compose.yml`.
@@ -62,7 +65,7 @@ header and must resolve to the exact public fork/source snapshot.
 After every firewall, SSH, volume, secret, Compose, or systemd change:
 
 - verify only nominal VPN keys/users can SSH;
-- verify `/srv/litt-data` and `/srv/litt-secrets` are on the LUKS mapper;
+- verify `/srv/litt-data` and `/srv/litt-data/secrets` are on the LUKS mapper;
 - verify secret files are 0600 and directories 0700;
 - verify PostgreSQL, Auth, REST, backend, and frontend have no host ports;
 - verify only Caddy has 80/443;

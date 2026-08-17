@@ -7,6 +7,10 @@ set -Eeuo pipefail
 : "${AWS_ENDPOINT_URL:?set AWS_ENDPOINT_URL to the private object-storage endpoint}"
 : "${AWS_BUCKET_NAME:?set AWS_BUCKET_NAME to the production bucket}"
 : "${SSE_C_CUSTOMER_KEY_FILE:?set SSE_C_CUSTOMER_KEY_FILE to the 0600 key file}"
+: "${SSE_C_PROBE_APPROVAL:?set SSE_C_PROBE_APPROVAL=YES for a scratch probe}"
+: "${SSE_C_PROBE_BUCKET_NAME:?set SSE_C_PROBE_BUCKET_NAME to a dedicated scratch bucket}"
+[[ "$SSE_C_PROBE_APPROVAL" == YES ]] || { printf 'Explicit scratch probe approval is required.\n' >&2; exit 2; }
+[[ "$SSE_C_PROBE_BUCKET_NAME" =~ ^litt-probe-[a-z0-9-]+$ ]] || { printf 'Probe bucket must be a dedicated litt-probe-* bucket.\n' >&2; exit 1; }
 
 if [[ ! -f "$SSE_C_CUSTOMER_KEY_FILE" ]]; then
   printf 'Missing SSE-C key file.\n' >&2
@@ -45,12 +49,12 @@ key="__litt_sse_probe__/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 body=$(mktemp)
 without_key=$(mktemp)
 with_key=$(mktemp)
-trap 'rm -f "$body" "$without_key" "$with_key"; aws s3api delete-object --bucket "$AWS_BUCKET_NAME" --key "$key" --endpoint-url "$AWS_ENDPOINT_URL" >/dev/null 2>&1 || true' EXIT
+trap 'rm -f "$body" "$without_key" "$with_key"; aws s3api delete-object --bucket "$SSE_C_PROBE_BUCKET_NAME" --key "$key" --endpoint-url "$AWS_ENDPOINT_URL" >/dev/null 2>&1 || true' EXIT
 printf 'litt-sse-probe\n' >"$body"
 
 # fileb:// keeps the customer key out of the process argument list.
 aws s3api put-object \
-  --bucket "$AWS_BUCKET_NAME" \
+  --bucket "$SSE_C_PROBE_BUCKET_NAME" \
   --key "$key" \
   --body "$body" \
   --endpoint-url "$AWS_ENDPOINT_URL" \
@@ -58,7 +62,7 @@ aws s3api put-object \
   --sse-customer-key "fileb://$SSE_C_CUSTOMER_KEY_FILE" >/dev/null
 
 if aws s3api get-object \
-  --bucket "$AWS_BUCKET_NAME" \
+  --bucket "$SSE_C_PROBE_BUCKET_NAME" \
   --key "$key" \
   --endpoint-url "$AWS_ENDPOINT_URL" \
   "$without_key" >/dev/null 2>&1; then
@@ -67,7 +71,7 @@ if aws s3api get-object \
 fi
 
 aws s3api get-object \
-  --bucket "$AWS_BUCKET_NAME" \
+  --bucket "$SSE_C_PROBE_BUCKET_NAME" \
   --key "$key" \
   --endpoint-url "$AWS_ENDPOINT_URL" \
   --sse-customer-algorithm AES256 \

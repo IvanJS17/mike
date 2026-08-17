@@ -1,0 +1,59 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+packages:
+  - cryptsetup
+  - docker.io
+  - nftables
+  - wireguard
+  - unattended-upgrades
+
+users:
+%{ for name, key in operators ~}
+  - name: ${name}
+    gecos: "LiTT operator ${name}"
+    groups: [litt-operators, docker]
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ${key}
+%{ endfor ~}
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-litt-runtime.conf
+    permissions: "0644"
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin no
+      PubkeyAuthentication yes
+      AllowGroups litt-operators
+  - path: /etc/nftables.conf
+    permissions: "0644"
+    content: |
+      flush ruleset
+      table inet litt_host {
+        chain input {
+          type filter hook input priority 0; policy drop;
+          iifname "lo" accept
+          ct state established,related accept
+          ip protocol icmp accept
+          ip6 nexthdr icmpv6 accept
+          tcp dport { 80, 443 } accept
+%{ for cidr in vpn_ipv4_cidrs ~}
+          ip saddr ${cidr} tcp dport 22 accept
+%{ endfor ~}
+%{ for cidr in vpn_ipv6_cidrs ~}
+          ip6 saddr ${cidr} tcp dport 22 accept
+%{ endfor ~}
+        }
+        chain forward { type filter hook forward priority 0; policy drop; ct state established,related accept; }
+        chain output { type filter hook output priority 0; policy accept; }
+      }
+
+runcmd:
+  - [groupadd, --system, litt-operators]
+  - [systemctl, enable, docker]
+  - [systemctl, enable, nftables]
+  - [systemctl, restart, nftables]
+  - [systemctl, restart, ssh]

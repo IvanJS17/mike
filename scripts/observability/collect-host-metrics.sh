@@ -6,6 +6,8 @@ set -Eeuo pipefail
 : "${COMPOSE_FILE:?set COMPOSE_FILE to compose.prod.yml}"
 : "${COMPOSE_ENV_FILE:?set COMPOSE_ENV_FILE to the external mode-600 env file}"
 : "${LITT_DATA_ROOT:?set LITT_DATA_ROOT to the encrypted mount}"
+: "${BACKUP_FRESHNESS_FILE:?set BACKUP_FRESHNESS_FILE to backup-freshness.json}"
+: "${RESTORE_RECEIPT_FILE:?set RESTORE_RECEIPT_FILE to the latest restore receipt}"
 
 [[ "$(basename "$COMPOSE_FILE")" == "compose.prod.yml" ]] || {
   printf 'Refusing to collect production metrics from the local Compose file.\n' >&2
@@ -24,9 +26,29 @@ printf '# TYPE litt_host_memory_bytes gauge\nlitt_host_memory_bytes{state="total
 printf '# TYPE litt_host_disk_used_percent gauge\nlitt_host_disk_used_percent %s\n' "$disk_used_percent"
 printf '# TYPE litt_metrics_timestamp_seconds gauge\nlitt_metrics_timestamp_seconds %s\n' "$now"
 
-# Docker's sanitized resource summary contains only names and resource totals.
-docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemPerc}}' | \
-  awk -F '\t' 'BEGIN {print "# TYPE litt_container_cpu_percent gauge"; print "# TYPE litt_container_memory_percent gauge"} {gsub(/%/, "", $2); gsub(/%/, "", $3); printf "litt_container_cpu_percent{name=\"%s\"} %s\nlitt_container_memory_percent{name=\"%s\"} %s\n", $1, $2, $1, $3}'
+# Docker's sanitized resource summary is limited to this Compose project.
+mapfile -t container_ids < <("${compose[@]}" ps -q)
+if ((${#container_ids[@]} > 0)); then
+  docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemPerc}}' "${container_ids[@]}" | \
+    awk -F '\t' 'BEGIN {print "# TYPE litt_container_cpu_percent gauge"; print "# TYPE litt_container_memory_percent gauge"} {gsub(/%/, "", $2); gsub(/%/, "", $3); printf "litt_container_cpu_percent{name=\"%s\"} %s\nlitt_container_memory_percent{name=\"%s\"} %s\n", $1, $2, $1, $3}'
+fi
+printf '# TYPE litt_container_oom_events gauge\n'
+while IFS= read -r container_id; do
+  [[ -n "$container_id" ]] || continue
+  name=$(docker inspect --format '{{.Name}}' "$container_id" | tr -d '/')
+  oom=$(docker inspect --format '{{if .State.OOMKilled}}1{{else}}0{{end}}' "$container_id")
+  printf 'litt_container_oom_events{name="%s"} %s\n' "$name" "$oom"
+done < <("${compose[@]}" ps -q)
+printf '# TYPE litt_backup_last_success_timestamp_seconds gauge\n'
+backup_time=0
+if [[ -f "$BACKUP_FRESHNESS_FILE" ]]; then
+  backup_time=$(date -u -d "$(jq -r '.latest_completed_at // empty' "$BACKUP_FRESHNESS_FILE")" +%s 2>/dev/null || printf '0')
+fi
+printf 'litt_backup_last_success_timestamp_seconds %s\n' "$backup_time"
+printf '# TYPE litt_restore_last_success gauge\n'
+restore_ok=0
+if [[ -f "$RESTORE_RECEIPT_FILE" ]] && jq -e '.status == "success"' "$RESTORE_RECEIPT_FILE" >/dev/null 2>&1; then restore_ok=1; fi
+printf 'litt_restore_last_success %s\n' "$restore_ok"
 
 # The backend endpoint includes queue depth/retries and request duration metrics.
 readiness=$("${compose[@]}" exec -T backend node -e '

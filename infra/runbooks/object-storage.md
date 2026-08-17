@@ -25,8 +25,8 @@ objects remain readable.
 Generate a key only in the approved secret workstation:
 
 ```bash
-openssl rand -base64 32 > /srv/litt-secrets/object-storage-sse-c.key
-chmod 600 /srv/litt-secrets/object-storage-sse-c.key
+openssl rand -base64 32 > /srv/litt-data/secrets/object-storage-sse-c.key
+chmod 600 /srv/litt-data/secrets/object-storage-sse-c.key
 ```
 
 Do not paste the output into chat, a PR, a bucket object, or a shell history.
@@ -38,7 +38,9 @@ Run the read-only policy check plus one temporary-object probe from the host:
 ```bash
 export AWS_ENDPOINT_URL=https://<approved-private-endpoint>
 export AWS_BUCKET_NAME=<approved-bucket>
-export SSE_C_CUSTOMER_KEY_FILE=/srv/litt-secrets/object-storage-sse-c.key
+export SSE_C_CUSTOMER_KEY_FILE=/srv/litt-data/secrets/object-storage-sse-c.key
+export SSE_C_PROBE_APPROVAL=YES
+export SSE_C_PROBE_BUCKET_NAME=litt-probe-ws2
 scripts/object-storage/verify-private-versioning.sh
 ```
 

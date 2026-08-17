@@ -1,0 +1,18 @@
+:80 {
+    encode zstd gzip
+    @api path /api /api/*
+    handle @api {
+        uri strip_prefix /api
+        reverse_proxy backend:3001
+    }
+    @supabase_auth path /supabase/auth/v1 /supabase/auth/v1/*
+    handle @supabase_auth {
+        uri strip_prefix /supabase/auth/v1
+        reverse_proxy auth:9999
+    }
+    @supabase_rest path /supabase/rest/v1 /supabase/rest/v1/*
+    handle @supabase_rest {
+        uri strip_prefix /supabase/rest/v1
+        reverse_proxy rest:3000
+    }
+}

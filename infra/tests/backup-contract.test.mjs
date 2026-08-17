@@ -35,7 +35,7 @@ test("a recovery set contains every required source and succeeds only after encr
 test("freshness checks fail closed and revoke real-data acceptance after 24 hours", () => {
   const source = read("check-recovery-freshness.sh");
   assert.match(source, /24/);
-  assert.match(source, /real_data_allowed/);
+  assert.match(source, /backup_freshness_ok/);
   assert.match(source, /BACKUP_ALERT_WEBHOOK/);
   assert.match(source, /exit 2/);
   execFileSync("bash", ["-n", resolve(backupDir, "check-recovery-freshness.sh")]);

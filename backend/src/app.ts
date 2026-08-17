@@ -17,6 +17,7 @@ import { manifestPublicKey } from "./lib/manifestSigning";
 import { safeErrorLog } from "./lib/safeError";
 import { evaluateReadiness } from "./lib/readiness";
 import { metricsMiddleware, renderMetrics } from "./lib/metrics";
+import { enforceBackupFreshness } from "./lib/backupFreshness";
 
 export const app = express();
 const isProduction = process.env.NODE_ENV === "production";
@@ -95,6 +96,7 @@ const dataDeleteLimiter = makeLimiter({
 app.disable("x-powered-by");
 app.set("trust proxy", envInt("TRUST_PROXY_HOPS", 1));
 app.use(metricsMiddleware);
+app.use(enforceBackupFreshness);
 
 app.use(
   helmet({

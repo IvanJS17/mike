@@ -15,7 +15,7 @@ function productionEnv() {
     ACME_EMAIL: "ops@example.invalid",
     SOURCE_OFFER_URL: "https://github.com/IvanJS17/mike",
     LITT_DATA_ROOT: "/srv/litt-data",
-    LITT_SECRETS_ROOT: "/srv/litt-secrets",
+    LITT_SECRETS_ROOT: "/srv/litt-data/secrets",
     LITT_CADDY_IMAGE: `caddy:2.10.0@sha256:${digest}`,
     LITT_FRONTEND_IMAGE: `ghcr.io/ivanjs17/litt-frontend@sha256:${digest}`,
     LITT_BACKEND_IMAGE: `ghcr.io/ivanjs17/litt-backend@sha256:${digest}`,

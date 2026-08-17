@@ -72,9 +72,45 @@ export function verifyDownload(
     }
 }
 
+export function signUserDownload(
+    path: string,
+    filename: string,
+    userId: string,
+    ttlSeconds = 300,
+): string {
+    const payload = JSON.stringify({ p: path, f: filename, u: userId, e: Math.floor(Date.now() / 1000) + ttlSeconds });
+    const enc = b64urlEncode(Buffer.from(payload, "utf8"));
+    const sig = crypto.createHmac("sha256", getSecret()).update(enc).digest();
+    return `${enc}.${b64urlEncode(sig)}`;
+}
+
+export function verifyUserDownload(
+    token: string,
+): { path: string; filename: string; userId: string } | null {
+    const parts = token.split(".");
+    if (parts.length !== 2) return null;
+    const [enc, sigEnc] = parts;
+    const expected = crypto.createHmac("sha256", getSecret()).update(enc).digest();
+    if (!timingSafeEqStr(sigEnc, b64urlEncode(expected))) return null;
+    try {
+        const parsed = JSON.parse(b64urlDecode(enc).toString("utf8")) as {
+            p?: string; f?: string; u?: string; e?: number;
+        };
+        const expiry = parsed.e;
+        if (!parsed.p || !parsed.f || !parsed.u || typeof expiry !== "number" || !Number.isInteger(expiry) || expiry < Math.floor(Date.now() / 1000)) return null;
+        return { path: parsed.p, filename: parsed.f, userId: parsed.u };
+    } catch {
+        return null;
+    }
+}
+
+export function buildUserDownloadUrl(path: string, filename: string, userId: string): string {
+    const base = (process.env.PUBLIC_API_BASE_URL ?? process.env.FRONTEND_URL ?? "").replace(/\/$/, "");
+    return `${base}/download-user/${signUserDownload(path, filename, userId)}`;
+}
+
 /**
- * Returns a relative download URL (e.g. "/download/abc.def"). The frontend
- * prefixes it with NEXT_PUBLIC_API_BASE_URL when rendering `<a href=…>`.
+ * Returns a relative download URL for existing server-authenticated flows.
  */
 export function buildDownloadUrl(path: string, filename: string): string {
     return `/download/${signDownload(path, filename)}`;

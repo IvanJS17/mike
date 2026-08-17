@@ -57,6 +57,10 @@ export function renderMetrics(): string {
     `litt_queue_depth ${numberEnv("LITT_QUEUE_DEPTH")}`,
     "# TYPE litt_queue_retries_total counter",
     `litt_queue_retries_total ${numberEnv("LITT_QUEUE_RETRIES_TOTAL")}`,
+    "# TYPE litt_queue_completed_total counter",
+    `litt_queue_completed_total ${numberEnv("LITT_QUEUE_COMPLETED_TOTAL")}`,
+    "# TYPE litt_publication_failures_total counter",
+    `litt_publication_failures_total ${numberEnv("LITT_PUBLICATION_FAILURES_TOTAL")}`,
     "",
   ].join("\n");
 }

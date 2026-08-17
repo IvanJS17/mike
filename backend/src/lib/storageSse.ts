@@ -1,13 +1,31 @@
 import { createHash } from "node:crypto";
 
 export const storageSecurityConfigurationError =
-  "R2_SSE_CUSTOMER_KEY must be a base64-encoded 32-byte key in production";
+  "R2_SSE_CUSTOMER_KEY must be a base64-encoded 32-byte key when production SSE-C is required";
 
 export type SseCustomerHeaders = {
   SSECustomerAlgorithm: "AES256";
   SSECustomerKey: string;
   SSECustomerKeyMD5: string;
 };
+
+function required(): boolean {
+  return process.env.R2_SSE_CUSTOMER_KEY_REQUIRED === "true";
+}
+
+export function validateStorageEndpoint(endpoint = process.env.R2_ENDPOINT_URL): void {
+  if (!required()) return;
+  if (!endpoint) throw new Error("R2_ENDPOINT_URL is required");
+  const parsed = new URL(endpoint);
+  if (parsed.protocol !== "https:") throw new Error("R2_ENDPOINT_URL must use HTTPS");
+  const allowlist = (process.env.R2_ENDPOINT_ALLOWLIST ?? "")
+    .split(",")
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+  if (allowlist.length === 0 || !allowlist.includes(parsed.hostname.toLowerCase())) {
+    throw new Error("R2_ENDPOINT_URL host is not in R2_ENDPOINT_ALLOWLIST");
+  }
+}
 
 function decodeCustomerKey(encoded: string): Buffer {
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) || encoded.length % 4 !== 0) {
@@ -20,21 +38,12 @@ function decodeCustomerKey(encoded: string): Buffer {
   return decoded;
 }
 
-/**
- * Return the S3 SSE-C headers for object PUT/GET commands.
- *
- * Production requires a 256-bit base64 key. Local tests may omit it because
- * the local RustFS stack is intentionally not a production data boundary.
- */
 export function sseCustomerHeaders(): SseCustomerHeaders | undefined {
   const encoded = process.env.R2_SSE_CUSTOMER_KEY?.trim();
   if (!encoded) {
-    if (process.env.NODE_ENV === "production") {
-      throw new Error(storageSecurityConfigurationError);
-    }
+    if (required()) throw new Error(storageSecurityConfigurationError);
     return undefined;
   }
-
   const decoded = decodeCustomerKey(encoded);
   return {
     SSECustomerAlgorithm: "AES256",

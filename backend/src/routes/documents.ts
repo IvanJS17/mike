@@ -5,7 +5,6 @@ import {
   buildContentDisposition,
   downloadFile,
   deleteFile,
-  getSignedUrl,
   storageKey,
   uploadFile,
   versionStorageKey,
@@ -15,7 +14,7 @@ import {
   extractTrackedChangeIds,
   resolveTrackedChange,
 } from "../lib/docxTrackedChanges";
-import { buildDownloadUrl } from "../lib/downloadTokens";
+import { buildDownloadUrl, buildUserDownloadUrl } from "../lib/downloadTokens";
 import {
   attachActiveVersionPaths,
   attachLatestVersionNumbers,
@@ -267,13 +266,11 @@ documentsRouter.get("/:documentId/url", requireAuth, async (req, res) => {
     active.version_number,
     active.source === "assistant_edit",
   );
-  const url = await getSignedUrl(
+  const url = buildUserDownloadUrl(
     active.storage_path,
-    3600,
     downloadFilename,
+    userId,
   );
-  if (!url)
-    return void res.status(503).json({ detail: "Storage not configured" });
 
   res.json({
     url,

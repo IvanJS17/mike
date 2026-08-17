@@ -24,8 +24,8 @@ and the recovery material remains under Socium custody.
    file, or chat. Save the LUKS header backup and passphrase separately under
    Socium custody. The script refuses the root device and refuses a non-LUKS
    mapper collision.
-4. Create the four mode-0700 directories shown by the script. Secret files
-   under `/srv/litt-secrets` must also be mode 0600 and live on this encrypted
+4. Create the five mode-0700 directories shown by the script. Secret files
+   under `/srv/litt-data/secrets` must also be mode 0600 and live on this encrypted
    volume.
 
 The script deliberately performs no OpenTofu action and creates no provider

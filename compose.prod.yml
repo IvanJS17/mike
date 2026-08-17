@@ -71,6 +71,15 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3001"
+      R2_SSE_CUSTOMER_KEY_REQUIRED: "true"
+      PUBLIC_API_BASE_URL: "https://${APP_DOMAIN}/api"
+      BACKUP_FRESHNESS_REQUIRED: "true"
+      BACKUP_FRESHNESS_FILE: /run/litt-state/backup-freshness.json
+    volumes:
+      - type: bind
+        source: ${LITT_DATA_ROOT:?LITT_DATA_ROOT is required}/state
+        target: /run/litt-state
+        read_only: true
     depends_on:
       db:
         condition: service_healthy
@@ -163,5 +172,4 @@ services:
     logging: *default-logging
 
 networks:
-  default:
-    name: litt-production
+  default: {}

@@ -26,7 +26,7 @@ custody record, and rotation receipt.
 
 ## Configuration and credentials
 
-Place one mode-600 `/srv/litt-secrets/backup.env` outside Git. It contains the
+Place one mode-600 `/srv/litt-data/secrets/backup.env` outside Git. It contains the
 paths and credentials named by `create-recovery-set.sh` and
 `check-recovery-freshness.sh`. It must define separate object and backup
 credentials, the mode-600 `OBJECT_SSE_CUSTOMER_KEY_FILE`, the age recipients file, the alert webhook, and the sanitized
@@ -42,10 +42,10 @@ exactly two UTC runs: 00:00 and 12:00. The freshness timer runs hourly.
 The freshness job reads `recovery/latest-success.json` from the independent
 destination. If it is missing, malformed, or older than 24 hours, it:
 
-1. writes `real_data_allowed=false` under the encrypted state directory;
+1. writes `backup_freshness_ok=false` under the encrypted state directory;
 2. sends the first-failure alert to the approved webhook;
 3. exits non-zero so systemd/monitoring records the failure;
-4. blocks acceptance of new real data until a complete set is restored.
+4. blocks production data writes through the backend freshness gate until a complete set is restored.
 
 Synthetic/anonymous qualification may continue, but the stale state must not be
 reported as a healthy Gate B or Gate E environment.

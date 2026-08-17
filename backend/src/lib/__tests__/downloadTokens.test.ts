@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { signDownload, verifyDownload, buildDownloadUrl } from "../downloadTokens";
+import { signDownload, verifyDownload, buildDownloadUrl, signUserDownload, verifyUserDownload, buildUserDownloadUrl } from "../downloadTokens";
 
 const SECRET = "test-secret-32-bytes-long-enough!!";
 
@@ -105,5 +105,19 @@ describe("buildDownloadUrl", () => {
         expect(result).not.toBeNull();
         expect(result!.path).toBe(path);
         expect(result!.filename).toBe(filename);
+    });
+});
+
+describe("short-lived user-bound downloads", () => {
+    it("round-trips a user and expires", () => {
+        const token = signUserDownload("documents/user/file.pdf", "file.pdf", "user-1", 300);
+        expect(verifyUserDownload(token)).toMatchObject({ userId: "user-1", path: "documents/user/file.pdf" });
+        const url = buildUserDownloadUrl("documents/user/file.pdf", "file.pdf", "user-1");
+        expect(url).toContain("/download-user/");
+    });
+
+    it("rejects an expired user token", () => {
+        const token = signUserDownload("documents/user/file.pdf", "file.pdf", "user-1", -1);
+        expect(verifyUserDownload(token)).toBeNull();
     });
 });

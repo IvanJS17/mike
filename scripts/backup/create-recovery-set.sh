@@ -98,9 +98,45 @@ backup_aws() {
     aws --endpoint-url "$BACKUP_ENDPOINT" "$@"
 }
 
-# Export every object version and delete marker. Object contents are addressed
-# by a digest of (key, version) to avoid path traversal and collision.
-object_aws s3api list-object-versions --bucket "$APP_BUCKET" --output json >"$work_dir/objects/versions.json"
+if [[ "$OBJECT_ACCESS_KEY_ID" == "$BACKUP_ACCESS_KEY_ID" || "$OBJECT_SECRET_ACCESS_KEY" == "$BACKUP_SECRET_ACCESS_KEY" || "$OBJECT_ENDPOINT" == "$BACKUP_ENDPOINT" || "$APP_BUCKET" == "$BACKUP_BUCKET" ]]; then
+  printf 'Application and independent-backup identities/destinations must differ.\n' >&2
+  exit 1
+fi
+assert_sanitized_tree() {
+  local path=$1
+  [[ -d "$path" && ! -L "$path" ]] || { printf 'Recovery source is not a regular directory.\n' >&2; exit 1; }
+  local unsafe
+  unsafe=$(find "$path" \( -type l -o -type f \( -name '*.env' -o -name '*.key' -o -name '*.pem' -o -name '*.age' -o -iname '*secret*' -o -iname '*password*' \) \) -print -quit)
+  [[ -z "$unsafe" ]] || { printf 'Unsafe recovery source member: %s\n' "$unsafe" >&2; exit 1; }
+}
+assert_sanitized_tree "$RECOVERY_CONFIG_DIR"
+assert_sanitized_tree "$AUDIT_EXPORT_DIR"
+assert_sanitized_tree "$PUBLICATION_MANIFEST_DIR"
+
+# Export every object version and delete marker, explicitly following S3 marker
+# pagination. Object contents are addressed by a digest of (key, version).
+mkdir -p "$work_dir/objects/pages"
+: >"$work_dir/objects/versions.ndjson"
+key_marker=""
+version_marker=""
+page=0
+while :; do
+  page=$((page + 1))
+  page_file="$work_dir/objects/pages/page-$page.json"
+  args=(s3api list-object-versions --bucket "$APP_BUCKET" --output json)
+  [[ -n "$key_marker" ]] && args+=(--key-marker "$key_marker")
+  [[ -n "$version_marker" ]] && args+=(--version-id-marker "$version_marker")
+  object_aws "${args[@]}" >"$page_file"
+  jq -c '.Versions[]? | {kind:"version",Key,VersionId,IsLatest,LastModified,ETag,Size}' "$page_file" >>"$work_dir/objects/versions.ndjson"
+  jq -c '.DeleteMarkers[]? | {kind:"delete_marker",Key,VersionId,IsLatest,LastModified}' "$page_file" >>"$work_dir/objects/versions.ndjson"
+  truncated=$(jq -r '.IsTruncated // false' "$page_file")
+  [[ "$truncated" == "true" ]] || break
+  next_key=$(jq -r '.NextKeyMarker // empty' "$page_file")
+  next_version=$(jq -r '.NextVersionIdMarker // empty' "$page_file")
+  [[ -n "$next_key" && -n "$next_version" ]] || { printf 'Truncated object listing has no next markers.\n' >&2; exit 1; }
+  key_marker="$next_key"
+  version_marker="$next_version"
+done
 : >"$work_dir/objects/index.ndjson"
 while IFS= read -r record; do
   key=$(jq -r '.Key' <<<"$record")
@@ -117,14 +153,13 @@ while IFS= read -r record; do
     --arg sha256 "$digest" --argjson size "$(stat -c '%s' "$object_path")" \
     '{kind:"version",key:$key,version_id:$version,file:$file,sha256:$sha256,size:$size}' \
     >>"$work_dir/objects/index.ndjson"
-done < <(jq -c '.Versions[]? // empty' "$work_dir/objects/versions.json")
+done < <(jq -c 'select(.kind == "version")' "$work_dir/objects/versions.ndjson")
 while IFS= read -r record; do
   jq -c '{kind:"delete_marker",key:.Key,version_id:.VersionId,is_latest:.IsLatest,last_modified:.LastModified}' \
     <<<"$record" >>"$work_dir/objects/index.ndjson"
-done < <(jq -c '.DeleteMarkers[]? // empty' "$work_dir/objects/versions.json")
+done < <(jq -c 'select(.kind == "delete_marker")' "$work_dir/objects/versions.ndjson")
 
-# Copy only the declared, sanitized recovery sources. Secrets remain in custody
-# and are represented by the release/config manifest, not copied into this set.
+# Copy only the allowlisted sanitized, symlink-free recovery sources.
 cp -a "$RECOVERY_CONFIG_DIR/." "$work_dir/config/"
 cp -a "$AUDIT_EXPORT_DIR/." "$work_dir/audit/"
 cp -a "$PUBLICATION_MANIFEST_DIR/." "$work_dir/publication/"

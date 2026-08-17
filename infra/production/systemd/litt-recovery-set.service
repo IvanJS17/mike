@@ -6,8 +6,8 @@ Requires=docker.service
 [Service]
 Type=oneshot
 User=root
-EnvironmentFile=/srv/litt-secrets/backup.env
-ExecStartPre=/usr/local/sbin/verify-encrypted-mount
+EnvironmentFile=/srv/litt-data/secrets/backup.env
+ExecStartPre=/usr/local/sbin/litt-verify-encrypted-mount
 ExecStart=/usr/local/sbin/litt-create-recovery-set
 NoNewPrivileges=true
 PrivateTmp=true

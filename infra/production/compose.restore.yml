@@ -1,0 +1,15 @@
+# Compose override for restore-only disposable projects. It removes Caddy's
+# host bindings and uses an HTTP-only internal config; the base production
+# network remains project-scoped because compose.prod.yml has no fixed name.
+services:
+  caddy:
+    ports: []
+    environment:
+      APP_DOMAIN: ":80"
+      ACME_EMAIL: restore@example.invalid
+      SOURCE_OFFER_URL: https://github.com/IvanJS17/mike
+    volumes:
+      - type: bind
+        source: ./infra/production/Caddyfile.restore
+        target: /etc/caddy/Caddyfile
+        read_only: true

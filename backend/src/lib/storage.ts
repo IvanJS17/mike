@@ -17,7 +17,7 @@ import {
 } from "@aws-sdk/client-s3";
 import * as S3Commands from "@aws-sdk/client-s3";
 import { getSignedUrl as awsGetSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { sseCustomerHeaders } from "./storageSse";
+import { sseCustomerHeaders, validateStorageEndpoint } from "./storageSse";
 
 const GetObjectCommand = (S3Commands as any).GetObjectCommand;
 
@@ -52,6 +52,7 @@ function requireStorageConfig(): void {
       "R2_ENDPOINT_URL, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY must be set",
     );
   }
+  validateStorageEndpoint();
   sseCustomerHeaders();
 }
 
@@ -198,7 +199,7 @@ export async function getSignedUrl(
   expiresIn = 3600,
   downloadFilename?: string,
 ): Promise<string | null> {
-  if (!storageEnabled) return null;
+  if (!storageEnabled || process.env.R2_SSE_CUSTOMER_KEY_REQUIRED === "true") return null;
   try {
     const client = getClient();
     // Override the response Content-Disposition so the browser uses this

@@ -31,9 +31,9 @@ jobs:
             context: frontend
             dockerfile: frontend/Dockerfile
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -47,7 +47,7 @@ jobs:
           test -n "$LITT_PRODUCTION_SUPABASE_URL"
           test -n "$LITT_PRODUCTION_SUPABASE_PUBLISHABLE_KEY"
       - id: image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
@@ -62,7 +62,7 @@ jobs:
           printf 'LITT_%s_IMAGE=%s/%s/litt-%s@%s\n' \
             '${{ matrix.env_name }}' '${{ env.REGISTRY }}' '${{ env.IMAGE_OWNER }}' \
             '${{ matrix.name }}' '${{ steps.image.outputs.digest }}' > "image-lock-${{ matrix.name }}.env"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: production-image-lock-${{ matrix.name }}
           path: image-lock-${{ matrix.name }}.env
@@ -73,13 +73,25 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: production-image-lock-*
           merge-multiple: true
           path: image-lock
+      - name: Add verified platform image entries
+        env:
+          LITT_CADDY_IMAGE: ${{ vars.LITT_CADDY_IMAGE }}
+          LITT_DB_IMAGE: ${{ vars.LITT_DB_IMAGE }}
+          LITT_AUTH_IMAGE: ${{ vars.LITT_AUTH_IMAGE }}
+          LITT_REST_IMAGE: ${{ vars.LITT_REST_IMAGE }}
+        run: |
+          for name in CADDY DB AUTH REST; do
+            value="$(printenv "LITT_${name}_IMAGE")"
+            [[ "$value" =~ @sha256:[0-9a-f]{64}$ ]]
+            printf 'LITT_%s_IMAGE=%s\\n' "$name" "$value" >> image-lock/upstream.env
+          done
       - name: Reject mutable image references
         run: |
           cat image-lock/*.env
-          test "$(grep -RohE '@sha256:[0-9a-f]{64}$' image-lock | wc -l)" -eq 2
+          test "$(grep -RohE '@sha256:[0-9a-f]{64}$' image-lock | wc -l)" -eq 6
           ! grep -RE ':latest|:[^@[:space:]]+$' image-lock

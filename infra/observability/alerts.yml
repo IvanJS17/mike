@@ -27,7 +27,7 @@ groups:
           summary: "LiTT host RAM is above 75%"
 
       - alert: LittContainerOOM
-        expr: increase(container_memory_failcnt[5m]) > 0
+        expr: litt_container_oom_events > 0
         labels:
           severity: critical
         annotations:

@@ -68,7 +68,7 @@ variable "vpn_cidrs" {
 
   validation {
     condition = length(var.vpn_cidrs) > 0 && alltrue([
-      for cidr in var.vpn_cidrs : can(cidrhost(cidr, 0))
+      for cidr in var.vpn_cidrs : can(cidrhost(cidr, 0)) && cidr != "0.0.0.0/0" && cidr != "::/0"
     ])
     error_message = "vpn_cidrs must contain at least one valid VPN CIDR."
   }
@@ -81,6 +81,8 @@ variable "ssh_keys" {
 
   validation {
     condition = length(var.ssh_keys) > 0 && alltrue([
+      for name in keys(var.ssh_keys) : can(regex("^[a-z][a-z0-9-]{1,31}$", name))
+    ]) && alltrue([
       for key in values(var.ssh_keys) : can(regex("^ssh-(ed25519|rsa|ecdsa) ", key))
     ])
     error_message = "ssh_keys must contain at least one named OpenSSH public key."

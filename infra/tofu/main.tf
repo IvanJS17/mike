@@ -5,6 +5,8 @@ locals {
     managed_by  = "opentofu"
     workstream  = "ws2-runtime"
   }
+  vpn_ipv4_cidrs = [for cidr in var.vpn_cidrs : cidr if !strcontains(cidr, ":")]
+  vpn_ipv6_cidrs = [for cidr in var.vpn_cidrs : cidr if strcontains(cidr, ":")]
 }
 
 resource "hcloud_ssh_key" "operator" {
@@ -76,7 +78,11 @@ resource "hcloud_server" "runtime" {
   ssh_keys    = [for key in hcloud_ssh_key.operator : key.name]
   firewall_ids = [hcloud_firewall.runtime.id]
   labels      = local.labels
-  user_data   = file("${path.module}/cloud-init.yaml")
+  user_data = templatefile("${path.module}/cloud-init.yaml.tftpl", {
+    operators       = var.ssh_keys
+    vpn_ipv4_cidrs  = local.vpn_ipv4_cidrs
+    vpn_ipv6_cidrs  = local.vpn_ipv6_cidrs
+  })
 }
 
 resource "hcloud_volume" "encrypted_data" {
