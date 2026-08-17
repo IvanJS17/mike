@@ -1,0 +1,167 @@
+# Production-only topology for LiTT.
+#
+# This file deliberately has no build directives and no local-only services.
+# Every image value is supplied by a deployment env file and must be a CI-produced
+# immutable digest (image@sha256:<64 hex chars>). Do not run this file with the
+# local docker-compose.yml or with `docker compose down -v`.
+
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  caddy:
+    image: ${LITT_CADDY_IMAGE:?LITT_CADDY_IMAGE must be an immutable digest}
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?APP_DOMAIN is required}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is required}
+      SOURCE_OFFER_URL: ${SOURCE_OFFER_URL:?SOURCE_OFFER_URL is required}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - type: bind
+        source: ${LITT_DATA_ROOT:?LITT_DATA_ROOT is required}/caddy-data
+        target: /data
+      - type: bind
+        source: ${LITT_DATA_ROOT:?LITT_DATA_ROOT is required}/caddy-config
+        target: /config
+      - type: bind
+        source: ./infra/production/Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      auth:
+        condition: service_started
+      rest:
+        condition: service_started
+    logging: *default-logging
+
+  frontend:
+    image: ${LITT_FRONTEND_IMAGE:?LITT_FRONTEND_IMAGE must be an immutable digest}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:3000').then((r) =>
+          process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    logging: *default-logging
+
+  backend:
+    image: ${LITT_BACKEND_IMAGE:?LITT_BACKEND_IMAGE must be an immutable digest}
+    restart: unless-stopped
+    env_file:
+      - ${LITT_SECRETS_ROOT:?LITT_SECRETS_ROOT is required}/backend.env
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+    depends_on:
+      db:
+        condition: service_healthy
+      auth:
+        condition: service_started
+      rest:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:3001/health').then((r) =>
+          process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    logging: *default-logging
+
+  db:
+    image: ${LITT_DB_IMAGE:?LITT_DB_IMAGE must be an immutable digest}
+    restart: unless-stopped
+    env_file:
+      - ${LITT_SECRETS_ROOT:?LITT_SECRETS_ROOT is required}/db.env
+    volumes:
+      - type: bind
+        source: ${LITT_DATA_ROOT:?LITT_DATA_ROOT is required}/postgres
+        target: /var/lib/postgresql/data
+      - type: bind
+        source: ./docker/prod/db-init.sh
+        target: /docker-entrypoint-initdb.d/zz-litt-roles.sh
+        read_only: true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+    logging: *default-logging
+
+  auth:
+    image: ${LITT_AUTH_IMAGE:?LITT_AUTH_IMAGE must be an immutable digest}
+    restart: unless-stopped
+    env_file:
+      - ${LITT_SECRETS_ROOT:?LITT_SECRETS_ROOT is required}/auth.env
+    depends_on:
+      db:
+        condition: service_healthy
+    logging: *default-logging
+
+  rest:
+    image: ${LITT_REST_IMAGE:?LITT_REST_IMAGE must be an immutable digest}
+    restart: unless-stopped
+    env_file:
+      - ${LITT_SECRETS_ROOT:?LITT_SECRETS_ROOT is required}/rest.env
+    depends_on:
+      db:
+        condition: service_healthy
+    logging: *default-logging
+
+  # Operational profile only. It is never started by the normal production
+  # `up -d` command; the migration runbook invokes it after a recovery set.
+  migrations:
+    image: ${LITT_DB_IMAGE:?LITT_DB_IMAGE must be an immutable digest}
+    profiles: [ops]
+    restart: "no"
+    env_file:
+      - ${LITT_SECRETS_ROOT:?LITT_SECRETS_ROOT is required}/db.env
+    environment:
+      MIGRATION_MODE: ${MIGRATION_MODE:-existing}
+    volumes:
+      - type: bind
+        source: ./backend/schema.sql
+        target: /opt/litt/schema.sql
+        read_only: true
+      - type: bind
+        source: ./backend/migrations
+        target: /opt/litt/migrations
+        read_only: true
+      - type: bind
+        source: ./scripts/migrations/apply-production.sh
+        target: /opt/litt/apply-production.sh
+        read_only: true
+    entrypoint: ["/bin/bash", "/opt/litt/apply-production.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+    logging: *default-logging
+
+networks:
+  default:
+    name: litt-production

@@ -1,0 +1,40 @@
+{
+    admin off
+    auto_https prefer_wildcard
+    email {$ACME_EMAIL}
+}
+
+{$APP_DOMAIN} {
+    encode zstd gzip
+
+    header {
+        -Server
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        X-LiTT-Source-Offer {$SOURCE_OFFER_URL}
+    }
+
+    @api path /api /api/*
+    handle @api {
+        uri strip_prefix /api
+        reverse_proxy backend:3001
+    }
+
+    @supabase_auth path /supabase/auth/v1 /supabase/auth/v1/*
+    handle @supabase_auth {
+        uri strip_prefix /supabase/auth/v1
+        reverse_proxy auth:9999
+    }
+
+    @supabase_rest path /supabase/rest/v1 /supabase/rest/v1/*
+    handle @supabase_rest {
+        uri strip_prefix /supabase/rest/v1
+        reverse_proxy rest:3000
+    }
+
+    handle {
+        reverse_proxy frontend:3000
+    }
+}
