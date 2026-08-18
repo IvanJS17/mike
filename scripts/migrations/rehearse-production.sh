@@ -33,15 +33,21 @@ for service in backend db auth rest; do
   env_file="$LITT_SECRETS_ROOT/$service.env"
   [[ -f "$env_file" && ! -L "$env_file" && "$(stat -c '%a' "$env_file")" == "600" ]] || { printf 'Missing disposable %s.env mode-600 file.\n' "$service" >&2; exit 1; }
 done
+export MIGRATION_TARGET_ID="$MIGRATION_TARGET_ID"
 export MIGRATION_TARGET_PROJECT="$MIGRATION_REHEARSAL_PROJECT"
+export MIGRATION_COMPOSE_PROJECT="$MIGRATION_REHEARSAL_PROJECT"
 export RELEASE_SHA="$release_sha"
 export MIGRATION_TREE_SHA256="$migration_tree_sha256"
 MIGRATION_RECEIPT="$rehearsal_root/state/migration-rehearsal.json"
 export MIGRATION_RECEIPT
 jq -n --arg project "$MIGRATION_REHEARSAL_PROJECT" --arg context "$MIGRATION_DOCKER_CONTEXT" --arg release "$RELEASE_SHA" --arg tree "$MIGRATION_TREE_SHA256" \
-  '{approved:true,status:"rehearsal-approved",target_project:$project,docker_context:$context,release_sha:$release,migration_tree_sha256:$tree}' \
+  '{approved:true,status:"rehearsal-approved",target_id:"migration-disposable",target_project:$project,compose_project:$project,docker_context:$context,release_sha:$release,migration_tree_sha256:$tree}' \
   >"$LITT_DATA_ROOT/state/migration-gate.json"
 chmod 0600 "$LITT_DATA_ROOT/state/migration-gate.json"
+jq -n --arg id "$MIGRATION_TARGET_ID" --arg project "$MIGRATION_REHEARSAL_PROJECT" --arg context "$MIGRATION_DOCKER_CONTEXT" --arg release "$RELEASE_SHA" --arg tree "$MIGRATION_TREE_SHA256" \
+  '{target_id:$id,project:$project,compose_project:$project,docker_context:$context,postgres_host:"db",database:"postgres",release_sha:$release,migration_tree_sha256:$tree}' \
+  >"$LITT_DATA_ROOT/state/runtime-identity.json"
+chmod 0644 "$LITT_DATA_ROOT/state/runtime-identity.json"
 
 docker_prefix=(docker --context "$MIGRATION_DOCKER_CONTEXT")
 compose=("${docker_prefix[@]}" compose --env-file "$COMPOSE_ENV_FILE" -f "$expected" -p "$MIGRATION_REHEARSAL_PROJECT")
@@ -65,8 +71,8 @@ cleanup() {
 trap cleanup EXIT
 started=1
 "${compose[@]}" up -d db auth rest
-"${compose[@]}" --profile ops run --rm -e MIGRATION_MODE=fresh -e MIGRATION_TARGET_PROJECT="$MIGRATION_REHEARSAL_PROJECT" -e MIGRATION_DOCKER_CONTEXT="$MIGRATION_DOCKER_CONTEXT" migrations
-"${compose[@]}" --profile ops run --rm -e MIGRATION_MODE=existing -e MIGRATION_TARGET_PROJECT="$MIGRATION_REHEARSAL_PROJECT" -e MIGRATION_DOCKER_CONTEXT="$MIGRATION_DOCKER_CONTEXT" migrations
+"${compose[@]}" --profile ops run --rm -e MIGRATION_MODE=fresh -e MIGRATION_TARGET_ID="$MIGRATION_TARGET_ID" -e MIGRATION_TARGET_PROJECT="$MIGRATION_REHEARSAL_PROJECT" -e MIGRATION_COMPOSE_PROJECT="$MIGRATION_REHEARSAL_PROJECT" -e MIGRATION_DOCKER_CONTEXT="$MIGRATION_DOCKER_CONTEXT" -e POSTGRES_HOST=db migrations
+"${compose[@]}" --profile ops run --rm -e MIGRATION_MODE=existing -e MIGRATION_TARGET_ID="$MIGRATION_TARGET_ID" -e MIGRATION_TARGET_PROJECT="$MIGRATION_REHEARSAL_PROJECT" -e MIGRATION_COMPOSE_PROJECT="$MIGRATION_REHEARSAL_PROJECT" -e MIGRATION_DOCKER_CONTEXT="$MIGRATION_DOCKER_CONTEXT" -e POSTGRES_HOST=db migrations
 migration_version=$(find "$root/backend/migrations" -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | sort | awk 'END {print}')
 jq -n \
   --arg project "$MIGRATION_REHEARSAL_PROJECT" --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

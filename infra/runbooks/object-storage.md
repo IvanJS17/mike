@@ -38,8 +38,19 @@ Run the read-only policy check plus one temporary-object probe from the host:
 ```bash
 export AWS_ENDPOINT_URL=https://<approved-private-endpoint>
 export AWS_BUCKET_NAME=<approved-bucket>
+export AWS_ACCOUNT_ID=<approved-production-account>
+export AWS_PRODUCTION_ACCESS_KEY_ID=<approved-production-key-id>
+export AWS_PRODUCTION_SECRET_ACCESS_KEY=<approved-production-secret>
+export AWS_PRODUCTION_IDENTITY_FILE=/srv/litt-data/secrets/object-storage-production-identity.json
 export SSE_C_CUSTOMER_KEY_FILE=/srv/litt-data/secrets/object-storage-sse-c.key
+export SSE_C_PROBE_CUSTOMER_KEY_FILE=/srv/litt-data/secrets/object-storage-sse-c-probe.key
+export SSE_C_PROBE_ACCESS_KEY_ID=<separate-scratch-key-id>
+export SSE_C_PROBE_SECRET_ACCESS_KEY=<separate-scratch-secret>
 export SSE_C_PROBE_APPROVAL=YES
+export SSE_C_PROBE_ENDPOINT_URL=https://<approved-scratch-endpoint>
+export SSE_C_PROBE_ALLOWED_HOST=<approved-scratch-host>
+export SSE_C_PROBE_ACCOUNT_ID=<approved-scratch-account>
+export SSE_C_PROBE_TARGET_ID=sse-probe-disposable
 export SSE_C_PROBE_BUCKET_NAME=litt-probe-ws2
 scripts/object-storage/verify-private-versioning.sh
 ```

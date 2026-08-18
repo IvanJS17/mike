@@ -36,11 +36,13 @@ Before a production migration:
    all migrations a second time to exercise idempotency and writes a release/tree
    bound rehearsal receipt;
 6. After a complete recovery set and successful disposable rehearsal, run
-   `MIGRATION_GATE_APPROVAL=YES scripts/migrations/create-production-migration-gate.sh`.
-   It verifies the canonical recovery SUCCESS marker, rehearsal receipt, release
-   SHA, and migration-tree hash before writing the mode-600 production gate.
+   `MIGRATION_GATE_APPROVAL=YES RECOVERY_SUCCESS_SOURCE=/srv/litt-data/recovery/sets/<set-id>/SUCCESS.json MIGRATION_REHEARSAL_RECEIPT_SOURCE=/srv/litt-rehearsal/state/migration-rehearsal.json scripts/migrations/create-production-migration-gate.sh`.
+   It verifies the canonical disposable sources, copies them to the mode-600
+   production state paths, binds release/tree/target identity, and writes the
+   read-only runtime identity file before creating the production gate.
 7. production migration invocation must provide the canonical migration gate,
-   recovery-set ID, rehearsal receipt hash, release SHA, and migration-tree hash;
+   runtime identity, recovery-set ID, rehearsal receipt hash, release SHA, and
+   migration-tree hash; `MIGRATION_MODE=fresh` is forbidden for production;
 8. run readiness, the targeted authorization suite, and the smoke workflow;
 9. preserve the sanitized receipt with image digests and migration version.
 
@@ -80,7 +82,7 @@ After every firewall, SSH, volume, secret, Compose, or systemd change:
 
 After a successful disposable restore, promote only its sanitized receipt with
 `RESTORE_RECEIPT_PROMOTION_APPROVAL=YES scripts/restore/promote-restore-receipt.sh`.
-The helper accepts only a mode-600 receipt under `/srv/litt-restore-*`, verifies
+The helper accepts only a mode-600 receipt under the exact `/srv/litt-restore/restore-receipts/` root, verifies
 RPO/RTO and `secrets_included=false`, and atomically writes the canonical
 `/srv/litt-data/state/restore-receipt.json`; it never copies credentials or
 customer content.

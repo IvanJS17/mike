@@ -8,7 +8,12 @@ umask 077
 : "${LOAD_BASE_URL:?set LOAD_BASE_URL to the private staging URL}"
 : "${LOAD_USERS_FILE:?set LOAD_USERS_FILE to the mode-600 four-user fixture}"
 : "${LOAD_REPORT_PATH:?set LOAD_REPORT_PATH to the evidence JSON path}"
-: "${LOAD_METRICS_FILE:?set LOAD_METRICS_FILE to the sanitized host metrics JSON}"
+: "${LOAD_COMPOSE_FILE:?set LOAD_COMPOSE_FILE to compose.prod.yml}"
+: "${LOAD_COMPOSE_ENV_FILE:?set LOAD_COMPOSE_ENV_FILE to the disposable mode-600 env file}"
+: "${LOAD_DOCKER_CONTEXT:?set LOAD_DOCKER_CONTEXT to the versioned disposable context}"
+: "${LOAD_PROJECT_NAME:?set LOAD_PROJECT_NAME to the versioned disposable project}"
+: "${LOAD_DATA_ROOT:?set LOAD_DATA_ROOT to the encrypted disposable data root}"
+: "${LITT_APP_ROOT:?set LITT_APP_ROOT to the reviewed checkout}"
 : "${LOAD_UPLOAD_PATH:?set LOAD_UPLOAD_PATH to the authorized 10 MB upload route}"
 : "${LOAD_DOWNLOAD_PATH_TEMPLATE:?set LOAD_DOWNLOAD_PATH_TEMPLATE to the authorized download path template}"
 : "${LOAD_BATCH_ENDPOINT:?set LOAD_BATCH_ENDPOINT to the CI batch route}"
@@ -23,13 +28,13 @@ umask 077
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 target_manifest="$repo_root/infra/production/disposable-targets.json"
-jq -e --arg id "$LOAD_DISPOSABLE_TARGET_ID" --arg host "$LOAD_ALLOWED_HOST" --arg url "$LOAD_BASE_URL" \
-  '(.load.target_id == $id) and (.load.host == $host) and (.load.base_url == $url)' "$target_manifest" >/dev/null || { printf 'Load target is not the versioned disposable target.\n' >&2; exit 1; }
+jq -e --arg id "$LOAD_DISPOSABLE_TARGET_ID" --arg host "$LOAD_ALLOWED_HOST" --arg url "$LOAD_BASE_URL" --arg context "$LOAD_DOCKER_CONTEXT" --arg project "$LOAD_PROJECT_NAME" --arg data_root "$LOAD_DATA_ROOT" \
+  '(.load.target_id == $id) and (.load.host == $host) and (.load.base_url == $url) and (.load.docker_context == $context) and (.load.project == $project) and (.load.data_root == $data_root)' "$target_manifest" >/dev/null || { printf 'Load target is not the versioned disposable target.\n' >&2; exit 1; }
 
 [[ "$LOAD_APPROVAL" == "YES" ]] || { printf 'Synthetic load approval is required.\n' >&2; exit 2; }
 [[ "$(stat -c '%a' "$LOAD_USERS_FILE")" == "600" ]] || { printf 'User fixture must be mode 600.\n' >&2; exit 1; }
-[[ "$(stat -c '%a' "$LOAD_METRICS_FILE")" == "600" ]] || { printf 'Metrics fixture must be mode 600.\n' >&2; exit 1; }
-jq -e --arg id "$LOAD_DISPOSABLE_TARGET_ID" --arg url "$LOAD_BASE_URL" '(.target_id == $id) and (.target_url == $url) and ((.collected_at | fromdateiso8601) > (now - 1800))' "$LOAD_METRICS_FILE" >/dev/null || { printf 'Metrics fixture is not fresh/bound to the load target.\n' >&2; exit 1; }
+[[ "$(realpath -e "$LOAD_COMPOSE_FILE")" == "$repo_root/compose.prod.yml" && "$(realpath -e "$LOAD_COMPOSE_ENV_FILE")" == "$(realpath -e "$LOAD_DATA_ROOT")/secrets/compose.env" ]] || { printf 'Load Compose paths are not canonical.\n' >&2; exit 1; }
+[[ "$(stat -c '%a' "$LOAD_COMPOSE_ENV_FILE")" == "600" ]] || { printf 'Load Compose env must be mode 600.\n' >&2; exit 1; }
 [[ "$LOAD_BASE_URL" =~ ^https:// ]] || { printf 'Load target must use HTTPS.\n' >&2; exit 1; }
 base_host=${LOAD_BASE_URL#https://}; base_host=${base_host%%/*}
 [[ "$base_host" == "$LOAD_ALLOWED_HOST" ]] || { printf 'Load target host is not approved.\n' >&2; exit 1; }
@@ -52,7 +57,7 @@ validate_route() {
   route_pattern='^/api/[A-Za-z0-9._/?=&%-]+$'
   [[ "$route" =~ $route_pattern && "$route" != *..* ]] || return 1
   case "$route" in
-    /api/projects*|/api/single-documents*|/api/chat*|/api/workflows*|/api/download*|/api/test/load*) return 0 ;;
+    /api/projects*|/api/test/load/workspaces*|/api/test/load/matters*|/api/single-documents*|/api/chat*|/api/workflows*|/api/download*|/api/test/load*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -66,7 +71,9 @@ runtime_dir=$(mktemp -d)
 requests_csv="$runtime_dir/requests.csv"
 upload_body="$runtime_dir/upload-10mb.pdf"
 pending_file="$runtime_dir/pending-resources.tsv"
-trap - EXIT
+metrics_ndjson="$runtime_dir/metrics.ndjson"
+metrics_collector="$repo_root/scripts/load/collect-disposable-metrics.sh"
+[[ -x "$metrics_collector" ]] || { printf 'Approved disposable metrics collector is missing.\n' >&2; exit 1; }
 printf 'timestamp,user,operation,status,time_seconds\n' >"$requests_csv"
 printf '%s\n' '%PDF-1.4' '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj' '2 0 obj << /Type /Pages /Kids [] /Count 0 >> endobj' 'trailer << /Root 1 0 R >>' '%%EOF' >"$upload_body"
 truncate -s 10485760 "$upload_body"
@@ -108,16 +115,41 @@ request() {
   fi
 }
 
+collect_metrics_sample() {
+  LOAD_DOCKER_CONTEXT="$LOAD_DOCKER_CONTEXT" \
+  LOAD_COMPOSE_FILE="$LOAD_COMPOSE_FILE" \
+  LOAD_COMPOSE_ENV_FILE="$LOAD_COMPOSE_ENV_FILE" \
+  LOAD_PROJECT_NAME="$LOAD_PROJECT_NAME" \
+  LOAD_DATA_ROOT="$LOAD_DATA_ROOT" \
+  LOAD_TARGET_ID="$LOAD_DISPOSABLE_TARGET_ID" \
+  LOAD_BASE_URL="$LOAD_BASE_URL" \
+  LOAD_ALLOWED_HOST="$LOAD_ALLOWED_HOST" \
+  LITT_APP_ROOT="$LITT_APP_ROOT" \
+    "$metrics_collector" >>"$metrics_ndjson"
+}
+
 cleanup_resources() {
-  local status=$? user project document token
+  local status=$? user kind resource token
   if [[ -f "$pending_file" ]]; then
-    while IFS=$'\t' read -r user project document; do
-      [[ -n "$user" ]] || continue
+    while IFS=$'\t' read -r user kind resource; do
+      [[ -n "$user" && -n "$kind" && -n "$resource" ]] || continue
       token=$(jq -er --arg user "$user" '.[] | select(.id == $user) | .token' "$LOAD_USERS_FILE" 2>/dev/null || true)
       [[ -n "$token" ]] || { status=1; continue; }
-      if [[ -n "$document" ]]; then request "$token" "$user" "cleanup-document" DELETE "/api/single-documents/$document" || status=1; fi
-      if [[ -n "$project" ]]; then request "$token" "$user" "cleanup-project" DELETE "/api/projects/$project" || status=1; fi
+      case "$kind" in
+        workspace) request "$token" "$user" "cleanup-workspace" DELETE "/api/test/load/workspaces/$resource" || status=1 ;;
+        matter) request "$token" "$user" "cleanup-matter" DELETE "/api/test/load/matters/$resource" || status=1 ;;
+        document) request "$token" "$user" "cleanup-document" DELETE "/api/single-documents/$resource" || status=1 ;;
+        *) status=1 ;;
+      esac
     done <"$pending_file"
+  fi
+  if [[ -n "${load_run:-}" ]]; then
+    first_record=$(jq -c '.[0]' "$LOAD_USERS_FILE" 2>/dev/null || true)
+    first_token=$(jq -er '.token' <<<"$first_record" 2>/dev/null || true)
+    first_id=$(jq -er '.id' <<<"$first_record" 2>/dev/null || true)
+    if [[ -n "$first_token" && -n "$first_id" ]]; then
+      request "$first_token" "$first_id" "cleanup-batch" DELETE "/api/test/load/batch/$load_run" || status=1
+    fi
   fi
   rm -rf "$runtime_dir"
   trap - EXIT
@@ -126,11 +158,13 @@ cleanup_resources() {
 trap cleanup_resources EXIT
 
 start=$(date -u +%s)
+load_run="ws2-$start"
 deadline=$((start + duration))
 first_user=$(jq -er '.[0]' "$LOAD_USERS_FILE")
 first_token=$(jq -er '.token' <<<"$first_user")
 first_id=$(jq -er '.id' <<<"$first_user")
-batch_body=$(jq -cn --arg run "ws2-$start" '{documents:100,pages:1000,synthetic:true,load_run:$run}')
+collect_metrics_sample
+batch_body=$(jq -cn --arg run "$load_run" '{documents:100,pages:1000,synthetic:true,load_run:$run}')
 for failure in $(seq 0 9); do
   request "$first_token" "$first_id" "batch-induced-failure-$failure" POST "$LOAD_BATCH_ENDPOINT?induced_failure=$failure" "$batch_body" "" 1
   [[ "$LAST_STATUS" =~ ^5[0-9][0-9]$ ]] || { printf 'Induced failure did not produce a server failure.\n' >&2; exit 1; }
@@ -140,19 +174,20 @@ while (( $(date -u +%s) < deadline )); do
   while IFS= read -r user_record; do
     user=$(jq -er '.id' <<<"$user_record")
     token=$(jq -er '.token' <<<"$user_record")
-    create_body=$(jq -cn --arg run "ws2-$start" --arg user "$user" --arg name "WS2 synthetic $user" '{synthetic:true,load_run:$run,owner:$user,name:$name,practice:"synthetic"}')
+    create_body=$(jq -cn --arg run "$load_run" --arg user "$user" --arg name "WS2 synthetic workspace $user" '{synthetic:true,load_run:$run,owner:$user,name:$name}')
     request "$token" "$user" "create-workspace" POST "$LOAD_WORKSPACE_CREATE_PATH" "$create_body" "$runtime_dir/workspace-$user.json"
     workspace_id=$(jq -er '.id' "$runtime_dir/workspace-$user.json")
-    printf '%s\t%s\t\n' "$user" "$workspace_id" >>"$pending_file"
-    request "$token" "$user" "create-matter" POST "$LOAD_MATTER_CREATE_PATH" "$create_body" "$runtime_dir/matter-$user.json"
+    printf '%s\tworkspace\t%s\n' "$user" "$workspace_id" >>"$pending_file"
+    matter_body=$(jq -cn --arg run "$load_run" --arg workspace "$workspace_id" --arg name "WS2 synthetic matter $user" '{synthetic:true,load_run:$run,workspace_id:$workspace,name:$name}')
+    request "$token" "$user" "create-matter" POST "$LOAD_MATTER_CREATE_PATH" "$matter_body" "$runtime_dir/matter-$user.json"
     matter_id=$(jq -er '.id' "$runtime_dir/matter-$user.json")
-    printf '%s\t%s\t\n' "$user" "$matter_id" >>"$pending_file"
+    printf '%s\tmatter\t%s\n' "$user" "$matter_id" >>"$pending_file"
     request "$token" "$user" "list-workspaces" GET "$LOAD_WORKSPACE_PATH"
     request "$token" "$user" "open-matter" GET "$LOAD_MATTER_PATH"
     upload_response="$runtime_dir/upload-$user.json"
     request "$token" "$user" "upload-10mb" POST "$LOAD_UPLOAD_PATH" "$upload_body" "$upload_response"
     document_id=$(jq -er '.id // .document_id' "$upload_response")
-    printf '%s\t\t%s\n' "$user" "$document_id" >>"$pending_file"
+    printf '%s\tdocument\t%s\n' "$user" "$document_id" >>"$pending_file"
     download_path=$(jq -er '.download_url // .url // empty' "$upload_response" 2>/dev/null || true)
     if [[ -z "$download_path" ]]; then
       download_path=$(printf "$LOAD_DOWNLOAD_PATH_TEMPLATE" "$document_id")
@@ -164,8 +199,8 @@ while (( $(date -u +%s) < deadline )); do
     [[ "$(stat -c '%s' "$downloaded")" == "$(stat -c '%s' "$upload_body")" ]] || { printf 'Downloaded file size differs from 10 MiB fixture.\n' >&2; exit 1; }
     cmp -s "$upload_body" "$downloaded" || { printf 'Downloaded bytes differ from upload fixture.\n' >&2; exit 1; }
     request "$token" "$user" "delete-document" DELETE "/api/single-documents/$document_id"
-    request "$token" "$user" "delete-project" DELETE "/api/projects/$workspace_id"
-    request "$token" "$user" "delete-project" DELETE "/api/projects/$matter_id"
+    request "$token" "$user" "delete-matter" DELETE "/api/test/load/matters/$matter_id"
+    request "$token" "$user" "delete-workspace" DELETE "/api/test/load/workspaces/$workspace_id"
     awk -F '\t' -v user="$user" '$1 != user' "$pending_file" >"$pending_file.next"
     mv -f "$pending_file.next" "$pending_file"
     for route in "${interactive_paths[@]}"; do
@@ -180,11 +215,12 @@ while (( $(date -u +%s) < deadline )); do
       request "$token" "$user" "interactive-${path##*/}" "$method" "$path" "$interactive_body"
     done
   done < <(jq -c '.[]' "$LOAD_USERS_FILE")
+  collect_metrics_sample
   sleep "${LOAD_INTERVAL_SECONDS:-30}"
 done
 
-metrics_json=$(cat "$LOAD_METRICS_FILE")
-jq -e 'all([.ram_percent,.oom_events,.swap_minutes,.disk_percent,.queue_resume_failures,.readiness]; type == "number" and . >= 0)' <<<"$metrics_json" >/dev/null || { printf 'Metrics fixture must contain nonnegative numeric fields.\n' >&2; exit 1; }
+metrics_json=$(python3 -c 'import json,sys; rows=[json.loads(line) for line in open(sys.argv[1]) if line.strip()]; assert rows and len({r["target_id"] for r in rows}) == 1 and len({r["target_url"] for r in rows}) == 1; fields=("ram_percent","oom_events","swap_minutes","disk_percent","queue_resume_failures","p95_ms","five_xx"); print(json.dumps({**{field:max(float(r[field]) for r in rows) for field in fields},"readiness":min(float(r["readiness"]) for r in rows),"samples":len(rows),"target_id":rows[-1]["target_id"],"target_url":rows[-1]["target_url"]}))' "$metrics_ndjson")
+jq -e 'all([.ram_percent,.oom_events,.swap_minutes,.disk_percent,.queue_resume_failures,.readiness]; type == "number" and . >= 0) and (.samples | type == "number" and . >= 2) and (.target_id == $id) and (.target_url == $url)' --arg id "$LOAD_DISPOSABLE_TARGET_ID" --arg url "$LOAD_BASE_URL" <<<"$metrics_json" >/dev/null || { printf 'Collected metrics are incomplete or not bound to the load target.\n' >&2; exit 1; }
 ram_percent=$(jq -er '.ram_percent' <<<"$metrics_json")
 oom_events=$(jq -er '.oom_events' <<<"$metrics_json")
 swap_minutes=$(jq -er '.swap_minutes' <<<"$metrics_json")

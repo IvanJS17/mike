@@ -7,10 +7,20 @@ umask 077
 : "${LITT_DATA_ROOT:?set LITT_DATA_ROOT=/srv/litt-data}"
 : "${RELEASE_SHA:?set RELEASE_SHA to the exact clean checkout commit}"
 : "${MIGRATION_TREE_SHA256:?set MIGRATION_TREE_SHA256 to the reviewed migration tree hash}"
+: "${RECOVERY_SUCCESS_SOURCE:?set RECOVERY_SUCCESS_SOURCE to /srv/litt-data/recovery/sets/<id>/SUCCESS.json}"
+: "${MIGRATION_REHEARSAL_RECEIPT_SOURCE:?set MIGRATION_REHEARSAL_RECEIPT_SOURCE to /srv/litt-rehearsal/state/migration-rehearsal.json}"
 : "${RECOVERY_SUCCESS_FILE:?set RECOVERY_SUCCESS_FILE=/srv/litt-data/state/latest-success.json}"
 : "${MIGRATION_REHEARSAL_RECEIPT_FILE:?set MIGRATION_REHEARSAL_RECEIPT_FILE=/srv/litt-data/state/migration-rehearsal.json}"
 [[ "$MIGRATION_GATE_APPROVAL" == YES ]] || { printf 'Explicit production migration gate approval is required.\n' >&2; exit 2; }
 [[ "$(realpath -m "$LITT_DATA_ROOT")" == "/srv/litt-data" && "$(realpath -m "$RECOVERY_SUCCESS_FILE")" == "/srv/litt-data/state/latest-success.json" && "$(realpath -m "$MIGRATION_REHEARSAL_RECEIPT_FILE")" == "/srv/litt-data/state/migration-rehearsal.json" ]] || { printf 'Migration evidence paths are not canonical.\n' >&2; exit 1; }
+recovery_source_real=$(realpath -e "$RECOVERY_SUCCESS_SOURCE")
+rehearsal_source_real=$(realpath -e "$MIGRATION_REHEARSAL_RECEIPT_SOURCE")
+[[ "$recovery_source_real" == /srv/litt-data/recovery/sets/*/SUCCESS.json && ! -L "$RECOVERY_SUCCESS_SOURCE" && "$rehearsal_source_real" == "/srv/litt-rehearsal/state/migration-rehearsal.json" && ! -L "$MIGRATION_REHEARSAL_RECEIPT_SOURCE" ]] || { printf 'Migration evidence sources are not the approved disposable paths.\n' >&2; exit 1; }
+[[ "$(stat -c '%a' "$RECOVERY_SUCCESS_SOURCE")" == "600" && "$(stat -c '%a' "$MIGRATION_REHEARSAL_RECEIPT_SOURCE")" == "600" ]] || { printf 'Migration evidence sources must be mode 600.\n' >&2; exit 1; }
+mkdir -p "$(dirname "$RECOVERY_SUCCESS_FILE")"
+cp --no-preserve=mode,ownership "$RECOVERY_SUCCESS_SOURCE" "$RECOVERY_SUCCESS_FILE"
+cp --no-preserve=mode,ownership "$MIGRATION_REHEARSAL_RECEIPT_SOURCE" "$MIGRATION_REHEARSAL_RECEIPT_FILE"
+chmod 0600 "$RECOVERY_SUCCESS_FILE" "$MIGRATION_REHEARSAL_RECEIPT_FILE"
 root=$(realpath -e "$LITT_APP_ROOT")
 [[ "$(git -C "$root" rev-parse HEAD)" == "$RELEASE_SHA" && -z "$(git -C "$root" status --porcelain --untracked-files=all)" ]] || { printf 'Migration gate checkout is not the clean release.\n' >&2; exit 1; }
 [[ -f "$RECOVERY_SUCCESS_FILE" && ! -L "$RECOVERY_SUCCESS_FILE" && -f "$MIGRATION_REHEARSAL_RECEIPT_FILE" && ! -L "$MIGRATION_REHEARSAL_RECEIPT_FILE" ]] || { printf 'Migration evidence files are missing.\n' >&2; exit 1; }
@@ -22,8 +32,15 @@ gate="$LITT_DATA_ROOT/state/migration-gate.json"
 tmp=$(mktemp "$gate.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
 jq -n --arg release "$RELEASE_SHA" --arg tree "$MIGRATION_TREE_SHA256" --arg set_id "$recovery_set_id" --arg rehearsal "$rehearsal_sha" \
-  '{approved:true,status:"approved",target_project:"litt-production",docker_context:"litt-production",release_sha:$release,migration_tree_sha256:$tree,recovery_set_id:$set_id,rehearsal_receipt_sha256:$rehearsal}' >"$tmp"
+  '{approved:true,status:"approved",target_id:"production-runtime",target_project:"litt-production",compose_project:"litt-production",docker_context:"litt-production",release_sha:$release,migration_tree_sha256:$tree,recovery_set_id:$set_id,rehearsal_receipt_sha256:$rehearsal}' >"$tmp"
 chmod 0600 "$tmp"
 mv -f "$tmp" "$gate"
+identity="$LITT_DATA_ROOT/state/runtime-identity.json"
+identity_tmp=$(mktemp "$identity.XXXXXX")
+trap 'rm -f "$identity_tmp"' EXIT
+jq -n --arg release "$RELEASE_SHA" --arg tree "$MIGRATION_TREE_SHA256" \
+  '{target_id:"production-runtime",project:"litt-production",compose_project:"litt-production",docker_context:"litt-production",postgres_host:"db",database:"postgres",release_sha:$release,migration_tree_sha256:$tree}' >"$identity_tmp"
+chmod 0644 "$identity_tmp"
+mv -f "$identity_tmp" "$identity"
 trap - EXIT
 printf 'Production migration gate created from verified recovery/rehearsal evidence.\n'

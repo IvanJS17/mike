@@ -3,14 +3,17 @@
     "target_id": "staging-load-disposable",
     "host": "load.litt.example.invalid",
     "base_url": "https://load.litt.example.invalid",
-    "workspace_path": "/api/projects",
-    "matter_path": "/api/projects",
-    "workspace_create_path": "/api/projects",
-    "matter_create_path": "/api/projects",
+    "docker_context": "litt-load-disposable",
+    "project": "litt-load-disposable",
+    "data_root": "/srv/litt-load",
+    "workspace_path": "/api/test/load/workspaces",
+    "matter_path": "/api/test/load/matters",
+    "workspace_create_path": "/api/test/load/workspaces",
+    "matter_create_path": "/api/test/load/matters",
     "upload_path": "/api/single-documents",
     "download_prefix": "/api/download",
     "batch_endpoint": "/api/test/load/batch",
-    "interactive_paths": ["POST:/api/chat", "POST:/api/workflows", "GET:/api/projects"]
+    "interactive_paths": ["POST:/api/chat", "POST:/api/workflows", "GET:/api/test/load/workspaces"]
   },
   "restore": {
     "target_id": "restore-disposable",
@@ -30,6 +33,14 @@
     "root": "/srv/litt-rehearsal",
     "docker_context": "litt-rehearsal-disposable",
     "project": "litt-rehearsal-disposable"
+  },
+  "production_migration": {
+    "target_id": "production-runtime",
+    "root": "/srv/litt-data",
+    "docker_context": "litt-production",
+    "project": "litt-production",
+    "postgres_host": "db",
+    "database": "postgres"
   },
   "probe": {
     "target_id": "sse-probe-disposable",

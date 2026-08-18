@@ -18,8 +18,8 @@ only after recording the owner, window, source IP, and cleanup plan.
 - 100 documents total;
 - 1,000 pages total;
 - 10 induced failures followed by an idempotent resume;
-- sanitized host metrics fixture for RAM, OOM, swap, disk, queue resume, and
-  readiness.
+- collector versionado de muestras agregadas para RAM, OOM, swap, disk, cola,
+  tiempos y readiness; no se acepta un JSON de métricas suministrado por el operador.
 
 Run:
 
@@ -29,12 +29,14 @@ scripts/load/run-ws2-load.sh
 
 The disposable backend must set `SYNTHETIC_LOAD_ENABLED=true`; the production
 Compose environment never enables this seam. The runner uses the exact routes and three interactive paths in
-`infra/production/disposable-targets.json`: projects for workspace/matter
-creation/listing, `/api/single-documents` for upload, `/api/download` for
-backend downloads, `/api/test/load/batch` for the gated synthetic seam, and
-`POST:/api/chat`, `POST:/api/workflows`, `GET:/api/projects` for interactive paths.
-The user fixture and metrics fixture are mode-600 files outside Git. The report
-contains only counts, timings, status codes, thresholds, and image/version
+`infra/production/disposable-targets.json`: `/api/test/load/workspaces` and
+`/api/test/load/matters` create/list the real tenancy rows, `/api/single-documents`
+for upload, the user-bound `/api/download/user/<token>` URL returned by upload,
+`/api/test/load/batch` for the durable synthetic queue ledger, and
+`POST:/api/chat`, `POST:/api/workflows`, `GET:/api/test/load/workspaces` for
+interactive paths. The fixture contains only four synthetic users and is mode-600
+outside Git; metrics are collected by `scripts/load/collect-disposable-metrics.sh`.
+The report contains only counts, timings, status codes, thresholds, and image/version
 references. It must not contain user tokens or document content.
 
 ## Passing thresholds
@@ -55,6 +57,6 @@ B remains red and the architecture decision returns to Iván.
 ## Evidence and cleanup
 
 Preserve the JSON report, timestamps, image digests, migration version, and the
-sanitized metrics input. Stop the runner, delete only its synthetic fixture and
-its disposable queue rows, and verify no load process or listener remains. Do
-not stop the governed local demo stack or remove its volumes.
+collector samples. The runner deletes its four real tenancy rows, uploaded
+objects, and `synthetic_load_runs` row in its cleanup trap; after interruption,
+run `REAPER_APPROVAL=YES REAPER_TARGET_KIND=load REAPER_TARGET_ID=staging-load-disposable REAPER_DOCKER_CONTEXT=litt-load-disposable REAPER_PROJECT=litt-load-disposable REAPER_COMPOSE_ENV_FILE=/srv/litt-load/secrets/compose.env LITT_APP_ROOT=/opt/litt scripts/restore/reap-disposable-target.sh`, then verify no load process, container, volume, network, or listener remains. Do not stop the governed local demo stack or remove its volumes.

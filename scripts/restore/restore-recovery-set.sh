@@ -33,6 +33,7 @@ restore_override="$repo_root/infra/production/compose.restore.yml"
 : "${RESTORE_CA_CERT_SHA256:?set RESTORE_CA_CERT_SHA256 to the target-bound CA fingerprint}"
 
 target_manifest="$repo_root/infra/production/disposable-targets.json"
+target_manifest_sha256=$(sha256sum "$target_manifest" | cut -d' ' -f1)
 jq -e --arg id "$RESTORE_TARGET_ID" --arg root "/srv/litt-restore" --arg context "$RESTORE_DOCKER_CONTEXT" --arg project "$RESTORE_PROJECT_NAME" --arg bucket "$RESTORE_OBJECT_BUCKET" --arg auth "$RESTORE_AUTHENTICATED_PATH" --arg ca "$RESTORE_CA_CERT_SHA256" --arg public "$RESTORE_PUBLIC_BASE_URL" --arg public_host "$RESTORE_PUBLIC_ALLOWED_HOST" --arg object "$RESTORE_OBJECT_ENDPOINT" --arg object_host "$RESTORE_OBJECT_ALLOWED_HOST" \
   '(.restore.target_id == $id) and (.restore.root == $root) and (.restore.docker_context == $context) and (.restore.project == $project) and (.restore.bucket == $bucket) and (.restore.authenticated_path == $auth) and (.restore.ca_sha256 == $ca) and (.restore.public_base_url == $public) and (.restore.public_host == $public_host) and (.restore.object_endpoint == $object) and (.restore.object_host == $object_host)' "$target_manifest" >/dev/null || { printf 'Restore target is not the versioned disposable target.\n' >&2; exit 1; }
 restore_root_real=$(realpath -e "$RESTORE_ROOT")
@@ -77,11 +78,27 @@ jq -e '
 runtime_dir=""
 compose_started=0
 object_mutated=0
+cleanup_compose() {
+  local remaining_volumes remaining_networks remaining_containers
+  "${compose[@]}" down --remove-orphans >/dev/null
+  remaining_containers=$("${docker_prefix[@]}" ps -aq --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")
+  [[ -z "$remaining_containers" ]] || return 1
+  remaining_volumes=$("${docker_prefix[@]}" volume ls -q --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")
+  if [[ -n "$remaining_volumes" ]]; then
+    "${docker_prefix[@]}" volume rm $remaining_volumes >/dev/null
+  fi
+  remaining_networks=$("${docker_prefix[@]}" network ls -q --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")
+  if [[ -n "$remaining_networks" ]]; then
+    "${docker_prefix[@]}" network rm $remaining_networks >/dev/null
+  fi
+  [[ -z "$("${docker_prefix[@]}" volume ls -q --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")" ]] &&
+    [[ -z "$("${docker_prefix[@]}" network ls -q --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")" ]]
+}
 cleanup() {
   local status=$?
   if (( compose_started == 1 )); then
-    "${compose[@]}" down --remove-orphans >/dev/null 2>&1 || status=1
-    [[ -z "$("${docker_prefix[@]}" ps -aq --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")" ]] || status=1
+    cleanup_compose || status=1
+    compose_started=0
   fi
   if (( object_mutated == 1 )); then
     bucket_cleanup || status=1
@@ -307,8 +324,7 @@ if (( object_mutated == 1 )); then
   object_mutated=0
 fi
 if (( compose_started == 1 )); then
-  "${compose[@]}" down --remove-orphans >/dev/null
-  [[ -z "$("${docker_prefix[@]}" ps -aq --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")" ]]
+  cleanup_compose
   compose_started=0
 fi
 receipt="$RESTORE_ROOT/restore-receipts/$set_id-$(date -u +%Y%m%dT%H%M%SZ).json"
@@ -320,11 +336,17 @@ jq -n \
   --arg migration_version "$migration_version" \
   --arg restored_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg project "$RESTORE_PROJECT_NAME" \
+  --arg target_id "$RESTORE_TARGET_ID" \
+  --arg target_manifest_sha256 "$target_manifest_sha256" \
+  --arg docker_context "$RESTORE_DOCKER_CONTEXT" \
+  --arg object_endpoint "$RESTORE_OBJECT_ENDPOINT" \
+  --arg object_bucket "$RESTORE_OBJECT_BUCKET" \
+  --argjson cleanup_verified true \
   --argjson rpo_seconds "$rpo_seconds" \
   --argjson rto_seconds "$rto_seconds" \
   --argjson object_count "$restored_objects" \
   --argjson marker_count "$restored_markers" \
-  '{status:"success",set_id:$set_id,release_sha:$release_sha,migration_version:$migration_version,restored_at:$restored_at,disposable_project:$project,rpo_seconds:$rpo_seconds,rto_seconds:$rto_seconds,restored_object_count:$object_count,restored_delete_marker_count:$marker_count,readiness:"green",secrets_included:false}' \
+  '{status:"success",set_id:$set_id,release_sha:$release_sha,migration_version:$migration_version,restored_at:$restored_at,disposable_project:$project,target_id:$target_id,target_manifest_sha256:$target_manifest_sha256,docker_context:$docker_context,object_endpoint:$object_endpoint,object_bucket:$object_bucket,cleanup_verified:$cleanup_verified,rpo_seconds:$rpo_seconds,rto_seconds:$rto_seconds,restored_object_count:$object_count,restored_delete_marker_count:$marker_count,readiness:"green",secrets_included:false}' \
   >"$receipt"
 chmod 0600 "$receipt"
 printf 'Restore completed on disposable project %s: RPO=%ss RTO=%ss.\n' "$RESTORE_PROJECT_NAME" "$rpo_seconds" "$rto_seconds"

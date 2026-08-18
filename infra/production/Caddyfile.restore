@@ -8,6 +8,11 @@ restore.litt.example.invalid:443 {
         uri strip_prefix /api
         reverse_proxy backend:3001
     }
+    @downloads path /download /download/*
+    handle @downloads {
+        reverse_proxy backend:3001
+    }
+
     @supabase_auth path /supabase/auth/v1 /supabase/auth/v1/*
     handle @supabase_auth {
         uri strip_prefix /supabase/auth/v1

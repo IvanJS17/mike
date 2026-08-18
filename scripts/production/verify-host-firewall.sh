@@ -19,6 +19,21 @@ from pathlib import Path
 text = Path(sys.argv[1]).read_text()
 ipv4, ipv6, udp_port = sys.argv[2:]
 
+for raw_line in text.splitlines():
+    line = raw_line.split("#", 1)[0].strip()
+    if "accept" not in line or "dport" not in line:
+        continue
+    values = re.findall(r"dport\s+\{([^}]+)\}|dport\s+(\d+)", line)
+    for group, scalar in values:
+        ports = [int(x) for x in re.findall(r"\d+", group if group else scalar)]
+        protocol = "udp" if re.search(r"\budp\b", line) else "tcp"
+        allowed = {22, 80, 443} if protocol == "tcp" else {int(udp_port)}
+        if any(port not in allowed for port in ports):
+            raise SystemExit(f"unapproved {protocol} accept port in nftables ruleset")
+all_ssh = [line.strip() for line in text.splitlines() if re.search(r"tcp\s+dport\s+22\s+accept", line)]
+if len(all_ssh) != 2 or sum(f"ip saddr {ipv4}" in line for line in all_ssh) != 1 or sum(f"ip6 saddr {ipv6}" in line for line in all_ssh) != 1:
+    raise SystemExit("ruleset contains an unapproved SSH accept rule")
+
 def block_after(pattern: str, source: str) -> str:
     match = re.search(pattern, source)
     if not match:

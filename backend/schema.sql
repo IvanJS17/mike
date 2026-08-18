@@ -412,30 +412,15 @@ create table if not exists public.hidden_workflows (
 create index if not exists idx_hidden_workflows_user
   on public.hidden_workflows(user_id);
 
-create table if not exists public.workflow_open_source_submissions (
+create table if not exists public.workflow_shares (
   id uuid primary key default gen_random_uuid(),
   workflow_id uuid not null references public.workflows(id) on delete cascade,
-  submitted_by_user_id text not null,
-  submitter_email text,
-  submitter_name text,
-  contributor_mode text not null default 'anonymous',
-  status text not null default 'pending',
-  snapshot jsonb not null,
-  submitted_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  reviewed_at timestamptz,
-  review_notes text,
-  constraint workflow_open_source_submissions_status_check check (status in ('pending', 'approved', 'rejected')),
-  constraint workflow_open_source_submissions_contributor_mode_check check (contributor_mode in ('named', 'anonymous'))
+  shared_with_email text not null,
+  shared_by_user_id uuid references auth.users(id) on delete cascade,
+  allow_edit boolean not null default false,
+  created_at timestamptz not null default now(),
+  unique (workflow_id, shared_with_email)
 );
-create unique index if not exists idx_workflow_open_source_submissions_pending
-  on public.workflow_open_source_submissions(workflow_id, submitted_by_user_id) where status = 'pending';
-create index if not exists idx_workflow_open_source_submissions_reviewer_queue
-  on public.workflow_open_source_submissions(status, submitted_at desc);
-create index if not exists idx_workflow_open_source_submissions_submitter
-  on public.workflow_open_source_submissions(submitted_by_user_id, submitted_at desc);
-alter table public.workflow_open_source_submissions enable row level security;
-revoke all privileges on table public.workflow_open_source_submissions from anon, authenticated;
 
 create or replace function public.get_workflows_overview(
   p_user_id text,
@@ -1364,20 +1349,3 @@ create trigger audit_events_insert_only_trigger
 -- Direct browser roles get nothing; the backend writes via service_role.
 revoke all on public.audit_events from anon, authenticated;
 grant insert, select on public.audit_events to service_role;
-
--- Landing-page contact submissions (service_role only).
-create table if not exists public.contact_messages (
-  id uuid primary key default gen_random_uuid(),
-  name text,
-  email text not null,
-  subject text,
-  message text not null,
-  source text not null default 'landing',
-  user_agent text,
-  ip_hash text,
-  created_at timestamptz not null default now(),
-  responded_at timestamptz
-);
-create index if not exists idx_contact_messages_created_at on public.contact_messages(created_at desc);
-alter table public.contact_messages enable row level security;
-revoke all privileges on table public.contact_messages from anon, authenticated;

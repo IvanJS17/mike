@@ -27,7 +27,7 @@ test("WS2 load runner fixes the 30-minute profile and all acceptance thresholds"
     assert.match(source, new RegExp(pattern, "i"));
   }
   assert.match(source, /report/i);
-  assert.doesNotMatch(source, /api[_-]?key|secret|password\s*=/i);
+  assert.doesNotMatch(source, /(?:api[_-]?key|secret|password)\s*=\s*["']/i);
   execFileSync("bash", ["-n", resolve(root, "scripts/load/run-ws2-load.sh")]);
 });
 

@@ -1458,6 +1458,7 @@ export async function handleDocumentUpload(
           size_bytes: content.byteLength,
           page_count: pageCount,
           active_version_number: 1,
+          download_url: buildUserDownloadUrl(key, filename, userId),
         }
       : updated;
     await recordAuditEvent(db, {
