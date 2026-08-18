@@ -1119,8 +1119,18 @@ stable
 security definer
 set search_path = public
 as $$
-  select role from public.matter_memberships
-  where matter_id = p_matter and user_id = auth.uid()
+  -- Matter access requires both an explicit matter assignment and an active
+  -- organization membership. This makes organization revocation effective
+  -- immediately even if a descendant matter_memberships row remains.
+  select mm.role
+  from public.matter_memberships mm
+  join public.matters m on m.id = mm.matter_id
+  join public.workspaces w on w.id = m.workspace_id
+  join public.organization_memberships om
+    on om.organization_id = w.organization_id
+   and om.user_id = auth.uid()
+  where mm.matter_id = p_matter
+    and mm.user_id = auth.uid()
   limit 1;
 $$;
 
@@ -1189,14 +1199,7 @@ create policy workspace_memberships_delete_admin
 drop policy if exists matters_select_member on public.matters;
 create policy matters_select_member
   on public.matters for select
-  using (
-    public.matter_role(id) is not null
-    or exists (
-      select 1 from public.workspaces w
-      where w.id = matters.workspace_id
-        and public.is_organization_member(w.organization_id)
-    )
-  );
+  using (public.matter_role(id) is not null);
 
 drop policy if exists matters_update_member on public.matters;
 create policy matters_update_member
@@ -1206,16 +1209,7 @@ create policy matters_update_member
 drop policy if exists matter_memberships_select_member on public.matter_memberships;
 create policy matter_memberships_select_member
   on public.matter_memberships for select
-  using (
-    user_id = auth.uid()
-    or public.matter_role(matter_id) is not null
-    or exists (
-      select 1 from public.matters m
-      join public.workspaces w on w.id = m.workspace_id
-      where m.id = matter_memberships.matter_id
-        and public.is_organization_member(w.organization_id)
-    )
-  );
+  using (public.matter_role(matter_id) is not null);
 
 drop policy if exists matter_memberships_insert_owner on public.matter_memberships;
 create policy matter_memberships_insert_owner
