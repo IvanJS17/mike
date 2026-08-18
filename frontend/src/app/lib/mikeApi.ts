@@ -860,6 +860,18 @@ export async function getDocumentUrl(
     return apiRequest(`/single-documents/${documentId}/url${qs}`);
 }
 
+export async function downloadDocumentFile(
+    documentId: string,
+    versionId?: string | null,
+): Promise<{ blob: Blob; filename: string }> {
+    const grant = await getDocumentUrl(documentId, versionId);
+    const response = await apiBlobRequest(grant.url);
+    return {
+        blob: response.blob,
+        filename: response.filename ?? grant.filename,
+    };
+}
+
 export async function downloadDocumentsZip(
     documentIds: string[],
 ): Promise<Blob> {

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
@@ -5,7 +6,6 @@ import {
   buildContentDisposition,
   downloadFile,
   deleteFile,
-  getSignedUrl,
   storageKey,
   uploadFile,
   versionStorageKey,
@@ -15,7 +15,7 @@ import {
   extractTrackedChangeIds,
   resolveTrackedChange,
 } from "../lib/docxTrackedChanges";
-import { buildDownloadUrl } from "../lib/downloadTokens";
+import { createDownloadUrl } from "../lib/downloadTokens";
 import {
   attachActiveVersionPaths,
   attachLatestVersionNumbers,
@@ -267,14 +267,13 @@ documentsRouter.get("/:documentId/url", requireAuth, async (req, res) => {
     active.version_number,
     active.source === "assistant_edit",
   );
-  const url = await getSignedUrl(
-    active.storage_path,
-    3600,
-    downloadFilename,
-  );
-  if (!url)
-    return void res.status(503).json({ detail: "Storage not configured" });
-
+  const url = await createDownloadUrl(db, {
+    documentId,
+    versionId: active.id,
+    storagePath: active.storage_path,
+    filename: downloadFilename,
+    userId,
+  });
   res.json({
     url,
     document_id: documentId,
@@ -1134,14 +1133,17 @@ async function handleEditResolution(
       status: edit.status,
       version_id: doc.current_version_id ?? null,
       download_url: activeForResolved
-        ? buildDownloadUrl(
-            activeForResolved.storage_path,
-            downloadFilenameForVersion(
+        ? await createDownloadUrl(db, {
+            documentId,
+            versionId: activeForResolved.id,
+            storagePath: activeForResolved.storage_path,
+            filename: downloadFilenameForVersion(
               activeForResolved.filename,
               activeForResolved.version_number,
               activeForResolved.source === "assistant_edit",
             ),
-          )
+            userId,
+          })
         : null,
       remaining_pending: 0,
     };
@@ -1206,14 +1208,19 @@ async function handleEditResolution(
     const payload = {
       ok: true,
       version_id: doc.current_version_id,
-      download_url: buildDownloadUrl(
-        latestPath,
-        downloadFilenameForVersion(
-          active?.filename,
-          active?.version_number ?? null,
-          active?.source === "assistant_edit",
-        ),
-      ),
+      download_url: active
+        ? await createDownloadUrl(db, {
+            documentId,
+            versionId: active.id,
+            storagePath: active.storage_path,
+            filename: downloadFilenameForVersion(
+              active.filename,
+              active.version_number,
+              active.source === "assistant_edit",
+            ),
+            userId,
+          })
+        : null,
       remaining_pending: 0,
     };
     devLog(`[edit-resolution] returning not-found payload`, payload);
@@ -1278,14 +1285,19 @@ async function handleEditResolution(
   const payload = {
     ok: true,
     version_id: doc.current_version_id,
-    download_url: buildDownloadUrl(
-      latestPath,
-      downloadFilenameForVersion(
-        active?.filename,
-        active?.version_number ?? null,
-        active?.source === "assistant_edit",
-      ),
-    ),
+    download_url: active
+      ? await createDownloadUrl(db, {
+          documentId,
+          versionId: active.id,
+          storagePath: active.storage_path,
+          filename: downloadFilenameForVersion(
+            active.filename,
+            active.version_number,
+            active.source === "assistant_edit",
+          ),
+          userId,
+        })
+      : null,
     remaining_pending: remainingPending ?? 0,
   };
   devLog(`[edit-resolution] returning success payload`, payload);
@@ -1317,6 +1329,7 @@ export async function handleDocumentUpload(
 ) {
   const file = req.file;
   if (!file) return void res.status(400).json({ detail: "file is required" });
+  const correlationId = randomUUID();
 
   const filename = file.originalname;
   const suffix = filename.includes(".")
@@ -1466,7 +1479,13 @@ export async function handleDocumentUpload(
     await recordAuditEvent(db, {
       actorUserId: userId,
       eventType: "document.uploaded",
-      eventDetail: { document_id: docId, filename },
+      eventDetail: {
+        project_id: projectId,
+        document_id: docId,
+        document_version_id: versionRow.id,
+        result: "success",
+        correlation_id: correlationId,
+      },
     });
 
     return void res.status(201).json(responseDoc);

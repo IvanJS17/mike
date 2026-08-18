@@ -52,6 +52,7 @@ import {
     getApiKeyStatus,
     getChat,
     getDocumentUrl,
+    downloadDocumentFile,
     getLibrary,
     getMcpConnector,
     getModelCatalog,
@@ -1064,6 +1065,37 @@ describe("query and payload defaults", () => {
         expect(lastFetchCall().url).toBe(
             "http://localhost:3001/single-documents/d1/url?version_id=v%201",
         );
+    });
+
+    it("downloads a one-time grant with the current bearer token", async () => {
+        fetchMock
+            .mockResolvedValueOnce(
+                jsonResponse({
+                    url: "/download/opaque-grant",
+                    filename: "contract.pdf",
+                    version_id: "v1",
+                }),
+            )
+            .mockResolvedValueOnce(
+                new Response(new Uint8Array([1, 2, 3]), {
+                    status: 200,
+                    headers: {
+                        "Content-Type": "application/pdf",
+                        "Content-Disposition": 'attachment; filename="contract.pdf"',
+                    },
+                }),
+            );
+
+        const result = await downloadDocumentFile("d1", "v1");
+
+        expect(result.filename).toBe("contract.pdf");
+        expect(result.blob.size).toBe(3);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        const second = fetchMock.mock.calls[1];
+        expect(second[0]).toBe("http://localhost:3001/download/opaque-grant");
+        expect((second[1] as RequestInit).headers).toMatchObject({
+            Authorization: "Bearer token-123",
+        });
     });
 
     it("createChat pins the exact governed route", async () => {

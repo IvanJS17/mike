@@ -10,7 +10,7 @@ import {
   extractDocxBodyText,
   type EditInput,
 } from "../../docxTrackedChanges";
-import { buildDownloadUrl } from "../../downloadTokens";
+import { createDownloadUrl } from "../../downloadTokens";
 import {
   contentSha256,
   loadActiveVersion,
@@ -524,7 +524,6 @@ export async function generateDocx(
       buf.buffer as ArrayBuffer,
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     );
-    const downloadUrl = buildDownloadUrl(key, filename);
 
     // Persist to DB so generated docs are first-class documents:
     // openable in the DocPanel and editable via edit_document. In
@@ -568,6 +567,13 @@ export async function generateDocx(
       };
     }
     const versionId = versionRow.id as string;
+    const downloadUrl = await createDownloadUrl(db, {
+      documentId,
+      versionId,
+      storagePath: key,
+      filename,
+      userId,
+    });
 
     await db
       .from("documents")
@@ -981,7 +987,6 @@ async function persistGeneratedFile(params: {
     }
   }
 
-  const downloadUrl = buildDownloadUrl(key, filename);
   const { data: docRow, error: docErr } = await db
     .from("documents")
     .insert({
@@ -1020,6 +1025,13 @@ async function persistGeneratedFile(params: {
     };
   }
   const versionId = versionRow.id as string;
+  const downloadUrl = await createDownloadUrl(db, {
+    documentId,
+    versionId,
+    storagePath: key,
+    filename,
+    userId,
+  });
 
   await db
     .from("documents")
@@ -1331,10 +1343,14 @@ export async function runEditDocument(params: {
     },
   );
 
-  // Persistent, non-expiring permalink. The backend streams fresh bytes
-  // on each request, so this URL stays valid as long as the file exists.
   const resolvedFilename = versionFilename.trim() || "Untitled document.docx";
-  const permalink = buildDownloadUrl(newPath, resolvedFilename);
+  const permalink = await createDownloadUrl(db, {
+    documentId,
+    versionId: versionRowId,
+    storagePath: newPath,
+    filename: resolvedFilename,
+    userId,
+  });
 
   return {
     ok: true,

@@ -24,7 +24,7 @@ const maybeDescribe =
 // returns an error (no rows), which never counts as a leak.
 const PUBLIC_TABLES = [
     "chat_messages", "chats", "document_edits",
-    "document_versions", "documents", "hidden_workflows", "library_folders",
+    "document_versions", "document_download_grants", "documents", "hidden_workflows", "library_folders",
     "project_subfolders", "projects", "tabular_cells",
     "tabular_review_chat_messages", "tabular_review_chats", "tabular_reviews",
     "user_api_keys", "user_mcp_connector_tools", "user_mcp_connectors",
