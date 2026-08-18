@@ -5,7 +5,7 @@ export const syntheticLoadRouter = Router();
 const resumedRuns = new Set<string>();
 
 syntheticLoadRouter.use((req, res, next) => {
-  if (process.env.SYNTHETIC_LOAD_ENABLED !== "true") {
+  if (process.env.NODE_ENV === "production" || process.env.SYNTHETIC_LOAD_ENABLED !== "true") {
     res.status(404).json({ detail: "Synthetic load seam is disabled" });
     return;
   }

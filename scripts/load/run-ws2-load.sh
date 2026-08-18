@@ -174,7 +174,7 @@ while (( $(date -u +%s) < deadline )); do
       validate_route "$path" || { printf 'Interactive route is outside the immutable synthetic allowlist.\n' >&2; exit 1; }
       case "$path" in
         /api/chat*) interactive_body=$(jq -cn --arg text "WS2 synthetic chat $start" '{messages:[{role:"user",content:$text}]}') ;;
-        /api/workflows*) interactive_body=$(jq -cn --arg title "WS2 synthetic workflow" '{metadata:{title:$title,type:"synthetic"}}') ;;
+        /api/workflows*) interactive_body=$(jq -cn --arg title "WS2 synthetic workflow" '{metadata:{title:$title,type:"assistant"}}') ;;
         *) interactive_body="" ;;
       esac
       request "$token" "$user" "interactive-${path##*/}" "$method" "$path" "$interactive_body"

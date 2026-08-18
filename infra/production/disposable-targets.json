@@ -22,7 +22,8 @@
     "docker_context": "litt-restore-disposable",
     "project": "litt-restore-disposable",
     "bucket": "litt-restore-disposable",
-    "authenticated_path": "/api/projects"
+    "authenticated_path": "/api/projects",
+    "ca_sha256": "REPLACE_WITH_DISPOSABLE_CA_SHA256"
   },
   "migration": {
     "target_id": "migration-disposable",

@@ -23,6 +23,10 @@ else
   printf 'Migration project is not an approved target.\n' >&2
   exit 1
 fi
+if [[ "$MIGRATION_TARGET_PROJECT" == "litt-production" && "$MIGRATION_MODE" == "fresh" ]]; then
+  printf 'Fresh schema migration is forbidden against production.\n' >&2
+  exit 1
+fi
 [[ "$POSTGRES_USER" == postgres && "$POSTGRES_DB" == postgres ]] || { printf 'Migrations require canonical postgres database.\n' >&2; exit 1; }
 [[ -f "$MIGRATION_GATE_FILE" && ! -L "$MIGRATION_GATE_FILE" ]] || { printf 'Migration gate receipt is missing.\n' >&2; exit 1; }
 actual_tree_sha=$(cd /opt/litt/migrations && find . -type f -name '*.sql' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)

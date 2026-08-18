@@ -35,10 +35,14 @@ Before a production migration:
    `infra/production/disposable-targets.json`; it applies fresh schema and then
    all migrations a second time to exercise idempotency and writes a release/tree
    bound rehearsal receipt;
-6. production migration invocation must provide the canonical migration gate,
+6. After a complete recovery set and successful disposable rehearsal, run
+   `MIGRATION_GATE_APPROVAL=YES scripts/migrations/create-production-migration-gate.sh`.
+   It verifies the canonical recovery SUCCESS marker, rehearsal receipt, release
+   SHA, and migration-tree hash before writing the mode-600 production gate.
+7. production migration invocation must provide the canonical migration gate,
    recovery-set ID, rehearsal receipt hash, release SHA, and migration-tree hash;
-7. run readiness, the targeted authorization suite, and the smoke workflow;
-8. preserve the sanitized receipt with image digests and migration version.
+8. run readiness, the targeted authorization suite, and the smoke workflow;
+9. preserve the sanitized receipt with image digests and migration version.
 
 `apply-production.sh` is used only through the `ops` Compose profile. It does
 not run as part of ordinary `up -d`, and it never uses `docker-compose.yml`.

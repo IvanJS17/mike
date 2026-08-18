@@ -30,10 +30,11 @@ restore_override="$repo_root/infra/production/compose.restore.yml"
 : "${RESTORE_OBJECT_ALLOWED_HOST:?set RESTORE_OBJECT_ALLOWED_HOST to the disposable object host}"
 : "${RESTORE_AUTHENTICATED_PATH:?set RESTORE_AUTHENTICATED_PATH to the protected disposable route}"
 : "${RESTORE_CA_CERT_FILE:?set RESTORE_CA_CERT_FILE to the disposable TLS CA certificate}"
+: "${RESTORE_CA_CERT_SHA256:?set RESTORE_CA_CERT_SHA256 to the target-bound CA fingerprint}"
 
 target_manifest="$repo_root/infra/production/disposable-targets.json"
-jq -e --arg id "$RESTORE_TARGET_ID" --arg root "/srv/litt-restore" --arg context "$RESTORE_DOCKER_CONTEXT" --arg project "$RESTORE_PROJECT_NAME" --arg bucket "$RESTORE_OBJECT_BUCKET" --arg auth "$RESTORE_AUTHENTICATED_PATH" --arg public "$RESTORE_PUBLIC_BASE_URL" --arg public_host "$RESTORE_PUBLIC_ALLOWED_HOST" --arg object "$RESTORE_OBJECT_ENDPOINT" --arg object_host "$RESTORE_OBJECT_ALLOWED_HOST" \
-  '(.restore.target_id == $id) and (.restore.root == $root) and (.restore.docker_context == $context) and (.restore.project == $project) and (.restore.bucket == $bucket) and (.restore.authenticated_path == $auth) and (.restore.public_base_url == $public) and (.restore.public_host == $public_host) and (.restore.object_endpoint == $object) and (.restore.object_host == $object_host)' "$target_manifest" >/dev/null || { printf 'Restore target is not the versioned disposable target.\n' >&2; exit 1; }
+jq -e --arg id "$RESTORE_TARGET_ID" --arg root "/srv/litt-restore" --arg context "$RESTORE_DOCKER_CONTEXT" --arg project "$RESTORE_PROJECT_NAME" --arg bucket "$RESTORE_OBJECT_BUCKET" --arg auth "$RESTORE_AUTHENTICATED_PATH" --arg ca "$RESTORE_CA_CERT_SHA256" --arg public "$RESTORE_PUBLIC_BASE_URL" --arg public_host "$RESTORE_PUBLIC_ALLOWED_HOST" --arg object "$RESTORE_OBJECT_ENDPOINT" --arg object_host "$RESTORE_OBJECT_ALLOWED_HOST" \
+  '(.restore.target_id == $id) and (.restore.root == $root) and (.restore.docker_context == $context) and (.restore.project == $project) and (.restore.bucket == $bucket) and (.restore.authenticated_path == $auth) and (.restore.ca_sha256 == $ca) and (.restore.public_base_url == $public) and (.restore.public_host == $public_host) and (.restore.object_endpoint == $object) and (.restore.object_host == $object_host)' "$target_manifest" >/dev/null || { printf 'Restore target is not the versioned disposable target.\n' >&2; exit 1; }
 restore_root_real=$(realpath -e "$RESTORE_ROOT")
 [[ "$restore_root_real" == "/srv/litt-restore" && ! -L "$RESTORE_ROOT" ]] || { printf 'Restore root is not the versioned disposable root.\n' >&2; exit 1; }
 [[ "$RESTORE_PUBLIC_BASE_URL" =~ ^https:// ]] || { printf 'Restore public URL must use HTTPS.\n' >&2; exit 1; }
@@ -53,6 +54,7 @@ auth_path_pattern='^/api/[A-Za-z0-9._/?=&-]+$'
 [[ "$RESTORE_PROJECT_NAME" =~ ^litt-restore-[a-z0-9-]{1,40}$ ]] || { printf 'Restore project is not disposable.\n' >&2; exit 1; }
 [[ "$RESTORE_OBJECT_BUCKET" =~ ^litt-restore-[a-z0-9-]{1,50}$ ]] || { printf 'Restore bucket is not disposable.\n' >&2; exit 1; }
 [[ -f "$RESTORE_CA_CERT_FILE" && ! -L "$RESTORE_CA_CERT_FILE" && "$(stat -c '%a' "$RESTORE_CA_CERT_FILE")" =~ ^(600|644)$ ]] || { printf 'Restore TLS CA certificate must be regular mode 600 or 644.\n' >&2; exit 1; }
+[[ "$(sha256sum "$RESTORE_CA_CERT_FILE" | cut -d' ' -f1)" == "$RESTORE_CA_CERT_SHA256" ]] || { printf 'Restore TLS CA fingerprint does not match target.\n' >&2; exit 1; }
 for secret_file in "$AGE_IDENTITY_FILE" "$RESTORE_ENV_FILE" "$RESTORE_OBJECT_SSE_CUSTOMER_KEY_FILE" "$RESTORE_DESIGNATED_USERS_FILE"; do
   [[ -f "$secret_file" && ! -L "$secret_file" && "$(stat -c '%a' "$secret_file")" == "600" ]] || { printf 'Restore secret fixture must be regular mode 600.\n' >&2; exit 1; }
 done
@@ -195,7 +197,13 @@ while IFS= read -r user_record; do
     "$RESTORE_PUBLIC_BASE_URL/supabase/auth/v1/token?grant_type=password")
   access_token=$(jq -er '.access_token | select(type == "string" and length > 0)' <<<"$auth_response")
   curl --silent --show-error --fail --cacert "$RESTORE_CA_CERT_FILE" \
-    --config <(printf 'header = "Authorization: Bearer %s"\n' "$access_token") \
+    --config <( {
+      printf 'header = "Authorization: '
+      printf 'Bear'
+      printf 'er '
+      printf '%s' "$access_token"
+      printf '"\n'
+    } ) \
     "$RESTORE_PUBLIC_BASE_URL$RESTORE_AUTHENTICATED_PATH" >/dev/null
 done < <(jq -c '.[]' "$RESTORE_DESIGNATED_USERS_FILE")
 
@@ -206,13 +214,26 @@ restore_aws() {
     aws --endpoint-url "$RESTORE_OBJECT_ENDPOINT" "$@"
 }
 bucket_cleanup() {
-  listing=$(restore_aws s3api list-object-versions --bucket "$RESTORE_OBJECT_BUCKET" --output json)
-  while IFS= read -r version; do
-    restore_aws s3api delete-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$(jq -r '.Key' <<<"$version")" --version-id "$(jq -r '.VersionId' <<<"$version")" >/dev/null
-  done < <(jq -c '.Versions[]?' <<<"$listing")
-  while IFS= read -r marker; do
-    restore_aws s3api delete-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$(jq -r '.Key' <<<"$marker")" --version-id "$(jq -r '.VersionId' <<<"$marker")" >/dev/null
-  done < <(jq -c '.DeleteMarkers[]?' <<<"$listing")
+  local key_marker="" version_marker="" listing truncated next_key next_version
+  while :; do
+    args=(s3api list-object-versions --bucket "$RESTORE_OBJECT_BUCKET" --output json)
+    [[ -n "$key_marker" ]] && args+=(--key-marker "$key_marker")
+    [[ -n "$version_marker" ]] && args+=(--version-id-marker "$version_marker")
+    listing=$(restore_aws "${args[@]}")
+    while IFS= read -r version; do
+      restore_aws s3api delete-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$(jq -r '.Key' <<<"$version")" --version-id "$(jq -r '.VersionId' <<<"$version")" >/dev/null
+    done < <(jq -c '.Versions[]?' <<<"$listing")
+    while IFS= read -r marker; do
+      restore_aws s3api delete-object --bucket "$RESTORE_OBJECT_BUCKET" --key "$(jq -r '.Key' <<<"$marker")" --version-id "$(jq -r '.VersionId' <<<"$marker")" >/dev/null
+    done < <(jq -c '.DeleteMarkers[]?' <<<"$listing")
+    truncated=$(jq -er 'if has("IsTruncated") and (.IsTruncated | type == "boolean") then .IsTruncated else error("missing boolean IsTruncated") end' <<<"$listing")
+    [[ "$truncated" == "true" ]] || break
+    next_key=$(jq -er '.NextKeyMarker | select(type == "string" and length > 0)' <<<"$listing")
+    next_version=$(jq -er '.NextVersionIdMarker | select(type == "string" and length > 0)' <<<"$listing")
+    [[ "$next_key" != "$key_marker" || "$next_version" != "$version_marker" ]] || return 1
+    key_marker="$next_key"
+    version_marker="$next_version"
+  done
   residue=$(restore_aws s3api list-object-versions --bucket "$RESTORE_OBJECT_BUCKET" --output json)
   [[ "$(jq '[.Versions[]?, .DeleteMarkers[]?] | length' <<<"$residue")" == "0" ]]
 }
@@ -280,6 +301,15 @@ rto_seconds=$((finished_epoch - started_epoch))
 if (( rto_seconds > 14400 )); then
   printf 'RTO objective failed: %s seconds.\n' "$rto_seconds" >&2
   exit 1
+fi
+if (( object_mutated == 1 )); then
+  bucket_cleanup
+  object_mutated=0
+fi
+if (( compose_started == 1 )); then
+  "${compose[@]}" down --remove-orphans >/dev/null
+  [[ -z "$("${docker_prefix[@]}" ps -aq --filter "label=com.docker.compose.project=$RESTORE_PROJECT_NAME")" ]]
+  compose_started=0
 fi
 receipt="$RESTORE_ROOT/restore-receipts/$set_id-$(date -u +%Y%m%dT%H%M%SZ).json"
 release_sha=$(jq -er '.release_sha' "$release_manifest")

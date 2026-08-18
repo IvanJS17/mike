@@ -243,7 +243,8 @@ jq -n \
   --arg key "$remote_key" \
   --arg sha256 "$encrypted_sha256" \
   --arg archive_sha256 "$archive_sha256" \
-  '{status:"success",set_id:$set_id,completed_at:$completed_at,object_key:$key,encrypted_sha256:$sha256,archive_sha256:$archive_sha256}' \
+  --arg release_sha "$(jq -er '.release_sha' "$RELEASE_MANIFEST_PATH")" \
+  '{status:"success",set_id:$set_id,completed_at:$completed_at,object_key:$key,encrypted_sha256:$sha256,archive_sha256:$archive_sha256,release_sha:$release_sha}' \
   >"$success_file"
 backup_aws s3 cp "$success_file" "s3://$BACKUP_BUCKET/recovery/$stamp/SUCCESS.json" >/dev/null
 backup_aws s3 cp "$success_file" "s3://$BACKUP_BUCKET/recovery/latest-success.json" >/dev/null

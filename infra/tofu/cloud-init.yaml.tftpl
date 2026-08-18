@@ -8,6 +8,10 @@ packages:
   - wireguard
   - unattended-upgrades
 
+groups:
+  - litt-operators:
+      system: true
+
 users:
 %{ for name, key in operators ~}
   - name: ${name}
@@ -52,7 +56,6 @@ write_files:
       }
 
 runcmd:
-  - [groupadd, --system, litt-operators]
   - [systemctl, enable, docker]
   - [systemctl, enable, nftables]
   - [systemctl, restart, nftables]

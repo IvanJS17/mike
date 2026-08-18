@@ -4,6 +4,7 @@
 flush ruleset
 
 define vpn4 = 10.42.0.0/24
+define vpn6 = fd42:42::/64
 
 define public_web = { 80, 443 }
 
@@ -16,7 +17,7 @@ table inet litt_host {
     ip6 nexthdr icmpv6 accept
     tcp dport $public_web accept
     ip saddr $vpn4 tcp dport 22 accept
-    # Add the approved IPv6 VPN CIDR explicitly; never use ::/0 for SSH.
+    ip6 saddr $vpn6 tcp dport 22 accept
   }
 
   chain forward {

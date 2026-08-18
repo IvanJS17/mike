@@ -19,6 +19,11 @@
     @metrics path /api/metrics
     respond @metrics 404
 
+    @downloads path /download /download/*
+    handle @downloads {
+        reverse_proxy backend:3001
+    }
+
     @api path /api /api/*
     handle @api {
         uri strip_prefix /api
