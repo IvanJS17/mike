@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import {
     deleteDocument,
-    getDocumentUrl,
+    downloadDocumentFile,
     downloadDocumentsZip,
     listDocumentVersions,
     uploadDocumentVersion,
@@ -157,6 +157,16 @@ function apiErrorDetail(error: unknown): string | null {
         // Non-JSON errors can fall through to the plain message below.
     }
     return error.message || null;
+}
+function triggerBlobDownload(blob: Blob, filename: string): void {
+    const blobUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = blobUrl;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
 }
 
 function documentTypeValue(doc: Document): string {
@@ -381,14 +391,8 @@ export function DocTable({
         filename: string,
     ) {
         try {
-            const resolved = await getDocumentUrl(docId, versionId);
-            const a = document.createElement("a");
-            a.href = resolved.url;
-            // Prefer the backend's resolved filename (which honours the
-            // version filename). Fall back to the passed filename
-            // if for some reason it's missing.
-            a.download = resolved.filename || filename;
-            a.click();
+            const resolved = await downloadDocumentFile(docId, versionId);
+            triggerBlobDownload(resolved.blob, resolved.filename || filename);
         } catch (e) {
             console.error("downloadDocVersion failed", e);
         }
@@ -1922,11 +1926,8 @@ export function DocTable({
 
     const docs = documents;
     const downloadDoc = useCallback(async (docId: string) => {
-        const { url, filename } = await getDocumentUrl(docId);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        a.click();
+        const resolved = await downloadDocumentFile(docId);
+        triggerBlobDownload(resolved.blob, resolved.filename);
     }, []);
 
     const handleDownloadSelectedDocs = useCallback(async () => {

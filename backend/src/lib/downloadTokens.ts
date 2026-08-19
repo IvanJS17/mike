@@ -1,81 +1,86 @@
-import crypto from "crypto";
+import crypto from "node:crypto";
+import type { createServerSupabase } from "./supabase";
 
-/**
- * HMAC-signed, non-expiring download tokens.
- *
- * The token encodes the R2 storage path + filename; the backend route
- * `/download/:token` validates the signature and streams the file. This
- * gives persistent links safe to store in chat history without signed-URL
- * expiry or R2 CORS headaches.
- */
+type Db = ReturnType<typeof createServerSupabase>;
 
-function getSecret(): string {
-    const secret = process.env.DOWNLOAD_SIGNING_SECRET;
-    if (!secret) {
-        throw new Error(
-            "DOWNLOAD_SIGNING_SECRET must be set. " +
-                "Generate a strong random value (e.g. `openssl rand -hex 32`) and set it in the environment.",
-        );
-    }
-    return secret;
+export const DOWNLOAD_GRANT_TTL_SECONDS = 5 * 60;
+
+export interface DownloadGrant {
+  document_id: string;
+  document_version_id: string;
+  storage_path: string;
+  filename: string;
+  issued_to_user: string;
+  expires_at: string;
+  consumed_at: string | null;
 }
 
-function b64urlEncode(buf: Buffer): string {
-    return buf
-        .toString("base64")
-        .replace(/\+/g, "-")
-        .replace(/\//g, "_")
-        .replace(/=+$/g, "");
+function encodeToken(bytes: Buffer): string {
+  return bytes
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
-function b64urlDecode(s: string): Buffer {
-    let t = s.replace(/-/g, "+").replace(/_/g, "/");
-    while (t.length % 4) t += "=";
-    return Buffer.from(t, "base64");
+export function hashDownloadToken(token: string): string {
+  return crypto.createHash("sha256").update(token, "utf8").digest("hex");
 }
 
-function timingSafeEqStr(a: string, b: string): boolean {
-    if (a.length !== b.length) return false;
-    return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+export async function createDownloadUrl(
+  db: Db,
+  input: {
+    documentId: string;
+    versionId: string;
+    storagePath: string;
+    filename: string;
+    userId: string;
+    expiresInSeconds?: number;
+  },
+): Promise<string> {
+  const token = encodeToken(crypto.randomBytes(32));
+  const expiresInSeconds =
+    input.expiresInSeconds ?? DOWNLOAD_GRANT_TTL_SECONDS;
+  if (!Number.isInteger(expiresInSeconds) || expiresInSeconds <= 0) {
+    throw new Error("Download grant expiration must be a positive integer");
+  }
+  const expiresAt = new Date(
+    Date.now() + expiresInSeconds * 1000,
+  ).toISOString();
+
+  const { error } = await db.from("document_download_grants").insert({
+    token_hash: hashDownloadToken(token),
+    document_id: input.documentId,
+    document_version_id: input.versionId,
+    storage_path: input.storagePath,
+    filename: input.filename,
+    issued_to_user: input.userId,
+    expires_at: expiresAt,
+    consumed_at: null,
+  });
+  if (error) throw new Error(`Failed to create download grant: ${error.message}`);
+
+  return `/download/${token}`;
 }
 
-export function signDownload(path: string, filename: string): string {
-    const payload = JSON.stringify({ p: path, f: filename });
-    const enc = b64urlEncode(Buffer.from(payload, "utf8"));
-    const sig = crypto
-        .createHmac("sha256", getSecret())
-        .update(enc)
-        .digest();
-    return `${enc}.${b64urlEncode(sig)}`;
-}
-
-export function verifyDownload(
-    token: string,
-): { path: string; filename: string } | null {
-    const parts = token.split(".");
-    if (parts.length !== 2) return null;
-    const [enc, sigEnc] = parts;
-    const expected = crypto
-        .createHmac("sha256", getSecret())
-        .update(enc)
-        .digest();
-    if (!timingSafeEqStr(sigEnc, b64urlEncode(expected))) return null;
-    try {
-        const parsed = JSON.parse(b64urlDecode(enc).toString("utf8")) as {
-            p: string;
-            f: string;
-        };
-        if (!parsed?.p || !parsed?.f) return null;
-        return { path: parsed.p, filename: parsed.f };
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Returns a relative download URL (e.g. "/download/abc.def"). The frontend
- * prefixes it with NEXT_PUBLIC_API_BASE_URL when rendering `<a href=…>`.
- */
-export function buildDownloadUrl(path: string, filename: string): string {
-    return `/download/${signDownload(path, filename)}`;
+export async function consumeDownloadGrant(
+  db: Db,
+  token: string,
+  userId: string,
+  now = new Date(),
+): Promise<DownloadGrant | null> {
+  if (!token || !userId) return null;
+  const { data, error } = await db
+    .from("document_download_grants")
+    .update({ consumed_at: now.toISOString() })
+    .eq("token_hash", hashDownloadToken(token))
+    .eq("issued_to_user", userId)
+    .is("consumed_at", null)
+    .gt("expires_at", now.toISOString())
+    .select(
+      "document_id, document_version_id, storage_path, filename, issued_to_user, expires_at, consumed_at",
+    )
+    .maybeSingle();
+  if (error || !data) return null;
+  return data as DownloadGrant;
 }

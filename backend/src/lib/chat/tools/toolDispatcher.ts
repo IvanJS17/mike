@@ -22,7 +22,7 @@ import {
 } from "../../storage";
 import { convertedPdfKey } from "../../convert";
 import { contentTypeForDocumentType } from "../../documentTypes";
-import { buildDownloadUrl } from "../../downloadTokens";
+import { createDownloadUrl } from "../../downloadTokens";
 import {
   contentSha256,
   loadActiveVersion,
@@ -901,7 +901,13 @@ export async function runToolCalls(
                     document_id: d.id,
                     version_id: versionId,
                     filename: d.filename,
-                    download_url: buildDownloadUrl(newKey, d.filename),
+                    download_url: await createDownloadUrl(db, {
+                      documentId: d.id,
+                      versionId,
+                      storagePath: newKey,
+                      filename: d.filename,
+                      userId,
+                    }),
                   });
                 }
 

@@ -1,109 +1,84 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { signDownload, verifyDownload, buildDownloadUrl } from "../downloadTokens";
+import { describe, expect, it, vi } from "vitest";
+import { createDownloadUrl } from "../downloadTokens";
 
-const SECRET = "test-secret-32-bytes-long-enough!!";
+function makeInsertDb() {
+  let inserted: Record<string, unknown> | null = null;
+  const insert = vi.fn(async (row: Record<string, unknown>) => {
+    inserted = row;
+    return { data: null, error: null };
+  });
+  return {
+    db: { from: vi.fn(() => ({ insert })) } as never,
+    insert,
+    getInserted: () => inserted,
+  };
+}
 
-beforeAll(() => {
-    process.env.DOWNLOAD_SIGNING_SECRET = SECRET;
+describe("createDownloadUrl", () => {
+  it("stores an opaque user-bound expiring grant instead of the storage path", async () => {
+    const { db, getInserted } = makeInsertDb();
+
+    const url = await createDownloadUrl(db, {
+      documentId: "doc-1",
+      versionId: "version-1",
+      storagePath: "documents/user-1/doc-1/source.pdf",
+      filename: "contract.pdf",
+      userId: "user-1",
+    });
+
+    expect(url).toMatch(/^\/download\/[A-Za-z0-9_-]+$/);
+    expect(url).not.toContain("documents");
+    const grant = getInserted();
+    expect(grant).toMatchObject({
+      document_id: "doc-1",
+      document_version_id: "version-1",
+      storage_path: "documents/user-1/doc-1/source.pdf",
+      filename: "contract.pdf",
+      issued_to_user: "user-1",
+      consumed_at: null,
+    });
+    expect(grant?.token_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(Date.parse(String(grant?.expires_at))).toBeGreaterThan(Date.now());
+  });
 });
 
-afterAll(() => {
-    delete process.env.DOWNLOAD_SIGNING_SECRET;
-});
+function makeConsumeDb(grant: Record<string, unknown>) {
+  let consumed = false;
+  const query: Record<string, any> = {};
+  query.update = vi.fn(() => query);
+  query.eq = vi.fn(() => query);
+  query.is = vi.fn(() => query);
+  query.gt = vi.fn(() => query);
+  query.select = vi.fn(() => query);
+  query.maybeSingle = vi.fn(async () => {
+    if (consumed) return { data: null, error: null };
+    consumed = true;
+    return { data: grant, error: null };
+  });
+  return { db: { from: vi.fn(() => query) } as never, query };
+}
 
-describe("signDownload", () => {
-    it("returns a two-part dot-separated token", () => {
-        const token = signDownload("documents/user/doc.pdf", "contract.pdf");
-        const parts = token.split(".");
-        expect(parts).toHaveLength(2);
-        expect(parts[0].length).toBeGreaterThan(0);
-        expect(parts[1].length).toBeGreaterThan(0);
-    });
+describe("consumeDownloadGrant", () => {
+  it("accepts a grant once and rejects the same token on reuse", async () => {
+    const { consumeDownloadGrant } = await import("../downloadTokens");
+    const grant = {
+      document_id: "doc-1",
+      document_version_id: "version-1",
+      storage_path: "documents/user-1/doc-1/source.pdf",
+      filename: "contract.pdf",
+      issued_to_user: "user-1",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      consumed_at: new Date().toISOString(),
+    };
+    const { db, query } = makeConsumeDb(grant);
 
-    it("produces different tokens for different paths", () => {
-        const t1 = signDownload("documents/a/file.pdf", "a.pdf");
-        const t2 = signDownload("documents/b/file.pdf", "b.pdf");
-        expect(t1).not.toBe(t2);
-    });
+    const first = await consumeDownloadGrant(db, "opaque-token", "user-1");
+    const second = await consumeDownloadGrant(db, "opaque-token", "user-1");
 
-    it("uses base64url characters only (no +, /, =)", () => {
-        const token = signDownload("documents/user/file.pdf", "file.pdf");
-        expect(token).not.toMatch(/[+/=]/);
-    });
-});
-
-describe("verifyDownload", () => {
-    it("round-trips a valid token", () => {
-        const path = "documents/user123/doc456/source.pdf";
-        const filename = "Contract Final v2.pdf";
-        const token = signDownload(path, filename);
-        const result = verifyDownload(token);
-        expect(result).not.toBeNull();
-        expect(result!.path).toBe(path);
-        expect(result!.filename).toBe(filename);
-    });
-
-    it("returns null for a tampered payload", () => {
-        const token = signDownload("documents/user/file.pdf", "file.pdf");
-        const [, sig] = token.split(".");
-        const fakePayload = Buffer.from(
-            JSON.stringify({ p: "documents/attacker/file.pdf", f: "file.pdf" }),
-        )
-            .toString("base64")
-            .replace(/\+/g, "-")
-            .replace(/\//g, "_")
-            .replace(/=+$/g, "");
-        expect(verifyDownload(`${fakePayload}.${sig}`)).toBeNull();
-    });
-
-    it("returns null for a tampered signature", () => {
-        const token = signDownload("documents/user/file.pdf", "file.pdf");
-        const [enc] = token.split(".");
-        const fakeSig = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-        expect(verifyDownload(`${enc}.${fakeSig}`)).toBeNull();
-    });
-
-    it("returns null for a token with too many parts", () => {
-        expect(verifyDownload("a.b.c")).toBeNull();
-    });
-
-    it("returns null for a token with too few parts", () => {
-        expect(verifyDownload("onlyonepart")).toBeNull();
-    });
-
-    it("returns null when payload JSON is missing required fields", () => {
-        const bad = Buffer.from(JSON.stringify({ x: 1 }))
-            .toString("base64")
-            .replace(/\+/g, "-")
-            .replace(/\//g, "_")
-            .replace(/=+$/g, "");
-        const sig = Buffer.alloc(32).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-        expect(verifyDownload(`${bad}.${sig}`)).toBeNull();
-    });
-
-    it("returns null when signed with a different secret", () => {
-        const token = signDownload("documents/user/file.pdf", "file.pdf");
-        process.env.DOWNLOAD_SIGNING_SECRET = "different-secret-value-!!";
-        const result = verifyDownload(token);
-        process.env.DOWNLOAD_SIGNING_SECRET = SECRET;
-        expect(result).toBeNull();
-    });
-});
-
-describe("buildDownloadUrl", () => {
-    it("returns a path starting with /download/", () => {
-        const url = buildDownloadUrl("documents/user/file.pdf", "file.pdf");
-        expect(url).toMatch(/^\/download\//);
-    });
-
-    it("embeds a verifiable token in the URL", () => {
-        const path = "documents/user/file.pdf";
-        const filename = "file.pdf";
-        const url = buildDownloadUrl(path, filename);
-        const token = url.replace("/download/", "");
-        const result = verifyDownload(token);
-        expect(result).not.toBeNull();
-        expect(result!.path).toBe(path);
-        expect(result!.filename).toBe(filename);
-    });
+    expect(first).toEqual(grant);
+    expect(second).toBeNull();
+    expect(query.update).toHaveBeenCalledWith({ consumed_at: expect.any(String) });
+    expect(query.is).toHaveBeenCalledWith("consumed_at", null);
+    expect(query.eq).toHaveBeenCalledWith("issued_to_user", "user-1");
+  });
 });
