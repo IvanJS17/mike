@@ -77,6 +77,7 @@ import {
     listWorkflows,
     lookupUserByEmail,
     mapTRMessages,
+    modelRouteFromChat,
     moveDocumentToFolder,
     moveLibraryDocument,
     moveLibraryFolder,
@@ -335,6 +336,34 @@ describe("apiRequest plumbing (via thin wrappers)", () => {
         await listChats({ limit: 5 });
         expect(lastFetchCall().url).toBe("http://localhost:3001/chat?limit=5");
     });
+});
+
+describe("modelRouteFromChat", () => {
+    const chat: Chat = {
+        id: "c1",
+        project_id: null,
+        user_id: "u1",
+        title: "T",
+        model_provider: "deepseek",
+        model: "deepseek-chat",
+        credential_ref: "deepseek:v2",
+        created_at: "2026-01-01",
+    };
+
+    it("returns the complete governed route when all fields are present", () => {
+        expect(modelRouteFromChat(chat)).toEqual({
+            provider: "deepseek",
+            model: "deepseek-chat",
+            credential_ref: "deepseek:v2",
+        });
+    });
+
+    it.each(["model_provider", "model", "credential_ref"] as const)(
+        "returns null when %s is absent",
+        (field) => {
+            expect(modelRouteFromChat({ ...chat, [field]: null })).toBeNull();
+        },
+    );
 });
 
 describe("blob requests (exportAccountData)", () => {
