@@ -43,25 +43,18 @@ describe("revokeOrganizationMembership (W1.7)", () => {
     );
 
     expect(result.ok).toBe(true);
-    // membership deleted
-    expect(db.from).toHaveBeenCalledWith("organization_memberships");
-    // epoch incremented atomically via RPC
-    expect(db.rpc).toHaveBeenCalledWith("bump_authorization_epoch", {
+    // membership deletion and epoch increment are one locked RPC
+    expect(db.rpc).toHaveBeenCalledWith("revoke_organization_membership", {
       p_org: "org-1",
+      p_user: "user-9",
     });
     // session revoked
     expect(admin.auth.admin.signOut).toHaveBeenCalledWith("user-9");
   });
 
-  it("reports an error when the membership delete fails", async () => {
+  it("reports an error when the locked revocation fails", async () => {
     const db = {
-      from: vi.fn(() => ({
-        delete: vi.fn(() => ({
-          eq: vi.fn(() => ({
-            eq: vi.fn(() => ({ data: null, error: { message: "boom" } })),
-          })),
-        })),
-      })),
+      rpc: vi.fn(() => ({ data: null, error: { message: "boom" } })),
     } as never;
     const admin = {
       auth: { admin: { signOut: vi.fn(() => ({ data: {}, error: null })) } },

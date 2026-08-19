@@ -389,6 +389,21 @@ async function decideItem(req: Request, res: Response) {
       });
   }
 
+  try {
+    await assertEpochFresh(
+      context.db,
+      context.matterAccess.organizationId,
+      context.matterAccess.authorizationEpoch,
+    );
+  } catch {
+    return void res
+      .status(403)
+      .json({
+        code: "authorization_revoked",
+        detail: "Matter authorization changed; decision was not recorded",
+      });
+  }
+
   const { data: decisionRow, error: decisionError } = await context.db
     .from("ai_review_decisions")
     .insert({

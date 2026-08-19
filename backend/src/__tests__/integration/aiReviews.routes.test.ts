@@ -379,6 +379,29 @@ describe("AI human review routes", () => {
     expect(rows.ai_reviews[0].status).toBe("in_progress");
   });
 
+  it("blocks an item decision when the matter authorization epoch changed", async () => {
+    await request(app)
+      .post("/projects/project-1/ai-executions/execution-1/review")
+      .set("Authorization", "Bearer test")
+      .send({});
+    assertEpochFresh.mockRejectedValueOnce(new Error("authorization revoked"));
+
+    const decision = await request(app)
+      .post(
+        "/projects/project-1/ai-executions/execution-1/review/items/item-1/decision",
+      )
+      .set("Authorization", "Bearer test")
+      .send({ decision: "accepted" });
+
+    expect(decision.status).toBe(403);
+    expect(decision.body.code).toBe("authorization_revoked");
+    expect(rows.ai_review_decisions).toHaveLength(0);
+    expect(rows.ai_review_items[0]).toMatchObject({
+      status: "pending",
+      finding_text: "La cláusula permite terminar el contrato.",
+    });
+  });
+
   it("does not let the original execution author create or mutate the assigned review", async () => {
     currentUserId = "user-1";
     const create = await request(app)
