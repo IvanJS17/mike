@@ -136,3 +136,35 @@ describe("POST /projects/:projectId/documents — audit contract", () => {
     expect(detail).not.toHaveProperty("body");
   });
 });
+
+describe("POST /single-documents — audit contract", () => {
+  it("uses the shared upload handler and records a standalone scope", async () => {
+    const res = await request(app)
+      .post("/single-documents")
+      .set("Authorization", "Bearer jwt-user-1")
+      .attach("file", Buffer.from("%PDF-1.4\n"), {
+        filename: "standalone.pdf",
+        contentType: "application/pdf",
+      });
+
+    expect(res.status).toBe(201);
+    expect(mocks.recordAuditEvent).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        actorUserId: "user-1",
+        eventType: "document.uploaded",
+        eventDetail: expect.objectContaining({
+          project_id: null,
+          document_id: "doc-1",
+          document_version_id: "version-1",
+          result: "success",
+          correlation_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        }),
+      }),
+    );
+    const detail = mocks.recordAuditEvent.mock.calls[0][1].eventDetail;
+    expect(detail).not.toHaveProperty("filename");
+    expect(detail).not.toHaveProperty("content");
+    expect(detail).not.toHaveProperty("storage_path");
+  });
+});

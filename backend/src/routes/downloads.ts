@@ -23,6 +23,10 @@ function contentTypeFor(filename: string): string {
 downloadsRouter.get("/:token", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
   const db = createServerSupabase();
+  // A consumed grant must never be replayable from a browser or intermediary
+  // cache after logout, revocation, or the one-time read.
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Vary", "Authorization");
   const grant = await consumeDownloadGrant(db, req.params.token, userId);
   if (!grant) return void res.status(404).json({ detail: "Invalid link" });
 

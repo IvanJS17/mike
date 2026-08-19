@@ -107,6 +107,8 @@ describe("GET /download/:token", () => {
 
     expect(first.status).toBe(200);
     expect(first.headers["content-type"]).toMatch(/application\/pdf/);
+    expect(first.headers["cache-control"]).toBe("no-store");
+    expect(first.headers.vary).toContain("Authorization");
     expect(second.status).toBe(404);
     expect(mocks.downloadFile).toHaveBeenCalledTimes(1);
     expect(mocks.recordAuditEvent).toHaveBeenCalledWith(

@@ -396,6 +396,7 @@ export function DocDownloadBlock({
             } = await supabase.auth.getSession();
             const token = session?.access_token;
             const resp = await fetch(href, {
+                cache: "no-store",
                 headers: token ? { Authorization: `Bearer ${token}` } : {},
             });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
