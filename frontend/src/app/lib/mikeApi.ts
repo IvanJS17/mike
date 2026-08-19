@@ -159,6 +159,92 @@ async function toApiError(response: Response, path: string) {
     }
 }
 
+export type AiModelRoute = {
+    provider: string;
+    model: string;
+    credential_ref: string;
+};
+
+export type AiExecution = {
+    id: string;
+    status: "pending" | "running" | "succeeded" | "failed";
+    error_class: string | null;
+    matter_id: string | null;
+    project_id: string;
+    document_id: string;
+    document_version_id: string;
+    route: AiModelRoute;
+    input_sha256: string;
+    document_content_sha256: string;
+    output_id: string | null;
+    receipt_id: string | null;
+    created_at: string;
+    started_at: string | null;
+    finished_at: string | null;
+};
+
+export type AiReceipt = {
+    id: string;
+    execution_id: string;
+    receipt_version: string;
+    canonical_json: Record<string, unknown>;
+    receipt_sha256: string;
+    created_at: string;
+};
+
+export type AiOutput = {
+    id: string;
+    execution_id: string;
+    output_format: "markdown";
+    output_text: string;
+    output_sha256: string;
+    citation_refs: Record<string, unknown>[];
+    created_at: string;
+};
+
+export async function createAiExecution(
+    projectId: string,
+    payload: {
+        matter_id: string;
+        document_version_id: string;
+        workflow_id?: string;
+        route: AiModelRoute;
+    },
+): Promise<AiExecution> {
+    return apiRequest<AiExecution>(`/projects/${projectId}/ai-executions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    });
+}
+
+export async function getAiExecution(
+    projectId: string,
+    executionId: string,
+): Promise<AiExecution> {
+    return apiRequest<AiExecution>(
+        `/projects/${projectId}/ai-executions/${executionId}`,
+    );
+}
+
+export async function getAiExecutionReceipt(
+    projectId: string,
+    executionId: string,
+): Promise<AiReceipt> {
+    return apiRequest<AiReceipt>(
+        `/projects/${projectId}/ai-executions/${executionId}/receipt`,
+    );
+}
+
+export async function getAiExecutionOutput(
+    projectId: string,
+    executionId: string,
+): Promise<AiOutput> {
+    return apiRequest<AiOutput>(
+        `/projects/${projectId}/ai-executions/${executionId}/output`,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Projects
 // ---------------------------------------------------------------------------

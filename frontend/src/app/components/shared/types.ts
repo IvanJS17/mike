@@ -59,6 +59,7 @@ export interface Document {
   updated_at?: string | null;
   /** Version number of the document row pointed to by current_version_id. */
   active_version_number?: number | null;
+  current_version_id?: string | null;
   /** Legacy: max version_number across assistant_edit rows, null if doc is unedited. */
   latest_version_number?: number | null;
 }

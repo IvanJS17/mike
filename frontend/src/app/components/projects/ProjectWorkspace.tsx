@@ -89,7 +89,7 @@ function activeSectionFromSegments(
 function shouldShowWorkspaceShell(segments: string[]) {
     if (segments.length === 0) return true;
     if (segments.length !== 1) return false;
-    return segments[0] === "assistant" || segments[0] === "tabular-reviews";
+    return segments[0] === "assistant" || segments[0] === "tabular-reviews" || segments[0] === "ai-executions";
 }
 
 export function ProjectWorkspaceProvider({
