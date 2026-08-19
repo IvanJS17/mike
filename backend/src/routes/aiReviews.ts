@@ -206,36 +206,103 @@ async function loadOutput(db: Db, executionId: string) {
   };
 }
 
+function sendReviewMutationError(
+  res: Response,
+  error: { message?: string },
+  operation: "item" | "completion",
+): boolean {
+  const message = error.message ?? "";
+  if (
+    /authorization changed|active matter lawyer|not authorized|organization scope/i.test(
+      message,
+    )
+  ) {
+    res.status(403).json({
+      code: "authorization_revoked",
+      detail:
+        operation === "item"
+          ? "Matter authorization changed; decision was not recorded"
+          : "Matter authorization changed; review was not completed",
+    });
+    return true;
+  }
+  if (/not found/i.test(message)) {
+    res.status(404).json({
+      detail:
+        operation === "item"
+          ? "AI review item not found"
+          : "AI review not found",
+    });
+    return true;
+  }
+  if (/already complete/i.test(message)) {
+    res.status(409).json({
+      code: "review_closed",
+      detail: "The AI review is already complete",
+    });
+    return true;
+  }
+  if (/pending findings/i.test(message)) {
+    res.status(409).json({
+      code: "items_pending",
+      detail: "The review cannot be approved yet",
+    });
+    return true;
+  }
+  if (/unverified citation/i.test(message)) {
+    res.status(409).json({
+      code: "unverified_citation",
+      detail: "The review cannot be approved yet",
+    });
+    return true;
+  }
+  if (/unfinished execution/i.test(message)) {
+    res.status(409).json({
+      code: "execution_not_succeeded",
+      detail: "The review cannot be approved yet",
+    });
+    return true;
+  }
+  if (/completion failed/i.test(message)) {
+    res.status(409).json({
+      code: "review_incomplete",
+      detail: "The review could not be completed",
+    });
+    return true;
+  }
+  res.status(500).json({
+    detail:
+      operation === "item"
+        ? "Failed to record AI review decision"
+        : "Failed to record review completion",
+  });
+  return true;
+}
+
 async function createReview(req: Request, res: Response) {
   const context = await loadReviewContext(req, "review");
   if (!context)
     return void res.status(404).json({ detail: "AI execution not found" });
   if (context.execution.user_id === context.userId) {
-    return void res
-      .status(403)
-      .json({
-        code: "reviewer_must_be_distinct",
-        detail: "The execution author cannot review its own execution",
-      });
+    return void res.status(403).json({
+      code: "reviewer_must_be_distinct",
+      detail: "The execution author cannot review its own execution",
+    });
   }
   if (context.execution.status !== "succeeded") {
-    return void res
-      .status(422)
-      .json({
-        code: "review_unavailable",
-        detail: "Only a succeeded AI execution can be reviewed",
-      });
+    return void res.status(422).json({
+      code: "review_unavailable",
+      detail: "Only a succeeded AI execution can be reviewed",
+    });
   }
 
   const existing = await loadReview(context.db, context.execution.id);
   if (existing) {
     if (existing.reviewer_user_id !== context.userId) {
-      return void res
-        .status(409)
-        .json({
-          code: "review_assigned",
-          detail: "The execution already has another reviewer",
-        });
+      return void res.status(409).json({
+        code: "review_assigned",
+        detail: "The execution already has another reviewer",
+      });
     }
     const data = await loadReviewData(context.db, existing.id);
     return void res
@@ -245,12 +312,10 @@ async function createReview(req: Request, res: Response) {
 
   const output = await loadOutput(context.db, context.execution.id);
   if (!output) {
-    return void res
-      .status(422)
-      .json({
-        code: "review_unavailable",
-        detail: "The execution has no finalized output and receipt",
-      });
+    return void res.status(422).json({
+      code: "review_unavailable",
+      detail: "The execution has no finalized output and receipt",
+    });
   }
 
   const { data: insertedReview, error: reviewError } = await context.db
@@ -328,20 +393,16 @@ async function decideItem(req: Request, res: Response) {
   if (!review)
     return void res.status(404).json({ detail: "AI review not found" });
   if (review.reviewer_user_id !== context.userId) {
-    return void res
-      .status(403)
-      .json({
-        code: "reviewer_mismatch",
-        detail: "Only the assigned reviewer can decide this review",
-      });
+    return void res.status(403).json({
+      code: "reviewer_mismatch",
+      detail: "Only the assigned reviewer can decide this review",
+    });
   }
   if (review.status !== "in_progress") {
-    return void res
-      .status(409)
-      .json({
-        code: "review_closed",
-        detail: "The AI review is already complete",
-      });
+    return void res.status(409).json({
+      code: "review_closed",
+      detail: "The AI review is already complete",
+    });
   }
 
   const { data: item } = await context.db
@@ -360,12 +421,10 @@ async function decideItem(req: Request, res: Response) {
     decision !== "rejected" &&
     decision !== "edited"
   ) {
-    return void res
-      .status(400)
-      .json({
-        code: "invalid_decision",
-        detail: "decision must be accepted, rejected, or edited",
-      });
+    return void res.status(400).json({
+      code: "invalid_decision",
+      detail: "decision must be accepted, rejected, or edited",
+    });
   }
 
   const before: AiReviewItemState = {
@@ -381,12 +440,10 @@ async function decideItem(req: Request, res: Response) {
       comment: body.comment,
     });
   } catch (error) {
-    return void res
-      .status(400)
-      .json({
-        detail:
-          error instanceof Error ? error.message : "Invalid review decision",
-      });
+    return void res.status(400).json({
+      detail:
+        error instanceof Error ? error.message : "Invalid review decision",
+    });
   }
 
   try {
@@ -396,47 +453,39 @@ async function decideItem(req: Request, res: Response) {
       context.matterAccess.authorizationEpoch,
     );
   } catch {
-    return void res
-      .status(403)
-      .json({
-        code: "authorization_revoked",
-        detail: "Matter authorization changed; decision was not recorded",
-      });
+    return void res.status(403).json({
+      code: "authorization_revoked",
+      detail: "Matter authorization changed; decision was not recorded",
+    });
   }
 
-  const { data: decisionRow, error: decisionError } = await context.db
-    .from("ai_review_decisions")
-    .insert({
-      review_id: review.id,
-      review_item_id: itemRow.id,
-      actor_user_id: context.userId,
-      decision: applied.decision,
-      before_state: applied.before,
-      after_state: applied.after,
-      comment: applied.after.comment,
-    })
-    .select("*")
-    .single();
-  if (decisionError || !decisionRow) {
+  const { data: atomicResult, error: atomicError } = await context.db.rpc(
+    "apply_ai_review_item_decision",
+    {
+      p_review_id: review.id,
+      p_item_id: itemRow.id,
+      p_actor_user_id: context.userId,
+      p_organization_id: context.matterAccess.organizationId,
+      p_authorization_epoch: context.matterAccess.authorizationEpoch,
+      p_decision: applied.decision,
+      p_finding_text: applied.after.finding_text,
+      p_comment: applied.after.comment,
+    },
+  );
+  if (atomicError) {
+    return void sendReviewMutationError(res, atomicError, "item");
+  }
+  const result = atomicResult as {
+    item?: ReviewItemRow;
+    decision?: ReviewDecisionRow;
+  } | null;
+  if (!result?.item || !result.decision) {
     return void res
       .status(500)
       .json({ detail: "Failed to record AI review decision" });
   }
-
-  const { error: itemError } = await context.db
-    .from("ai_review_items")
-    .update({
-      status: applied.after.status,
-      finding_text: applied.after.finding_text,
-      comment: applied.after.comment,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", itemRow.id)
-    .eq("review_id", review.id);
-  if (itemError)
-    return void res
-      .status(500)
-      .json({ detail: "Failed to update AI review item" });
+  const decisionRow = result.decision;
+  const updatedItem = result.item;
 
   await recordAuditEvent(context.db, {
     actorUserId: context.userId,
@@ -451,15 +500,9 @@ async function decideItem(req: Request, res: Response) {
     },
   });
 
-  const updatedItem = {
-    ...itemRow,
-    status: applied.after.status,
-    finding_text: applied.after.finding_text,
-    comment: applied.after.comment,
-  } as ReviewItemRow;
   return void res.json({
     item: publicItem(updatedItem),
-    decision: publicDecision(decisionRow as ReviewDecisionRow),
+    decision: publicDecision(decisionRow),
   });
 }
 
@@ -471,41 +514,33 @@ async function completeReview(req: Request, res: Response) {
   if (!review)
     return void res.status(404).json({ detail: "AI review not found" });
   if (review.reviewer_user_id !== context.userId) {
-    return void res
-      .status(403)
-      .json({
-        code: "reviewer_mismatch",
-        detail: "Only the assigned reviewer can complete this review",
-      });
+    return void res.status(403).json({
+      code: "reviewer_mismatch",
+      detail: "Only the assigned reviewer can complete this review",
+    });
   }
   if (review.status !== "in_progress") {
-    return void res
-      .status(409)
-      .json({
-        code: "review_closed",
-        detail: "The AI review is already complete",
-      });
+    return void res.status(409).json({
+      code: "review_closed",
+      detail: "The AI review is already complete",
+    });
   }
 
   const body = bodyOf(req);
   const status = body.status;
   if (status !== "approved" && status !== "changes_requested") {
-    return void res
-      .status(400)
-      .json({
-        code: "invalid_review_status",
-        detail: "status must be approved or changes_requested",
-      });
+    return void res.status(400).json({
+      code: "invalid_review_status",
+      detail: "status must be approved or changes_requested",
+    });
   }
   let comment: string | null = null;
   if (body.comment !== undefined && body.comment !== null) {
     if (typeof body.comment !== "string" || body.comment.trim().length > 2000) {
-      return void res
-        .status(400)
-        .json({
-          code: "invalid_comment",
-          detail: "comment must be at most 2000 characters",
-        });
+      return void res.status(400).json({
+        code: "invalid_comment",
+        detail: "comment must be at most 2000 characters",
+      });
     }
     comment = body.comment.trim() || null;
   }
@@ -523,12 +558,10 @@ async function completeReview(req: Request, res: Response) {
       items: itemStates,
     });
     if (completionError) {
-      return void res
-        .status(409)
-        .json({
-          code: completionError,
-          detail: "The review cannot be approved yet",
-        });
+      return void res.status(409).json({
+        code: completionError,
+        detail: "The review cannot be approved yet",
+      });
     }
   }
 
@@ -539,47 +572,37 @@ async function completeReview(req: Request, res: Response) {
       context.matterAccess.authorizationEpoch,
     );
   } catch {
-    return void res
-      .status(403)
-      .json({
-        code: "authorization_revoked",
-        detail: "Matter authorization changed; review was not completed",
-      });
+    return void res.status(403).json({
+      code: "authorization_revoked",
+      detail: "Matter authorization changed; review was not completed",
+    });
   }
 
-  const completedAt = new Date().toISOString();
-  const { error: updateError } = await context.db
-    .from("ai_reviews")
-    .update({ status, completed_at: completedAt })
-    .eq("id", review.id)
-    .eq("execution_id", context.execution.id);
-  if (updateError) {
-    return void res
-      .status(409)
-      .json({
-        code: "review_incomplete",
-        detail: "The review could not be completed",
-      });
+  const { data: atomicResult, error: atomicError } = await context.db.rpc(
+    "complete_ai_review",
+    {
+      p_review_id: review.id,
+      p_actor_user_id: context.userId,
+      p_organization_id: context.matterAccess.organizationId,
+      p_authorization_epoch: context.matterAccess.authorizationEpoch,
+      p_status: status,
+      p_comment: comment,
+    },
+  );
+  if (atomicError) {
+    return void sendReviewMutationError(res, atomicError, "completion");
   }
-
-  const { data: statusDecision, error: statusDecisionError } = await context.db
-    .from("ai_review_decisions")
-    .insert({
-      review_id: review.id,
-      review_item_id: null,
-      actor_user_id: context.userId,
-      decision: status,
-      before_state: { status: review.status },
-      after_state: { status, comment },
-      comment,
-    })
-    .select("*")
-    .single();
-  if (statusDecisionError || !statusDecision) {
+  const result = atomicResult as {
+    review?: ReviewRow;
+    decision?: ReviewDecisionRow;
+  } | null;
+  if (!result?.review || !result.decision) {
     return void res
       .status(500)
       .json({ detail: "Failed to record review completion" });
   }
+  const completedReview = result.review;
+  const statusDecision = result.decision;
 
   await recordAuditEvent(context.db, {
     actorUserId: context.userId,
@@ -594,15 +617,10 @@ async function completeReview(req: Request, res: Response) {
     },
   });
 
-  const completedReview = {
-    ...review,
-    status,
-    completed_at: completedAt,
-  } as ReviewRow;
   return void res.json({
     ...publicReview(completedReview, data.items, [
       ...data.decisions,
-      statusDecision as ReviewDecisionRow,
+      statusDecision,
     ]),
     completed_by_user_id: context.userId,
   });

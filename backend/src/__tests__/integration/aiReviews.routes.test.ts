@@ -145,7 +145,85 @@ function queryFor(table: string) {
   return query;
 }
 
-const db = { from: vi.fn((table: string) => queryFor(table)) };
+const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
+  if (name === "apply_ai_review_item_decision") {
+    const item = rows.ai_review_items.find(
+      (row) => row.id === args.p_item_id && row.review_id === args.p_review_id,
+    );
+    if (!item) return { data: null, error: { message: "item not found" } };
+    const decision = {
+      id: nextId("ai_review_decisions"),
+      review_id: args.p_review_id,
+      review_item_id: args.p_item_id,
+      actor_user_id: args.p_actor_user_id,
+      decision: args.p_decision,
+      before_state: {
+        status: item.status,
+        finding_text: item.finding_text,
+        comment: item.comment,
+      },
+      after_state: {
+        status: args.p_decision,
+        finding_text:
+          args.p_decision === "edited"
+            ? args.p_finding_text
+            : item.finding_text,
+        comment: args.p_comment ?? null,
+      },
+      comment: args.p_comment ?? null,
+      created_at: "2026-08-19T12:00:03.000Z",
+    };
+    const updatedItem = {
+      ...item,
+      status: args.p_decision,
+      finding_text:
+        args.p_decision === "edited" ? args.p_finding_text : item.finding_text,
+      comment: args.p_comment ?? null,
+      updated_at: "2026-08-19T12:00:03.000Z",
+    };
+    Object.assign(item, updatedItem);
+    rows.ai_review_decisions.push(decision);
+    writes.push(
+      { table: "ai_review_decisions", operation: "insert", payload: decision },
+      { table: "ai_review_items", operation: "update", payload: updatedItem },
+    );
+    return { data: { item: updatedItem, decision }, error: null };
+  }
+
+  if (name === "complete_ai_review") {
+    const review = rows.ai_reviews.find((row) => row.id === args.p_review_id);
+    if (!review) return { data: null, error: { message: "review not found" } };
+    const completedAt = "2026-08-19T12:00:04.000Z";
+    const decision = {
+      id: nextId("ai_review_decisions"),
+      review_id: args.p_review_id,
+      review_item_id: null,
+      actor_user_id: args.p_actor_user_id,
+      decision: args.p_status,
+      before_state: { status: review.status },
+      after_state: { status: args.p_status, comment: args.p_comment ?? null },
+      comment: args.p_comment ?? null,
+      created_at: completedAt,
+    };
+    Object.assign(review, {
+      status: args.p_status,
+      completed_at: completedAt,
+    });
+    rows.ai_review_decisions.push(decision);
+    writes.push(
+      {
+        table: "ai_reviews",
+        operation: "update",
+        payload: { status: args.p_status, completed_at: completedAt },
+      },
+      { table: "ai_review_decisions", operation: "insert", payload: decision },
+    );
+    return { data: { review, decision }, error: null };
+  }
+
+  return { data: null, error: { message: `unexpected RPC ${name}` } };
+});
+const db = { from: vi.fn((table: string) => queryFor(table)), rpc };
 const {
   checkProjectAccess,
   checkMatterAccess,
@@ -206,6 +284,77 @@ describe("AI human review routes", () => {
       authorizationEpoch: 1,
     });
     assertEpochFresh.mockResolvedValue(undefined);
+  });
+
+  it("uses one atomic RPC for item decision and projection", async () => {
+    await request(app)
+      .post("/projects/project-1/ai-executions/execution-1/review")
+      .set("Authorization", "Bearer test")
+      .send({});
+
+    const res = await request(app)
+      .post(
+        "/projects/project-1/ai-executions/execution-1/review/items/item-1/decision",
+      )
+      .set("Authorization", "Bearer test")
+      .send({ decision: "accepted" });
+
+    expect(res.status).toBe(200);
+    expect(rpc).toHaveBeenCalledWith(
+      "apply_ai_review_item_decision",
+      expect.objectContaining({
+        p_review_id: "review-1",
+        p_item_id: "item-1",
+        p_actor_user_id: "user-2",
+        p_organization_id: "org-1",
+        p_authorization_epoch: 1,
+        p_decision: "accepted",
+      }),
+    );
+    expect(
+      writes.filter((write) => write.table === "ai_review_decisions"),
+    ).toHaveLength(1);
+  });
+
+  it("uses one atomic RPC for review status and terminal decision", async () => {
+    await request(app)
+      .post("/projects/project-1/ai-executions/execution-1/review")
+      .set("Authorization", "Bearer test")
+      .send({});
+
+    for (const itemId of ["item-1", "item-2"]) {
+      await request(app)
+        .post(
+          `/projects/project-1/ai-executions/execution-1/review/items/${itemId}/decision`,
+        )
+        .set("Authorization", "Bearer test")
+        .send({ decision: "accepted" });
+    }
+
+    const res = await request(app)
+      .post("/projects/project-1/ai-executions/execution-1/review/complete")
+      .set("Authorization", "Bearer test")
+      .send({ status: "approved", comment: "Revisión completa." });
+
+    expect(res.status).toBe(200);
+    expect(rpc).toHaveBeenCalledWith(
+      "complete_ai_review",
+      expect.objectContaining({
+        p_review_id: "review-1",
+        p_actor_user_id: "user-2",
+        p_organization_id: "org-1",
+        p_authorization_epoch: 1,
+        p_status: "approved",
+        p_comment: "Revisión completa.",
+      }),
+    );
+    expect(
+      writes.filter(
+        (write) =>
+          write.table === "ai_review_decisions" &&
+          write.payload?.review_item_id === null,
+      ),
+    ).toHaveLength(1);
   });
 
   it("lists executions visible through the matter for a second lawyer", async () => {

@@ -207,28 +207,30 @@ maybeDescribe("Supabase review authorization revocation", () => {
       );
       expect(Number(after.authorization_epoch)).toBe(capturedEpoch + 1);
 
-      const decision = await admin.from("ai_review_decisions").insert({
-        id: crypto.randomUUID(),
-        review_id: reviewId,
-        review_item_id: itemId,
-        actor_user_id: reviewerId,
-        decision: "accepted",
-        before_state: { status: "pending" },
-        after_state: { status: "accepted" },
+      const decision = await admin.rpc("apply_ai_review_item_decision", {
+        p_review_id: reviewId,
+        p_item_id: itemId,
+        p_actor_user_id: reviewerId,
+        p_organization_id: orgId,
+        p_authorization_epoch: capturedEpoch,
+        p_decision: "accepted",
+        p_finding_text: "Finding",
+        p_comment: null,
       });
       expect(decision.error?.message ?? "").toMatch(
-        /active matter lawyer|authorized/i,
+        /active matter lawyer|authorization changed|authorized/i,
       );
 
-      const completion = await admin
-        .from("ai_reviews")
-        .update({
-          status: "changes_requested",
-          completed_at: new Date().toISOString(),
-        })
-        .eq("id", reviewId);
+      const completion = await admin.rpc("complete_ai_review", {
+        p_review_id: reviewId,
+        p_actor_user_id: reviewerId,
+        p_organization_id: orgId,
+        p_authorization_epoch: capturedEpoch,
+        p_status: "changes_requested",
+        p_comment: null,
+      });
       expect(completion.error?.message ?? "").toMatch(
-        /active matter lawyer|authorized/i,
+        /active matter lawyer|authorization changed|authorized/i,
       );
 
       const unchangedItem = await must<{ status: string }>(

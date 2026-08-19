@@ -34,7 +34,7 @@ if [[ -z "$SUPABASE_TEST_URL" || -z "$SUPABASE_TEST_SERVICE_ROLE_KEY" || -z "$SU
     echo "Could not read API_URL/DB_URL/SERVICE_ROLE_KEY/ANON_KEY from 'supabase status'." >&2
     exit 1
 fi
-export SUPABASE_TEST_URL SUPABASE_TEST_SERVICE_ROLE_KEY SUPABASE_TEST_ANON_KEY
+export SUPABASE_TEST_URL SUPABASE_TEST_SERVICE_ROLE_KEY SUPABASE_TEST_ANON_KEY SUPABASE_TEST_DB_URL
 
 if ! command -v psql >/dev/null 2>&1; then
     echo "psql not found. Install PostgreSQL's client tools before running stack tests." >&2
@@ -63,4 +63,5 @@ exec npx vitest run \
     src/__tests__/integration/access.supabase.test.ts \
     src/__tests__/integration/tabularPagination.supabase.test.ts \
     src/__tests__/integration/aiReviews.revocation.supabase.test.ts \
+    src/__tests__/integration/aiReviews.atomic.supabase.test.ts \
     "$@"
