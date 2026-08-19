@@ -13,7 +13,49 @@ export type AuditEventType =
   | "membership.revoked"
   | "document.uploaded"
   | "document.deleted"
-  | "document.downloaded";
+  | "document.downloaded"
+  | "ai.execution.started"
+  | "ai.execution.completed"
+  | "ai.execution.failed";
+
+export type AiAuditDetailInput = {
+  executionId: string;
+  projectId: string;
+  matterId: string | null;
+  documentVersionId: string;
+  inputSha256: string;
+  outputSha256: string | null;
+  status: "pending" | "running" | "succeeded" | "failed";
+  routeProvider: string;
+  routeModel: string;
+  credentialRef: string;
+  errorClass: string | null;
+  [key: string]: unknown;
+};
+
+/**
+ * Build the metadata-only payload used for AI lifecycle audit events.
+ * The allow-list is intentional: callers may pass provider response objects,
+ * prompts or content for local processing, but none of those values can enter
+ * the audit row.
+ */
+export function buildAiAuditDetail(
+  input: AiAuditDetailInput,
+): Record<string, unknown> {
+  return {
+    execution_id: input.executionId,
+    project_id: input.projectId,
+    matter_id: input.matterId,
+    document_version_id: input.documentVersionId,
+    input_sha256: input.inputSha256,
+    output_sha256: input.outputSha256,
+    status: input.status,
+    route_provider: input.routeProvider,
+    route_model: input.routeModel,
+    credential_ref: input.credentialRef,
+    error_class: input.errorClass,
+  };
+}
 
 export async function recordAuditEvent(
   db: Db,
