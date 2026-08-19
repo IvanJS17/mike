@@ -32,6 +32,12 @@ const rows = {
       deleted_at: null,
     },
   ],
+  organizations: [
+    {
+      id: "org-1",
+      authorization_epoch: 1,
+    },
+  ],
   ai_document_version_pages: [
     {
       document_id: "document-1",
@@ -146,11 +152,14 @@ describe("AI execution routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     writes.length = 0;
+    rows.organizations[0].authorization_epoch = 1;
     checkProjectAccess.mockResolvedValue({ ok: true, isOwner: true });
     checkMatterAccess.mockResolvedValue({
       ok: true,
       role: "matter_owner",
       projectId: "project-1",
+      organizationId: "org-1",
+      authorizationEpoch: 1,
     });
     loadAiDocumentVersionPages.mockResolvedValue({
       pages: [
@@ -180,6 +189,7 @@ describe("AI execution routes", () => {
           page: 1,
           span: { start_char: 0, end_char: quote.length },
           quote,
+          quote_sha256: sha256Hex(quote),
         },
       ])}</CITATIONS>`,
     );
@@ -321,6 +331,90 @@ describe("AI execution routes", () => {
     });
     expect(writes.filter((write) => write.table === "ai_output_versions")).toHaveLength(0);
     expect(writes.filter((write) => write.table === "ai_receipts")).toHaveLength(1);
+    expect(writes.filter((write) => write.table === "audit_events").at(-1)?.operation).toBe(
+      "ai.execution.failed",
+    );
+  });
+
+  it("fails closed when a citation omits its quote hash and never inserts output", async () => {
+    completeText.mockResolvedValue(
+      `Respuesta respaldada por el documento.\n<CITATIONS>${JSON.stringify([
+        {
+          citation_id: "c1",
+          document_id: "document-1",
+          document_version_id: "version-1",
+          page: 1,
+          span: { start_char: 0, end_char: quote.length },
+          quote,
+        },
+      ])}</CITATIONS>`,
+    );
+
+    const res = await request(app)
+      .post("/projects/project-1/ai-executions")
+      .set("Authorization", "Bearer test")
+      .send({
+        matter_id: "matter-1",
+        document_version_id: "version-1",
+        route: {
+          provider: "deepseek",
+          model: "deepseek-chat",
+          credential_ref: "deepseek:v1",
+        },
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({
+      id: "execution-1",
+      status: "failed",
+      error_class: "citation_unresolvable",
+    });
+    expect(writes.filter((write) => write.table === "ai_output_versions")).toHaveLength(0);
+  });
+
+  it("aborts with a failure receipt when authorization is revoked during the provider call", async () => {
+    completeText.mockImplementation(async () => {
+      rows.organizations[0].authorization_epoch = 2;
+      return `La parte compradora puede terminar el contrato.\n<CITATIONS>${JSON.stringify([
+        {
+          citation_id: "c1",
+          document_id: "document-1",
+          document_version_id: "version-1",
+          page: 1,
+          span: { start_char: 0, end_char: quote.length },
+          quote,
+          quote_sha256: sha256Hex(quote),
+        },
+      ])}</CITATIONS>`;
+    });
+
+    const res = await request(app)
+      .post("/projects/project-1/ai-executions")
+      .set("Authorization", "Bearer test")
+      .send({
+        matter_id: "matter-1",
+        document_version_id: "version-1",
+        route: {
+          provider: "deepseek",
+          model: "deepseek-chat",
+          credential_ref: "deepseek:v1",
+        },
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({
+      id: "execution-1",
+      status: "failed",
+      error_class: "authorization_revoked",
+      output_id: null,
+      receipt_id: "receipt-1",
+    });
+    expect(writes.filter((write) => write.table === "ai_output_versions")).toHaveLength(0);
+    expect(writes.filter((write) => write.table === "ai_receipts")).toHaveLength(1);
+    expect(JSON.stringify(writes)).not.toContain("La parte compradora puede terminar");
+    expect(writes.filter((write) => write.table === "ai_receipts")[0].payload).not.toHaveProperty(
+      "output_text",
+    );
     expect(writes.filter((write) => write.table === "audit_events").at(-1)?.operation).toBe(
       "ai.execution.failed",
     );

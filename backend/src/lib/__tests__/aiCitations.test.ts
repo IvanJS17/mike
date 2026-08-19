@@ -30,6 +30,7 @@ const validCitation = {
   page: 1,
   span: { start_char: 0, end_char: 12 },
   quote: "La parte com",
+  quote_sha256: sha256Hex("La parte com"),
 };
 
 describe("strict AI citations", () => {
@@ -79,6 +80,23 @@ describe("strict AI citations", () => {
     });
 
     expect(result).toEqual({
+      ok: false,
+      error_class: "citation_unresolvable",
+    });
+  });
+
+  it.each([
+    ["missing quote hash", undefined],
+    ["malformed quote hash", "not-a-sha256"],
+    ["mismatched quote hash", "0".repeat(64)],
+  ])("rejects a %s", (_label, quoteSha256) => {
+    const { quote_sha256: _validQuoteSha256, ...citationWithoutHash } = validCitation;
+    const candidate = {
+      ...citationWithoutHash,
+      ...(quoteSha256 === undefined ? {} : { quote_sha256: quoteSha256 }),
+    };
+
+    expect(resolveCitation(candidate, context)).toEqual({
       ok: false,
       error_class: "citation_unresolvable",
     });

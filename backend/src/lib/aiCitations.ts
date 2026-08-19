@@ -132,10 +132,14 @@ export function resolveCitation(
 
   const excerpt = sourcePage.text.slice(start, end);
   if (excerpt !== value.quote) return failure();
-  const quote_sha256 = sha256Hex(excerpt);
-  if (value.quote_sha256 !== undefined && value.quote_sha256 !== quote_sha256) {
+  if (
+    !isString(value.quote_sha256)
+    || !/^[a-f0-9]{64}$/.test(value.quote_sha256)
+  ) {
     return failure();
   }
+  const quote_sha256 = sha256Hex(excerpt);
+  if (value.quote_sha256 !== quote_sha256) return failure();
 
   return {
     citation_id: value.citation_id,

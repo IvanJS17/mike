@@ -28,6 +28,7 @@ import {
   sha256Hex,
   sortReceiptCitations,
 } from "../lib/aiReceipts";
+import { assertEpochFresh } from "../lib/tenancy";
 import type { AiExecutionStatus } from "../lib/aiExecutions";
 
 export const aiExecutionsRouter = Router({ mergeParams: true });
@@ -539,6 +540,22 @@ async function createExecution(req: Request, res: import("express").Response) {
     return void res.status(422).json(failed);
   }
   const outputSha256 = sha256Hex(outputText);
+  try {
+    await assertEpochFresh(
+      db,
+      matterAccess.organizationId,
+      matterAccess.authorizationEpoch,
+    );
+  } catch {
+    const failed = await failExecution({
+      db,
+      row,
+      version: versionRow,
+      errorClass: "authorization_revoked",
+      startedAt,
+    });
+    return void res.status(422).json(failed);
+  }
   const { data: output, error: outputError } = await db
     .from("ai_output_versions")
     .insert({

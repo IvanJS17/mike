@@ -4,7 +4,13 @@ import { canReadAiExecution, canStartAiExecution, type MatterRole } from "./aiEx
 type Db = ReturnType<typeof createServerSupabase>;
 
 export type MatterAccess =
-  | { ok: true; role: MatterRole; projectId: string | null }
+  | {
+      ok: true;
+      role: MatterRole;
+      projectId: string | null;
+      organizationId: string;
+      authorizationEpoch: number;
+    }
   | { ok: false };
 
 /**
@@ -51,5 +57,21 @@ export async function checkMatterAccess(
     .maybeSingle();
   if (!organizationMembership) return { ok: false };
 
-  return { ok: true, role, projectId: (matter.project_id as string | null) ?? null };
+  const { data: organization } = await db
+    .from("organizations")
+    .select("authorization_epoch")
+    .eq("id", workspace.organization_id)
+    .maybeSingle();
+  const authorizationEpoch = Number(organization?.authorization_epoch);
+  if (!Number.isSafeInteger(authorizationEpoch) || authorizationEpoch < 0) {
+    return { ok: false };
+  }
+
+  return {
+    ok: true,
+    role,
+    projectId: (matter.project_id as string | null) ?? null,
+    organizationId: workspace.organization_id,
+    authorizationEpoch,
+  };
 }
