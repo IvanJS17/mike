@@ -19,7 +19,8 @@ export type AuditEventType =
   | "ai.execution.failed"
   | "ai.review.created"
   | "ai.review.item_decided"
-  | "ai.review.completed";
+  | "ai.review.completed"
+  | "ai.review.report_exported";
 
 export type AiAuditDetailInput = {
   executionId: string;

@@ -4,6 +4,7 @@ import { useState } from "react";
 import {
   completeAiExecutionReview,
   decideAiReviewItem,
+  downloadAiReviewReport,
   type AiReview,
   type AiReviewItem,
 } from "@/app/lib/mikeApi";
@@ -50,6 +51,7 @@ export function AiReviewSection({
   const [closingComment, setClosingComment] = useState("");
   const [busyItemId, setBusyItemId] = useState<string | null>(null);
   const [busyCompletion, setBusyCompletion] = useState(false);
+  const [busyReport, setBusyReport] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const isAssignedReviewer = currentUserId === review.reviewer_user_id;
   const canAct = isAssignedReviewer && review.status === "in_progress";
@@ -120,6 +122,31 @@ export function AiReviewSection({
     }
   }
 
+  async function downloadReport() {
+    if (busyReport || review.status !== "approved") return;
+    setBusyReport(true);
+    setError(null);
+    try {
+      const result = await downloadAiReviewReport(projectId, executionId);
+      const blobUrl = URL.createObjectURL(result.blob);
+      const anchor = document.createElement("a");
+      anchor.href = blobUrl;
+      anchor.download = result.filename ?? result.report.filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    } catch (reportError) {
+      setError(
+        reportError instanceof Error
+          ? reportError.message
+          : "No se pudo descargar el informe Word.",
+      );
+    } finally {
+      setBusyReport(false);
+    }
+  }
+
   return (
     <section
       className="rounded-xl border border-indigo-100 bg-indigo-50/40 p-4"
@@ -140,6 +167,16 @@ export function AiReviewSection({
               ? "Aprobada"
               : "Cambios solicitados"}
         </span>
+        {review.status === "approved" && (
+          <button
+            type="button"
+            className="rounded-lg bg-indigo-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+            onClick={() => void downloadReport()}
+            disabled={busyReport}
+          >
+            {busyReport ? "Generando informe…" : "Descargar informe Word"}
+          </button>
+        )}
       </div>
 
       {!isAssignedReviewer && (

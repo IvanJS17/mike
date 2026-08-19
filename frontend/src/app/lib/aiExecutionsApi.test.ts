@@ -12,6 +12,7 @@ import {
   createAiExecutionReview,
   decideAiReviewItem,
   completeAiExecutionReview,
+  downloadAiReviewReport,
   getAiExecution,
   getAiExecutionOutput,
   getAiExecutionReceipt,
@@ -117,5 +118,49 @@ describe("AI execution API client", () => {
       status: "changes_requested",
       comment: "Revisar el plazo.",
     });
+  });
+
+  it("generates an approved report and downloads it through the authenticated API", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "export-1",
+            review_id: "review-1",
+            execution_id: "execution-1",
+            matter_id: "matter-1",
+            project_id: "project-1",
+            source_document_version_id: "source-version-1",
+            document_id: "report-document-1",
+            document_version_id: "report-version-1",
+            report_version: 1,
+            filename: "Informe de revision humana.docx",
+            content_sha256: "a".repeat(64),
+            actor_user_id: "reviewer-1",
+            created_at: "2026-08-19T12:00:00.000Z",
+            download_url:
+              "/projects/project-1/ai-executions/execution-1/review/report/download",
+          }),
+          { status: 201 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response("docx-bytes", {
+          status: 200,
+          headers: {
+            "content-disposition": 'attachment; filename="Informe de revision humana.docx"',
+          },
+        }),
+      );
+
+    const result = await downloadAiReviewReport("project-1", "execution-1");
+
+    expect(result.filename).toBe("Informe de revision humana.docx");
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "http://localhost:3001/projects/project-1/ai-executions/execution-1/review/report",
+      "http://localhost:3001/projects/project-1/ai-executions/execution-1/review/report/download",
+    ]);
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).method).toBe("POST");
+    expect((fetchMock.mock.calls[1]?.[1] as RequestInit).method).toBeUndefined();
   });
 });
