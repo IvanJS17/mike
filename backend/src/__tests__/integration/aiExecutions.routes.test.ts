@@ -252,6 +252,14 @@ describe("AI execution routes", () => {
         credentialSecret: "server-only-secret",
       }),
     );
+    const providerRequest = completeText.mock.calls[0]?.[0] as {
+      systemPrompt: string;
+    };
+    expect(providerRequest.systemPrompt).toMatch(/quote_sha256/);
+    expect(providerRequest.systemPrompt).toMatch(
+      /64-character lowercase hexadecimal SHA-256/i,
+    );
+    expect(providerRequest.systemPrompt).toMatch(/exact quote excerpt/i);
     expect(writes.filter((write) => write.table === "ai_output_versions")).toHaveLength(1);
     expect(writes.filter((write) => write.table === "ai_receipts")).toHaveLength(1);
     expect(writes.filter((write) => write.table === "audit_events").map((write) => write.operation)).toEqual([
