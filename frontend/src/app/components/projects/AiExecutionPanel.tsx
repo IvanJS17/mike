@@ -1,15 +1,22 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   createAiExecution,
+  createAiExecutionReview,
   getAiExecutionOutput,
   getAiExecutionReceipt,
+  getAiExecutionReview,
+  listAiExecutions,
+  MikeApiError,
   type AiExecution,
   type AiOutput,
   type AiReceipt,
+  type AiReview,
 } from "@/app/lib/mikeApi";
 import { useProjectWorkspace } from "@/app/components/projects/ProjectWorkspace";
+import { useAuth } from "@/app/contexts/AuthContext";
+import { AiReviewSection } from "@/app/components/projects/AiReviewSection";
 import type { Document } from "@/app/components/shared/types";
 import { LIQUID_PANEL_SURFACE_CLASS } from "@/app/components/ui/liquid-surface";
 
@@ -17,6 +24,7 @@ const ROUTE_PROVIDERS = ["deepseek", "openai", "claude", "gemini"] as const;
 
 export function AiExecutionPanel({ projectId }: { projectId: string }) {
   const { project, projectLoading } = useProjectWorkspace();
+  const { user } = useAuth();
   const documents = useMemo<Document[]>(
     () =>
       (project?.documents ?? []).filter(
@@ -31,7 +39,10 @@ export function AiExecutionPanel({ projectId }: { projectId: string }) {
   );
   const [model, setModel] = useState("deepseek-chat");
   const [credentialRef, setCredentialRef] = useState("deepseek:v1");
+  const [executions, setExecutions] = useState<AiExecution[]>([]);
   const [execution, setExecution] = useState<AiExecution | null>(null);
+  const [review, setReview] = useState<AiReview | null>(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
   const [output, setOutput] = useState<AiOutput | null>(null);
   const [receipt, setReceipt] = useState<AiReceipt | null>(null);
   const [busy, setBusy] = useState(false);
@@ -43,7 +54,7 @@ export function AiExecutionPanel({ projectId }: { projectId: string }) {
 
   const selectedDocument = documents.find((document: Document) => document.id === documentId) ?? null;
 
-  async function loadArtifacts(next: AiExecution) {
+  const loadArtifacts = useCallback(async (next: AiExecution) => {
     try {
       const nextReceipt = await getAiExecutionReceipt(projectId, next.id);
       setReceipt(nextReceipt);
@@ -54,6 +65,68 @@ export function AiExecutionPanel({ projectId }: { projectId: string }) {
       }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "No se pudo consultar el receipt");
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listAiExecutions(projectId)
+      .then((loaded) => {
+        if (cancelled) return;
+        setExecutions(loaded);
+        if (loaded[0]) {
+          setExecution(loaded[0]);
+          void loadArtifacts(loaded[0]);
+          void getAiExecutionReview(projectId, loaded[0].id)
+            .then((loadedReview) => {
+              if (!cancelled) setReview(loadedReview);
+            })
+            .catch((loadError) => {
+              if (!(loadError instanceof MikeApiError) || loadError.status !== 404) {
+                if (!cancelled) setError(loadError instanceof Error ? loadError.message : "No se pudo cargar la revisión");
+              }
+            });
+        }
+      })
+      .catch((loadError) => {
+        if (!cancelled) setError(loadError instanceof Error ? loadError.message : "No se pudieron cargar las ejecuciones");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, loadArtifacts]);
+
+  async function selectExecution(next: AiExecution) {
+    setExecution(next);
+    setReview(null);
+    setOutput(null);
+    setReceipt(null);
+    setError(null);
+    await loadArtifacts(next);
+    try {
+      setReview(await getAiExecutionReview(projectId, next.id));
+    } catch (loadError) {
+      if (!(loadError instanceof MikeApiError) || loadError.status !== 404) {
+        setError(loadError instanceof Error ? loadError.message : "No se pudo cargar la revisión");
+      }
+    }
+  }
+
+  async function openReview() {
+    if (!execution || execution.status !== "succeeded") return;
+    setReviewBusy(true);
+    setError(null);
+    try {
+      try {
+        setReview(await getAiExecutionReview(projectId, execution.id));
+      } catch (loadError) {
+        if (!(loadError instanceof MikeApiError) || loadError.status !== 404) throw loadError;
+        setReview(await createAiExecutionReview(projectId, execution.id));
+      }
+    } catch (reviewError) {
+      setError(reviewError instanceof Error ? reviewError.message : "No se pudo abrir la revisión");
+    } finally {
+      setReviewBusy(false);
     }
   }
 
@@ -70,6 +143,7 @@ export function AiExecutionPanel({ projectId }: { projectId: string }) {
     setError(null);
     setOutput(null);
     setReceipt(null);
+    setReview(null);
     try {
       const next = await createAiExecution(projectId, {
         matter_id: matterId.trim(),
@@ -77,6 +151,7 @@ export function AiExecutionPanel({ projectId }: { projectId: string }) {
         route: { provider, model, credential_ref: credentialRef.trim() },
       });
       setExecution(next);
+      setExecutions((current) => [next, ...current.filter((candidate) => candidate.id !== next.id)]);
       await loadArtifacts(next);
     } catch (startError) {
       setError(startError instanceof Error ? startError.message : "No se pudo iniciar la ejecución");
@@ -106,6 +181,32 @@ export function AiExecutionPanel({ projectId }: { projectId: string }) {
             Volver a documentos
           </a>
         </div>
+
+        {executions.length > 0 && (
+          <section className="mb-5 rounded-xl border border-gray-200 bg-white p-4">
+            <label className="block text-sm font-medium text-gray-700">
+              Ejecución IA del asunto
+              <select
+                className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 font-mono text-xs"
+                value={execution?.id ?? ""}
+                onChange={(event) => {
+                  const next = executions.find((candidate) => candidate.id === event.target.value);
+                  if (next) void selectExecution(next);
+                }}
+                disabled={busy || reviewBusy}
+              >
+                {executions.map((candidate) => (
+                  <option key={candidate.id} value={candidate.id}>
+                    {candidate.id} · {candidate.status} · {candidate.document_version_id}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="mt-2 text-xs text-gray-500">
+              Los miembros asignados al mismo matter pueden consultar ejecuciones; solo el revisor asignado puede decidir.
+            </p>
+          </section>
+        )}
 
         <div className="grid gap-4 md:grid-cols-2">
           <label className="text-sm text-gray-600">
@@ -178,6 +279,16 @@ export function AiExecutionPanel({ projectId }: { projectId: string }) {
           >
             {busy ? "Ejecutando…" : "Iniciar revisión"}
           </button>
+          {execution?.status === "succeeded" && (
+            <button
+              type="button"
+              className="rounded-lg border border-indigo-300 bg-white px-4 py-2 text-sm font-medium text-indigo-700 disabled:opacity-50"
+              onClick={() => void openReview()}
+              disabled={busy || reviewBusy}
+            >
+              {reviewBusy ? "Abriendo revisión…" : review ? "Abrir revisión" : "Abrir revisión humana"}
+            </button>
+          )}
           {error && <p className="text-sm text-red-600" role="alert">{error}</p>}
         </div>
 
@@ -216,6 +327,17 @@ export function AiExecutionPanel({ projectId }: { projectId: string }) {
                 </div>
                 <div className="mt-3 whitespace-pre-wrap text-sm leading-6 text-gray-700">{output.output_text}</div>
               </article>
+            )}
+            {review && (
+              <div className="lg:col-span-2">
+                <AiReviewSection
+                  projectId={projectId}
+                  executionId={execution.id}
+                  review={review}
+                  currentUserId={user?.id ?? null}
+                  onReviewChange={setReview}
+                />
+              </div>
             )}
           </div>
         )}

@@ -29,22 +29,19 @@ export async function revokeOrganizationMembership(
   organizationId: string,
   userId: string,
 ): Promise<{ ok: boolean; detail?: string }> {
-  const { error: deleteError } = await db
-    .from("organization_memberships")
-    .delete()
-    .eq("organization_id", organizationId)
-    .eq("user_id", userId);
+  const { error: revokeError } = await db.rpc(
+    "revoke_organization_membership",
+    {
+      p_org: organizationId,
+      p_user: userId,
+    },
+  );
 
-  if (deleteError) {
-    return { ok: false, detail: `Failed to remove membership: ${deleteError.message}` };
-  }
-
-  const { error: epochError } = await db.rpc("bump_authorization_epoch", {
-    p_org: organizationId,
-  });
-
-  if (epochError) {
-    return { ok: false, detail: `Failed to bump epoch: ${epochError.message}` };
+  if (revokeError) {
+    return {
+      ok: false,
+      detail: `Failed to revoke organization membership: ${revokeError.message}`,
+    };
   }
 
   const { error: signOutError } = await admin.auth.admin.signOut(userId);

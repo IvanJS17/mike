@@ -9,9 +9,14 @@ vi.mock("@/app/lib/supabase", () => ({
 
 import {
   createAiExecution,
+  createAiExecutionReview,
+  decideAiReviewItem,
+  completeAiExecutionReview,
   getAiExecution,
   getAiExecutionOutput,
   getAiExecutionReceipt,
+  getAiExecutionReview,
+  listAiExecutions,
 } from "./mikeApi";
 
 const fetchMock = vi.fn();
@@ -73,5 +78,44 @@ describe("AI execution API client", () => {
       "http://localhost:3001/projects/project-1/ai-executions/execution-1/receipt",
       "http://localhost:3001/projects/project-1/ai-executions/execution-1/output",
     ]);
+  });
+
+  it("creates, reads, decides, and completes an execution review in the private scope", async () => {
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ id: "review-1" }), { status: 200 }),
+      ),
+    );
+
+    await listAiExecutions("project-1");
+    await createAiExecutionReview("project-1", "execution-1");
+    await getAiExecutionReview("project-1", "execution-1");
+    await decideAiReviewItem("project-1", "execution-1", "item-1", {
+      decision: "edited",
+      finding_text: "Hallazgo corregido",
+      comment: "Nota breve",
+    });
+    await completeAiExecutionReview("project-1", "execution-1", {
+      status: "changes_requested",
+      comment: "Revisar el plazo.",
+    });
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "http://localhost:3001/projects/project-1/ai-executions",
+      "http://localhost:3001/projects/project-1/ai-executions/execution-1/review",
+      "http://localhost:3001/projects/project-1/ai-executions/execution-1/review",
+      "http://localhost:3001/projects/project-1/ai-executions/execution-1/review/items/item-1/decision",
+      "http://localhost:3001/projects/project-1/ai-executions/execution-1/review/complete",
+    ]);
+    expect((fetchMock.mock.calls[3]?.[1] as RequestInit).method).toBe("POST");
+    expect(JSON.parse(String((fetchMock.mock.calls[3]?.[1] as RequestInit).body))).toEqual({
+      decision: "edited",
+      finding_text: "Hallazgo corregido",
+      comment: "Nota breve",
+    });
+    expect(JSON.parse(String((fetchMock.mock.calls[4]?.[1] as RequestInit).body))).toEqual({
+      status: "changes_requested",
+      comment: "Revisar el plazo.",
+    });
   });
 });

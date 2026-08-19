@@ -14,6 +14,7 @@ import { userRouter } from "./routes/user";
 import { modelsRouter } from "./routes/models";
 import { downloadsRouter } from "./routes/downloads";
 import { aiExecutionsRouter } from "./routes/aiExecutions";
+import { aiReviewsRouter } from "./routes/aiReviews";
 import { manifestPublicKey } from "./lib/manifestSigning";
 import { safeErrorLog } from "./lib/safeError";
 
@@ -174,6 +175,7 @@ app.use("/workflows", workflowsRouter);
 app.use("/user", userRouter);
 app.use("/users", userRouter);
 app.use("/download", downloadsRouter);
+app.use("/projects/:projectId/ai-executions", aiReviewsRouter);
 app.use("/projects/:projectId/ai-executions", aiExecutionsRouter);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));

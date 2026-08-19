@@ -202,6 +202,113 @@ export type AiOutput = {
     created_at: string;
 };
 
+export type AiReviewStatus = "in_progress" | "approved" | "changes_requested";
+export type AiReviewItemStatus = "pending" | "accepted" | "rejected" | "edited";
+
+export type AiReviewItem = {
+    id: string;
+    review_id: string;
+    item_key: string;
+    original_text: string;
+    finding_text: string;
+    citation_refs: Record<string, unknown>[];
+    status: AiReviewItemStatus;
+    comment: string | null;
+    created_at: string;
+    updated_at: string;
+};
+
+export type AiReviewDecision = {
+    id: string;
+    review_id: string;
+    review_item_id: string | null;
+    actor_user_id: string;
+    decision: AiReviewItemStatus | "approved" | "changes_requested";
+    before_state: Record<string, unknown>;
+    after_state: Record<string, unknown>;
+    comment: string | null;
+    created_at: string;
+};
+
+export type AiReview = {
+    id: string;
+    execution_id: string;
+    matter_id: string;
+    project_id: string;
+    reviewer_user_id: string;
+    status: AiReviewStatus;
+    created_at: string;
+    completed_at: string | null;
+    items: AiReviewItem[];
+    decisions: AiReviewDecision[];
+};
+
+export async function createAiExecutionReview(
+    projectId: string,
+    executionId: string,
+): Promise<AiReview> {
+    return apiRequest<AiReview>(
+        `/projects/${projectId}/ai-executions/${executionId}/review`,
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+        },
+    );
+}
+
+export async function getAiExecutionReview(
+    projectId: string,
+    executionId: string,
+): Promise<AiReview> {
+    return apiRequest<AiReview>(
+        `/projects/${projectId}/ai-executions/${executionId}/review`,
+    );
+}
+
+export async function decideAiReviewItem(
+    projectId: string,
+    executionId: string,
+    itemId: string,
+    payload: {
+        decision: "accepted" | "rejected" | "edited";
+        finding_text?: string;
+        comment?: string | null;
+    },
+): Promise<{ item: AiReviewItem; decision: AiReviewDecision }> {
+    return apiRequest<{ item: AiReviewItem; decision: AiReviewDecision }>(
+        `/projects/${projectId}/ai-executions/${executionId}/review/items/${itemId}/decision`,
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        },
+    );
+}
+
+export async function completeAiExecutionReview(
+    projectId: string,
+    executionId: string,
+    payload: { status: "approved" | "changes_requested"; comment?: string | null },
+): Promise<AiReview> {
+    return apiRequest<AiReview>(
+        `/projects/${projectId}/ai-executions/${executionId}/review/complete`,
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        },
+    );
+}
+
+export async function listAiExecutions(
+    projectId: string,
+): Promise<AiExecution[]> {
+    return apiRequest<AiExecution[]>(
+        `/projects/${projectId}/ai-executions`,
+    );
+}
+
 export async function createAiExecution(
     projectId: string,
     payload: {

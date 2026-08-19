@@ -631,7 +631,6 @@ async function loadAuthorizedExecution(
   const projectId = req.params.projectId;
   const db = createServerSupabase();
   const projectAccess = await checkProjectAccess(projectId, userId, db);
-  if (!projectAccess.ok) return null;
   const { data } = await db
     .from("ai_executions")
     .select("*")
@@ -643,12 +642,51 @@ async function loadAuthorizedExecution(
   if (row.matter_id) {
     const matterAccess = await checkMatterAccess(row.matter_id, userId, db, intent);
     if (!matterAccess.ok || matterAccess.projectId !== projectId) return null;
-  } else if (row.user_id !== userId) {
+  } else if (!projectAccess.ok || row.user_id !== userId) {
     return null;
   }
   return { db, userId, row };
 }
 
+aiExecutionsRouter.get("/", requireAuth, async (req, res) => {
+  const userId = String(res.locals.userId ?? "");
+  const projectId = req.params.projectId;
+  if (!userId || !projectId) return void res.status(404).json([]);
+  const db = createServerSupabase();
+  const projectAccess = await checkProjectAccess(projectId, userId, db);
+  const { data: executions } = await db
+    .from("ai_executions")
+    .select("*")
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: false });
+
+  const visible = [];
+  for (const candidate of (executions ?? []) as ExecutionRow[]) {
+    if (candidate.matter_id) {
+      const matterAccess = await checkMatterAccess(candidate.matter_id, userId, db, "read");
+      if (!matterAccess.ok || matterAccess.projectId !== projectId) continue;
+    } else if (!projectAccess.ok || candidate.user_id !== userId) {
+      continue;
+    }
+    const { data: output } = await db
+      .from("ai_output_versions")
+      .select("id")
+      .eq("execution_id", candidate.id)
+      .maybeSingle();
+    const { data: receipt } = await db
+      .from("ai_receipts")
+      .select("id")
+      .eq("execution_id", candidate.id)
+      .maybeSingle();
+    visible.push(
+      publicExecution(candidate, {
+        outputId: (output as OutputRow | null)?.id ?? null,
+        receiptId: (receipt as ReceiptRow | null)?.id ?? null,
+      }),
+    );
+  }
+  return void res.json(visible);
+});
 aiExecutionsRouter.post("/", requireAuth, createExecution);
 aiExecutionsRouter.get("/:executionId", requireAuth, async (req, res) => {
   const authorized = await loadAuthorizedExecution(req);
