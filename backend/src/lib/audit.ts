@@ -16,7 +16,10 @@ export type AuditEventType =
   | "document.downloaded"
   | "ai.execution.started"
   | "ai.execution.completed"
-  | "ai.execution.failed";
+  | "ai.execution.failed"
+  | "ai.review.created"
+  | "ai.review.item_decided"
+  | "ai.review.completed";
 
 export type AiAuditDetailInput = {
   executionId: string;

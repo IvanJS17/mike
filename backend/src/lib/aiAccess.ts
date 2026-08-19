@@ -1,5 +1,10 @@
 import type { createServerSupabase } from "./supabase";
-import { canReadAiExecution, canStartAiExecution, type MatterRole } from "./aiExecutions";
+import {
+  canReadAiExecution,
+  canReviewAiExecution,
+  canStartAiExecution,
+  type MatterRole,
+} from "./aiExecutions";
 
 type Db = ReturnType<typeof createServerSupabase>;
 
@@ -22,7 +27,7 @@ export async function checkMatterAccess(
   matterId: string,
   userId: string,
   db: Db,
-  intent: "read" | "write" = "read",
+  intent: "read" | "write" | "review" = "read",
 ): Promise<MatterAccess> {
   const { data: matter } = await db
     .from("matters")
@@ -38,7 +43,16 @@ export async function checkMatterAccess(
     .eq("user_id", userId)
     .maybeSingle();
   const role = (membership?.role as MatterRole) ?? null;
-  if (!role || (intent === "write" ? !canStartAiExecution(role) : !canReadAiExecution(role))) {
+  if (
+    !role
+    || (
+      intent === "write"
+        ? !canStartAiExecution(role)
+        : intent === "review"
+          ? !canReviewAiExecution(role)
+          : !canReadAiExecution(role)
+    )
+  ) {
     return { ok: false };
   }
 

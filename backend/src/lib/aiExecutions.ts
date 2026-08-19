@@ -39,3 +39,7 @@ export function canStartAiExecution(role: MatterRole): boolean {
 export function canReadAiExecution(role: MatterRole): boolean {
   return role !== null;
 }
+
+export function canReviewAiExecution(role: MatterRole): boolean {
+  return role === "matter_owner" || role === "editor";
+}
