@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
-import { checkMatterAccess, type MatterAccess } from "../lib/aiAccess";
+import {
+  assertMatterAccessFresh,
+  checkMatterAccess,
+  type MatterAccess,
+} from "../lib/aiAccess";
 import {
   applyAiReviewDecision,
   buildReviewItemSeeds,
@@ -480,11 +484,19 @@ async function createRedlineBundle(req: Request, res: Response) {
     return;
   }
 
+  const existing = await loadRedlineBundle(
+    context.db,
+    review.id,
+    context.execution.document_version_id,
+    revision,
+  );
   try {
-    await assertEpochFresh(
+    await assertMatterAccessFresh(
+      context.execution.matter_id!,
+      context.userId,
       context.db,
-      context.matterAccess.organizationId,
-      context.matterAccess.authorizationEpoch,
+      context.matterAccess,
+      "review",
     );
   } catch {
     return void res.status(403).json({
@@ -492,13 +504,6 @@ async function createRedlineBundle(req: Request, res: Response) {
       detail: "Matter authorization changed; redline bundle was not created",
     });
   }
-
-  const existing = await loadRedlineBundle(
-    context.db,
-    review.id,
-    context.execution.document_version_id,
-    revision,
-  );
   if (existing) {
     if (!storedRedlineBundleMatches(existing, context, review, prepared)) {
       return void res.status(409).json({
@@ -531,6 +536,12 @@ async function createRedlineBundle(req: Request, res: Response) {
     .select("*")
     .single();
   if (error || !inserted) {
+    if (error?.code === "42501") {
+      return void res.status(403).json({
+        code: "authorization_revoked",
+        detail: "Matter authorization changed; redline bundle was not created",
+      });
+    }
     if (error?.code === "23505") {
       const raced = await loadRedlineBundle(
         context.db,
@@ -618,10 +629,12 @@ async function loadRedlineBundleForRead(
     return null;
   }
   try {
-    await assertEpochFresh(
+    await assertMatterAccessFresh(
+      context.execution.matter_id!,
+      context.userId,
       context.db,
-      context.matterAccess.organizationId,
-      context.matterAccess.authorizationEpoch,
+      context.matterAccess,
+      "read",
     );
   } catch {
     res.status(403).json({

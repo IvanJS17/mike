@@ -2,13 +2,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import { canonicalJson, sha256Hex } from "../../lib/aiReceipts";
 
-const { checkMatterAccess, assertEpochFresh, recordAuditEvent } = vi.hoisted(
-  () => ({
-    checkMatterAccess: vi.fn(),
-    assertEpochFresh: vi.fn(),
-    recordAuditEvent: vi.fn(),
-  }),
-);
+const {
+  checkMatterAccess,
+  assertMatterAccessFresh,
+  assertEpochFresh,
+  recordAuditEvent,
+} = vi.hoisted(() => ({
+  checkMatterAccess: vi.fn(),
+  assertMatterAccessFresh: vi.fn(),
+  assertEpochFresh: vi.fn(),
+  recordAuditEvent: vi.fn(),
+}));
 
 const sourceText = "Source A. Source B.";
 const sourceSha256 = "f".repeat(64);
@@ -155,6 +159,8 @@ vi.mock("../../middleware/auth", () => ({
 }));
 vi.mock("../../lib/aiAccess", () => ({
   checkMatterAccess: (...args: unknown[]) => checkMatterAccess(...args),
+  assertMatterAccessFresh: (...args: unknown[]) =>
+    assertMatterAccessFresh(...args),
 }));
 vi.mock("../../lib/tenancy", () => ({
   assertEpochFresh: (...args: unknown[]) => assertEpochFresh(...args),
@@ -195,6 +201,7 @@ beforeEach(() => {
     organizationId: "org-1",
     authorizationEpoch: 1,
   });
+  assertMatterAccessFresh.mockResolvedValue(undefined);
   assertEpochFresh.mockResolvedValue(undefined);
   recordAuditEvent.mockResolvedValue(undefined);
 });
@@ -272,6 +279,33 @@ describe("AI redline bundle routes", () => {
       "ai-redline-bundle.json",
     );
     expect(downloaded.body.actions[0].citation_id).toBe("c1");
+  });
+
+  it("does not return a persisted bundle after the serialized access guard rejects", async () => {
+    const created = await request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+    expect(created.status).toBe(201);
+
+    assertMatterAccessFresh.mockRejectedValueOnce(
+      new Error("authorization revoked"),
+    );
+    const idempotent = await request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+    expect(idempotent.status).toBe(403);
+    expect(idempotent.body.code).toBe("authorization_revoked");
+    expect(idempotent.body.canonical_json).toBeUndefined();
+
+    assertMatterAccessFresh.mockRejectedValueOnce(
+      new Error("authorization revoked"),
+    );
+    const read = await request(app)
+      .get(route)
+      .set("Authorization", "Bearer test");
+    expect(read.status).toBe(403);
+    expect(read.body.code).toBe("authorization_revoked");
+    expect(read.body.canonical_json).toBeUndefined();
   });
 
   it("fails closed when persisted canonical JSON is tampered with", async () => {

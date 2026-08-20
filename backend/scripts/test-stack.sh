@@ -64,4 +64,5 @@ exec npx vitest run \
     src/__tests__/integration/tabularPagination.supabase.test.ts \
     src/__tests__/integration/aiReviews.revocation.supabase.test.ts \
     src/__tests__/integration/aiReviews.atomic.supabase.test.ts \
+    src/__tests__/integration/aiRedlineBundles.revocation.supabase.test.ts \
     "$@"
