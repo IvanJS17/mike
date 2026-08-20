@@ -44,14 +44,12 @@ export async function checkMatterAccess(
     .maybeSingle();
   const role = (membership?.role as MatterRole) ?? null;
   if (
-    !role
-    || (
-      intent === "write"
-        ? !canStartAiExecution(role)
-        : intent === "review"
-          ? !canReviewAiExecution(role)
-          : !canReadAiExecution(role)
-    )
+    !role ||
+    (intent === "write"
+      ? !canStartAiExecution(role)
+      : intent === "review"
+        ? !canReviewAiExecution(role)
+        : !canReadAiExecution(role))
   ) {
     return { ok: false };
   }
@@ -88,4 +86,28 @@ export async function checkMatterAccess(
     organizationId: workspace.organization_id,
     authorizationEpoch,
   };
+}
+
+/**
+ * Re-check matter membership, organization membership, and the captured epoch
+ * in one database transaction. The SQL function locks the organization row,
+ * which is also the lock used by organization membership revocation.
+ */
+export async function assertMatterAccessFresh(
+  matterId: string,
+  userId: string,
+  db: Db,
+  access: Extract<MatterAccess, { ok: true }>,
+  intent: "read" | "review",
+): Promise<void> {
+  const { error } = await db.rpc("assert_ai_redline_bundle_access", {
+    p_matter: matterId,
+    p_user: userId,
+    p_organization: access.organizationId,
+    p_authorization_epoch: access.authorizationEpoch,
+    p_intent: intent,
+  });
+  if (error) {
+    throw new Error(`matter access check failed: ${error.message}`);
+  }
 }

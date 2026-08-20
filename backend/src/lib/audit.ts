@@ -20,7 +20,8 @@ export type AuditEventType =
   | "ai.review.created"
   | "ai.review.item_decided"
   | "ai.review.completed"
-  | "ai.review.report_exported";
+  | "ai.review.report_exported"
+  | "ai.review.redline_bundle_created";
 
 export type AiAuditDetailInput = {
   executionId: string;
@@ -80,7 +81,10 @@ export async function recordAuditEvent(
     if (error) {
       // Audit failures must never break the underlying operation; they are
       // logged and surfaced to the operator via the W1.14 daily export gap.
-      console.error(`[audit] failed to record ${event.eventType}`, error.message);
+      console.error(
+        `[audit] failed to record ${event.eventType}`,
+        error.message,
+      );
     }
   } catch (err) {
     // Even a thrown exception must not break the underlying operation.

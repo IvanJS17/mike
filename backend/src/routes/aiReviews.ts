@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
-import { checkMatterAccess, type MatterAccess } from "../lib/aiAccess";
+import {
+  assertMatterAccessFresh,
+  checkMatterAccess,
+  type MatterAccess,
+} from "../lib/aiAccess";
 import {
   applyAiReviewDecision,
   buildReviewItemSeeds,
@@ -12,6 +16,7 @@ import {
 } from "../lib/aiReviews";
 import { assertEpochFresh } from "../lib/tenancy";
 import { recordAuditEvent } from "../lib/audit";
+import { canonicalJson, sha256Hex } from "../lib/aiReceipts";
 import { generateDocx } from "../lib/chat/tools/documentOps";
 import {
   buildContentDisposition,
@@ -24,6 +29,10 @@ import {
   prepareAiReviewReport,
   type AiReviewReportInput,
 } from "../lib/aiReviewReports";
+import {
+  prepareAiRedlineBundle,
+  type AiRedlineBundleInput,
+} from "../lib/aiRedlineBundles";
 import type { AiExecutionStatus } from "../lib/aiExecutions";
 
 export const aiReviewsRouter = Router({ mergeParams: true });
@@ -37,6 +46,7 @@ type ExecutionRow = {
   project_id: string;
   document_id: string;
   document_version_id: string;
+  document_content_sha256: string;
   status: AiExecutionStatus;
   created_at?: string;
 };
@@ -92,6 +102,26 @@ type ReviewExportRow = {
   actor_user_id: string;
   created_at: string;
   filename: string;
+};
+
+type RedlineBundleRow = {
+  id: string;
+  bundle_version: string;
+  revision: number;
+  review_id: string;
+  execution_id: string;
+  matter_id: string;
+  project_id: string;
+  source_document_version_id: string;
+  source_document_sha256: string;
+  receipt_id: string;
+  receipt_sha256: string;
+  canonical_json: unknown;
+  canonical_json_text: string;
+  bundle_sha256: string;
+  actions_count: number;
+  actor_user_id: string;
+  created_at: string;
 };
 
 type ReviewContext = {
@@ -277,6 +307,368 @@ async function loadReviewExport(
     .eq("source_document_version_id", sourceDocumentVersionId)
     .maybeSingle();
   return (data as ReviewExportRow | null) ?? null;
+}
+
+async function loadRedlineBundle(
+  db: Db,
+  reviewId: string,
+  sourceDocumentVersionId: string,
+  revision: number,
+): Promise<RedlineBundleRow | null> {
+  const { data } = await db
+    .from("ai_redline_bundles")
+    .select("*")
+    .eq("review_id", reviewId)
+    .eq("source_document_version_id", sourceDocumentVersionId)
+    .eq("revision", revision)
+    .maybeSingle();
+  return (data as RedlineBundleRow | null) ?? null;
+}
+
+async function loadRedlineBundleInput(
+  context: ReviewContext,
+  review: ReviewRow,
+  revision: number,
+): Promise<AiRedlineBundleInput> {
+  const [{ data: receipt }, { data: sourceVersion }, { data: pages }] =
+    await Promise.all([
+      context.db
+        .from("ai_receipts")
+        .select(
+          "id, execution_id, receipt_version, canonical_json, receipt_sha256",
+        )
+        .eq("execution_id", context.execution.id)
+        .maybeSingle(),
+      context.db
+        .from("document_versions")
+        .select("id, document_id, content_sha256, deleted_at")
+        .eq("id", context.execution.document_version_id)
+        .eq("document_id", context.execution.document_id)
+        .is("deleted_at", null)
+        .maybeSingle(),
+      context.db
+        .from("ai_document_version_pages")
+        .select(
+          "document_id, document_version_id, page, content, content_sha256",
+        )
+        .eq("document_id", context.execution.document_id)
+        .eq("document_version_id", context.execution.document_version_id)
+        .order("page", { ascending: true }),
+    ]);
+  const data = await loadReviewData(context.db, review.id);
+  const source = sourceVersion as AiRedlineBundleInput["source_version"] | null;
+  return {
+    revision,
+    execution: context.execution,
+    review,
+    items: data.items.map((item) => ({
+      id: item.id,
+      item_key: item.item_key,
+      finding_text: item.finding_text,
+      status: item.status,
+      citation_refs: item.citation_refs,
+      updated_at: item.updated_at,
+    })),
+    source_version: source ?? {
+      id: context.execution.document_version_id,
+      document_id: "",
+      content_sha256: null,
+      deleted_at: null,
+    },
+    pages: (pages ?? []) as AiRedlineBundleInput["pages"],
+    receipt: (receipt as AiRedlineBundleInput["receipt"] | null) ?? null,
+  };
+}
+
+function parseRevision(value: unknown): number | null {
+  if (value === undefined || value === null || value === "") return 1;
+  const revision = typeof value === "number" ? value : Number(String(value));
+  return Number.isSafeInteger(revision) && revision >= 1 && revision <= 1000
+    ? revision
+    : null;
+}
+
+function redlinePreparationError(res: Response, code: string): void {
+  const status = code === "scope_mismatch" ? 404 : 409;
+  res.status(status).json({
+    code,
+    detail: "The approved AI review is not available as a redline bundle",
+  });
+}
+
+function redlineBundlePath(req: Request): string {
+  return `${req.baseUrl}/${req.params.executionId}/review/redline-bundle`;
+}
+
+function publicRedlineBundle(row: RedlineBundleRow, req: Request) {
+  return {
+    id: row.id,
+    bundle_version: row.bundle_version,
+    revision: row.revision,
+    review_id: row.review_id,
+    execution_id: row.execution_id,
+    matter_id: row.matter_id,
+    project_id: row.project_id,
+    source_document_version_id: row.source_document_version_id,
+    source_document_sha256: row.source_document_sha256,
+    receipt_id: row.receipt_id,
+    receipt_sha256: row.receipt_sha256,
+    actions_count: row.actions_count,
+    bundle_sha256: row.bundle_sha256,
+    canonical_json: row.canonical_json,
+    actor_user_id: row.actor_user_id,
+    created_at: row.created_at,
+    download_url: `${redlineBundlePath(req)}/download`,
+  };
+}
+
+function storedRedlineBundleMatches(
+  row: RedlineBundleRow,
+  context: ReviewContext,
+  review: ReviewRow,
+  prepared: Extract<ReturnType<typeof prepareAiRedlineBundle>, { ok: true }>,
+): boolean {
+  const canonical = row.canonical_json;
+  if (
+    !canonical ||
+    typeof canonical !== "object" ||
+    Array.isArray(canonical) ||
+    typeof row.canonical_json_text !== "string" ||
+    !/^[a-f0-9]{64}$/.test(row.bundle_sha256)
+  ) {
+    return false;
+  }
+  return (
+    row.bundle_version === "beta-0.1" &&
+    row.revision === prepared.revision &&
+    row.review_id === review.id &&
+    row.execution_id === context.execution.id &&
+    row.matter_id === context.execution.matter_id &&
+    row.project_id === context.execution.project_id &&
+    row.source_document_version_id === context.execution.document_version_id &&
+    row.source_document_sha256 ===
+      prepared.canonical_json.source_document_sha256 &&
+    row.receipt_id === prepared.canonical_json.receipt_id &&
+    row.receipt_sha256 === prepared.canonical_json.receipt_sha256 &&
+    row.actions_count === prepared.actions.length &&
+    row.canonical_json_text === prepared.canonical_json_text &&
+    row.canonical_json_text === canonicalJson(canonical) &&
+    row.bundle_sha256 === sha256Hex(row.canonical_json_text) &&
+    row.bundle_sha256 === prepared.bundle_sha256 &&
+    canonicalJson(canonical) === prepared.canonical_json_text
+  );
+}
+
+async function createRedlineBundle(req: Request, res: Response) {
+  const context = await loadReviewContext(req, "review");
+  if (!context) {
+    return void res.status(404).json({ detail: "AI execution not found" });
+  }
+  const review = await loadReview(context.db, context.execution.id);
+  if (!review) {
+    return void res.status(404).json({ detail: "AI review not found" });
+  }
+  const revision = parseRevision(bodyOf(req).revision);
+  if (revision === null) {
+    return void res.status(400).json({
+      code: "invalid_revision",
+      detail: "revision must be a positive integer",
+    });
+  }
+
+  const prepared = prepareAiRedlineBundle(
+    await loadRedlineBundleInput(context, review, revision),
+  );
+  if (!prepared.ok) {
+    redlinePreparationError(res, prepared.code);
+    return;
+  }
+
+  const existing = await loadRedlineBundle(
+    context.db,
+    review.id,
+    context.execution.document_version_id,
+    revision,
+  );
+  try {
+    await assertMatterAccessFresh(
+      context.execution.matter_id!,
+      context.userId,
+      context.db,
+      context.matterAccess,
+      "review",
+    );
+  } catch {
+    return void res.status(403).json({
+      code: "authorization_revoked",
+      detail: "Matter authorization changed; redline bundle was not created",
+    });
+  }
+  if (existing) {
+    if (!storedRedlineBundleMatches(existing, context, review, prepared)) {
+      return void res.status(409).json({
+        code: "redline_bundle_integrity_failed",
+        detail: "AI redline bundle integrity check failed",
+      });
+    }
+    return void res.status(200).json(publicRedlineBundle(existing, req));
+  }
+
+  const { data: inserted, error } = await context.db
+    .from("ai_redline_bundles")
+    .insert({
+      bundle_version: "beta-0.1",
+      revision,
+      review_id: review.id,
+      execution_id: context.execution.id,
+      matter_id: context.execution.matter_id,
+      project_id: context.execution.project_id,
+      source_document_version_id: context.execution.document_version_id,
+      source_document_sha256: prepared.canonical_json.source_document_sha256,
+      receipt_id: prepared.canonical_json.receipt_id,
+      receipt_sha256: prepared.canonical_json.receipt_sha256,
+      canonical_json: prepared.canonical_json,
+      canonical_json_text: prepared.canonical_json_text,
+      bundle_sha256: prepared.bundle_sha256,
+      actions_count: prepared.actions.length,
+      actor_user_id: context.userId,
+    })
+    .select("*")
+    .single();
+  if (error || !inserted) {
+    if (error?.code === "42501") {
+      return void res.status(403).json({
+        code: "authorization_revoked",
+        detail: "Matter authorization changed; redline bundle was not created",
+      });
+    }
+    if (error?.code === "23505") {
+      const raced = await loadRedlineBundle(
+        context.db,
+        review.id,
+        context.execution.document_version_id,
+        revision,
+      );
+      if (
+        raced &&
+        storedRedlineBundleMatches(raced, context, review, prepared)
+      ) {
+        return void res.status(200).json(publicRedlineBundle(raced, req));
+      }
+    }
+    return void res.status(500).json({
+      detail: "Failed to create AI redline bundle",
+    });
+  }
+
+  const bundle = inserted as RedlineBundleRow;
+  await recordAuditEvent(context.db, {
+    actorUserId: context.userId,
+    organizationId: context.matterAccess.organizationId,
+    eventType: "ai.review.redline_bundle_created",
+    eventDetail: {
+      bundle_id: bundle.id,
+      review_id: review.id,
+      execution_id: context.execution.id,
+      matter_id: context.execution.matter_id,
+      project_id: context.execution.project_id,
+      source_document_version_id: context.execution.document_version_id,
+      source_document_sha256: prepared.canonical_json.source_document_sha256,
+      receipt_id: prepared.canonical_json.receipt_id,
+      receipt_sha256: prepared.canonical_json.receipt_sha256,
+      revision,
+      actions_count: prepared.actions.length,
+      bundle_sha256: prepared.bundle_sha256,
+    },
+  });
+  return void res.status(201).json(publicRedlineBundle(bundle, req));
+}
+
+async function loadRedlineBundleForRead(
+  req: Request,
+  res: Response,
+): Promise<{
+  context: ReviewContext;
+  review: ReviewRow;
+  row: RedlineBundleRow;
+  prepared: Extract<ReturnType<typeof prepareAiRedlineBundle>, { ok: true }>;
+} | null> {
+  const context = await loadReviewContext(req, "read");
+  if (!context) {
+    res.status(404).json({ detail: "AI execution not found" });
+    return null;
+  }
+  const review = await loadReview(context.db, context.execution.id);
+  if (!review) {
+    res.status(404).json({ detail: "AI review not found" });
+    return null;
+  }
+  const revision = parseRevision(req.query.revision);
+  if (revision === null) {
+    res.status(400).json({
+      code: "invalid_revision",
+      detail: "revision must be a positive integer",
+    });
+    return null;
+  }
+  const prepared = prepareAiRedlineBundle(
+    await loadRedlineBundleInput(context, review, revision),
+  );
+  if (!prepared.ok) {
+    redlinePreparationError(res, prepared.code);
+    return null;
+  }
+  const row = await loadRedlineBundle(
+    context.db,
+    review.id,
+    context.execution.document_version_id,
+    revision,
+  );
+  if (!row) {
+    res.status(404).json({ detail: "AI redline bundle not found" });
+    return null;
+  }
+  try {
+    await assertMatterAccessFresh(
+      context.execution.matter_id!,
+      context.userId,
+      context.db,
+      context.matterAccess,
+      "read",
+    );
+  } catch {
+    res.status(403).json({
+      code: "authorization_revoked",
+      detail: "Matter authorization changed; redline bundle was not read",
+    });
+    return null;
+  }
+  if (!storedRedlineBundleMatches(row, context, review, prepared)) {
+    res.status(409).json({
+      code: "redline_bundle_integrity_failed",
+      detail: "AI redline bundle integrity check failed",
+    });
+    return null;
+  }
+  return { context, review, row, prepared };
+}
+
+async function getRedlineBundle(req: Request, res: Response) {
+  const loaded = await loadRedlineBundleForRead(req, res);
+  if (!loaded) return;
+  return void res.json(publicRedlineBundle(loaded.row, req));
+}
+
+async function downloadRedlineBundle(req: Request, res: Response) {
+  const loaded = await loadRedlineBundleForRead(req, res);
+  if (!loaded) return;
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader(
+    "Content-Disposition",
+    buildContentDisposition("attachment", "ai-redline-bundle.json"),
+  );
+  return void res.send(loaded.prepared.canonical_json_text);
 }
 
 function reportPath(req: Request): string {
@@ -1045,6 +1437,21 @@ aiReviewsRouter.get(
   "/:executionId/review/report/download",
   requireAuth,
   downloadReviewReport,
+);
+aiReviewsRouter.post(
+  "/:executionId/review/redline-bundle",
+  requireAuth,
+  createRedlineBundle,
+);
+aiReviewsRouter.get(
+  "/:executionId/review/redline-bundle",
+  requireAuth,
+  getRedlineBundle,
+);
+aiReviewsRouter.get(
+  "/:executionId/review/redline-bundle/download",
+  requireAuth,
+  downloadRedlineBundle,
 );
 
 aiReviewsRouter.post("/:executionId/review", requireAuth, createReview);
