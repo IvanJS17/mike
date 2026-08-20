@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   completeAiExecutionReview,
   decideAiReviewItem,
   downloadAiReviewReport,
   exportAiReviewReport,
+  getAiReviewDrivePublication,
   MikeApiError,
   publishAiReviewReportToDrive,
   type AiReview,
@@ -100,9 +101,18 @@ function canRetryPublication(
 function publicationFailureMessage(
   failureCode: AiReviewDrivePublication["failure_code"],
 ): string | null {
-  return failureCode === "drive_upload_outcome_unknown"
-    ? uncertainUploadMessage
-    : null;
+  switch (failureCode) {
+    case "drive_upload_outcome_unknown":
+      return uncertainUploadMessage;
+    case "authorization_revoked":
+      return "El acceso al matter cambió; no se publicó el informe.";
+    case "drive_cleanup_failed":
+      return "No se pudo confirmar la limpieza del archivo remoto; la publicación quedó bloqueada.";
+    case "publication_failed":
+      return "No se pudo publicar el informe en Shared Drive.";
+    default:
+      return null;
+  }
 }
 
 export function AiReviewSection({
@@ -125,9 +135,53 @@ export function AiReviewSection({
   const [publicationStatus, setPublicationStatus] = useState<
     AiReviewDrivePublication["status"] | null
   >(null);
+  const [publicationLoading, setPublicationLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const isAssignedReviewer = currentUserId === review.reviewer_user_id;
   const canAct = isAssignedReviewer && review.status === "in_progress";
+
+  useEffect(() => {
+    let cancelled = false;
+    setPublication(null);
+    setPublicationStatus(null);
+    setError(null);
+    if (review.status !== "approved") {
+      setPublicationLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setPublicationLoading(true);
+    void getAiReviewDrivePublication(projectId, executionId)
+      .then((nextPublication) => {
+        if (cancelled) return;
+        setPublication(nextPublication);
+        setPublicationStatus(nextPublication.status);
+        setError(
+          nextPublication.status === "failed"
+            ? publicationFailureMessage(nextPublication.failure_code)
+            : null,
+        );
+      })
+      .catch((publicationError) => {
+        if (cancelled) return;
+        if (
+          publicationError instanceof MikeApiError &&
+          publicationError.status === 404
+        ) {
+          return;
+        }
+        setError(publicationErrorMessage(publicationError));
+      })
+      .finally(() => {
+        if (!cancelled) setPublicationLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [executionId, projectId, review.id, review.status]);
 
   async function decide(
     item: AiReviewItem,
@@ -292,9 +346,11 @@ export function AiReviewSection({
                 type="button"
                 className="rounded-lg bg-emerald-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
                 onClick={() => void publishReport()}
-                disabled={busyReport || busyPublication}
+                disabled={busyReport || busyPublication || publicationLoading}
               >
-                Publicar en Shared Drive
+                {publicationLoading
+                  ? "Consultando publicación…"
+                  : "Publicar en Shared Drive"}
               </button>
             )}
           </>

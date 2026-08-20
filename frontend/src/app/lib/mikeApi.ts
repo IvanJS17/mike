@@ -285,6 +285,7 @@ export type AiReviewDrivePublication = {
     size_bytes: number | null;
     checksum: string | null;
     failure_code: string | null;
+    error?: string | null;
     actor_user_id: string;
     created_at: string;
     updated_at: string;
@@ -422,6 +423,15 @@ export async function publishAiReviewReportToDrive(
         }
         throw error;
     }
+}
+
+export async function getAiReviewDrivePublication(
+    projectId: string,
+    executionId: string,
+): Promise<AiReviewDrivePublication> {
+    return apiRequest<AiReviewDrivePublication>(
+        `/projects/${projectId}/ai-executions/${executionId}/review/report/publish`,
+    );
 }
 
 export async function getMatterDriveFolder(

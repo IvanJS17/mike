@@ -17,6 +17,7 @@ import {
   getAiExecutionOutput,
   getAiExecutionReceipt,
   getAiExecutionReview,
+  getAiReviewDrivePublication,
   listAiExecutions,
   getMatterDriveFolder,
   publishAiReviewReportToDrive,
@@ -187,6 +188,28 @@ describe("AI execution API client", () => {
     );
     expect(init.method).toBe("POST");
     expect(JSON.parse(String(init.body))).toEqual({});
+  });
+
+  it("reads the existing Drive publication without creating or uploading", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "publication-1",
+          status: "pending",
+          error: null,
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await getAiReviewDrivePublication("project-1", "execution-1");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      "http://localhost:3001/projects/project-1/ai-executions/execution-1/review/report/publish",
+    );
+    expect(init.method).toBeUndefined();
+    expect(init.body).toBeUndefined();
   });
 
   it("returns a terminal uncertain publication from the backend error envelope", async () => {

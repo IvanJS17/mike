@@ -219,6 +219,33 @@ function driveFile(
   };
 }
 
+function publicationRow(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: "publication-1",
+    export_id: "export-1",
+    review_id: "review-1",
+    execution_id: "execution-1",
+    matter_id: "matter-1",
+    project_id: "project-1",
+    organization_id: "org-1",
+    authorization_epoch: 1,
+    drive_folder_id: "shared-drive-folder-1",
+    file_id: null,
+    sha256: reportSha256,
+    format_version: "beta-0.1",
+    status: "pending",
+    size_bytes: null,
+    checksum: null,
+    failure_code: null,
+    actor_user_id: "reviewer-1",
+    created_at: "2026-08-19T12:06:00.000Z",
+    updated_at: "2026-08-19T12:06:00.000Z",
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   ids = 0;
   uploadCount = 0;
@@ -276,6 +303,150 @@ function deferred<T = void>() {
 }
 
 describe("approved AI review report Drive publication", () => {
+  it("rehydrates a pending publication without creating or uploading anything", async () => {
+    rows.ai_review_drive_publications.push(publicationRow());
+
+    const response = await request(app)
+      .get(route)
+      .set("Authorization", "Bearer test");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      id: "publication-1",
+      status: "pending",
+      error: null,
+    });
+    expect(response.body).not.toHaveProperty("file_id");
+    expect(driveClient.uploadDocx).not.toHaveBeenCalled();
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it("rehydrates a failed publication with a safe error and no file id", async () => {
+    rows.ai_review_drive_publications.push(
+      publicationRow({
+        status: "failed",
+        failure_code: "drive_upload_outcome_unknown",
+      }),
+    );
+
+    const response = await request(app)
+      .get(route)
+      .set("Authorization", "Bearer test");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      status: "failed",
+      failure_code: "drive_upload_outcome_unknown",
+      error: "drive_upload_outcome_unknown",
+    });
+    expect(response.body).not.toHaveProperty("file_id");
+    expect(JSON.stringify(response.body)).not.toContain("Bearer");
+    expect(driveClient.uploadDocx).not.toHaveBeenCalled();
+  });
+
+  it("sanitizes an unexpected stored publication failure code", async () => {
+    rows.ai_review_drive_publications.push(
+      publicationRow({
+        status: "failed",
+        failure_code: "provider Bearer live token",
+      }),
+    );
+
+    const response = await request(app)
+      .get(route)
+      .set("Authorization", "Bearer test");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      status: "failed",
+      failure_code: "publication_failed",
+      error: "publication_failed",
+    });
+    expect(JSON.stringify(response.body)).not.toContain("live token");
+    expect(response.body).not.toHaveProperty("file_id");
+  });
+
+  it("rehydrates a published publication with its Drive file id", async () => {
+    rows.ai_review_drive_publications.push(
+      publicationRow({
+        status: "published",
+        file_id: "drive-file-1",
+        size_bytes: reportBytes.byteLength,
+        checksum: "md5-checksum-1",
+      }),
+    );
+
+    const response = await request(app)
+      .get(route)
+      .set("Authorization", "Bearer test");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      status: "published",
+      file_id: "drive-file-1",
+      error: null,
+    });
+    expect(driveClient.uploadDocx).not.toHaveBeenCalled();
+  });
+
+  it("returns 403 for revoked access without revealing publication data", async () => {
+    rows.ai_review_drive_publications.push(publicationRow());
+    assertMatterAccessFresh.mockRejectedValueOnce(new Error("revoked"));
+
+    const response = await request(app)
+      .get(route)
+      .set("Authorization", "Bearer test");
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe("authorization_revoked");
+    expect(response.body).not.toHaveProperty("publication");
+    expect(response.body).not.toHaveProperty("file_id");
+    expect(driveClient.uploadDocx).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for a cross-matter export without revealing publication data", async () => {
+    rows.ai_review_drive_publications.push(publicationRow());
+    rows.ai_review_exports[0].matter_id = "other-matter";
+
+    const response = await request(app)
+      .get(route)
+      .set("Authorization", "Bearer test");
+
+    expect(response.status).toBe(404);
+    expect(response.body).not.toHaveProperty("publication");
+    expect(response.body).not.toHaveProperty("file_id");
+    expect(driveClient.uploadDocx).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for a cross-publication scope without revealing data", async () => {
+    rows.ai_review_drive_publications.push(
+      publicationRow({ matter_id: "other-matter" }),
+    );
+
+    const response = await request(app)
+      .get(route)
+      .set("Authorization", "Bearer test");
+
+    expect(response.status).toBe(404);
+    expect(response.body).not.toHaveProperty("publication");
+    expect(response.body).not.toHaveProperty("file_id");
+    expect(driveClient.uploadDocx).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 when the caller cannot read the matter", async () => {
+    rows.ai_review_drive_publications.push(publicationRow());
+    checkMatterAccess.mockResolvedValueOnce({ ok: false });
+
+    const response = await request(app)
+      .get(route)
+      .set("Authorization", "Bearer test");
+
+    expect(response.status).toBe(404);
+    expect(response.body).not.toHaveProperty("publication");
+    expect(response.body).not.toHaveProperty("file_id");
+    expect(driveClient.uploadDocx).not.toHaveBeenCalled();
+  });
+
   it("uploads the approved DOCX with scoped appProperties and verifies the file", async () => {
     const response = await request(app)
       .post(route)

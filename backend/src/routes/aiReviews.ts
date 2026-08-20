@@ -1057,6 +1057,52 @@ function publicDrivePublication(row: DrivePublicationRow) {
   };
 }
 
+type PublicDrivePublicationFailureCode =
+  | DrivePublicationFailureCode
+  | "publication_failed";
+
+function sanitizeDrivePublicationFailureCode(
+  code: unknown,
+): PublicDrivePublicationFailureCode {
+  switch (code) {
+    case "drive_upload_outcome_unknown":
+    case "drive_file_invalid":
+    case "authorization_revoked":
+    case "publication_record_failed":
+    case "drive_cleanup_failed":
+      return code;
+    default:
+      return "publication_failed";
+  }
+}
+
+function publicDrivePublicationStatus(row: DrivePublicationRow) {
+  const failureCode =
+    row.status === "failed"
+      ? sanitizeDrivePublicationFailureCode(row.failure_code)
+      : null;
+  const base = {
+    id: row.id,
+    export_id: row.export_id,
+    review_id: row.review_id,
+    execution_id: row.execution_id,
+    matter_id: row.matter_id,
+    project_id: row.project_id,
+    drive_folder_id: row.drive_folder_id,
+    sha256: row.sha256,
+    format_version: row.format_version,
+    status: row.status,
+    size_bytes: row.status === "published" ? row.size_bytes : null,
+    checksum: row.status === "published" ? row.checksum : null,
+    failure_code: failureCode,
+    error: failureCode,
+    actor_user_id: row.actor_user_id,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+  return row.status === "published" ? { ...base, file_id: row.file_id } : base;
+}
+
 async function loadDrivePublication(
   db: Db,
   exportId: string,
@@ -1142,14 +1188,96 @@ async function updateDrivePublication(
 
 async function assertDrivePublicationAccess(
   context: ReviewContext,
+  intent: "read" | "review" = "review",
 ): Promise<void> {
   await assertMatterAccessFresh(
     context.execution.matter_id!,
     context.userId,
     context.db,
     context.matterAccess,
-    "review",
+    intent,
   );
+}
+
+async function getDrivePublicationStatus(req: Request, res: Response) {
+  const context = await loadReviewContext(req, "read");
+  if (!context) {
+    return void res.status(404).json({ detail: "AI execution not found" });
+  }
+
+  try {
+    await assertDrivePublicationAccess(context, "read");
+  } catch {
+    return void res.status(403).json({
+      code: "authorization_revoked",
+      detail: "Matter authorization changed; Drive publication was not read",
+    });
+  }
+
+  const review = await loadReview(context.db, context.execution.id);
+  if (
+    !review ||
+    context.execution.status !== "succeeded" ||
+    review.status !== "approved"
+  ) {
+    return void res
+      .status(404)
+      .json({ detail: "AI review Drive publication not found" });
+  }
+
+  const report = await loadReviewExport(
+    context.db,
+    review.id,
+    context.execution.document_version_id,
+  );
+  if (
+    !report ||
+    report.execution_id !== context.execution.id ||
+    report.matter_id !== context.execution.matter_id ||
+    report.project_id !== context.execution.project_id ||
+    report.source_document_version_id !== context.execution.document_version_id
+  ) {
+    return void res
+      .status(404)
+      .json({ detail: "AI review Drive publication not found" });
+  }
+
+  const { data: matter } = await context.db
+    .from("matters")
+    .select("id, project_id, drive_folder_id")
+    .eq("id", context.execution.matter_id)
+    .maybeSingle();
+  const driveFolderId =
+    typeof matter?.drive_folder_id === "string"
+      ? matter.drive_folder_id.trim()
+      : "";
+  if (
+    !matter ||
+    matter.project_id !== context.execution.project_id ||
+    !driveFolderId
+  ) {
+    return void res
+      .status(404)
+      .json({ detail: "AI review Drive publication not found" });
+  }
+
+  const publication = await loadDrivePublication(context.db, report.id);
+  if (
+    !publication ||
+    !drivePublicationScopeMatches(
+      publication,
+      context,
+      review,
+      report,
+      driveFolderId,
+    )
+  ) {
+    return void res
+      .status(404)
+      .json({ detail: "AI review Drive publication not found" });
+  }
+
+  return void res.json(publicDrivePublicationStatus(publication));
 }
 
 async function publishReviewReportToDrive(req: Request, res: Response) {
@@ -2038,6 +2166,11 @@ aiReviewsRouter.post(
   "/:executionId/review/report/publish",
   requireAuth,
   publishReviewReportToDrive,
+);
+aiReviewsRouter.get(
+  "/:executionId/review/report/publish",
+  requireAuth,
+  getDrivePublicationStatus,
 );
 aiReviewsRouter.post(
   "/:executionId/review/report",
