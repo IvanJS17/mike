@@ -1,7 +1,7 @@
 /// <reference types="office-js" />
 
 import { toWordParagraphs, toWordText } from "../lib/wordText";
-import type { RedlineEdit } from "../lib/redline";
+import type { PreparedRedlineAction, RedlineEdit } from "../lib/redline";
 
 export interface WordSelectionAnchor {
   range: Word.Range;
@@ -213,6 +213,43 @@ export function useWordDoc() {
     });
 
   /**
+   * Apply one already-verified bundle action. Exactly one current match is
+   * required; applying every occurrence would duplicate a lawyer-approved
+   * change when the same phrase appears more than once.
+   */
+  const applyTrackedRedline = (
+    action: PreparedRedlineAction
+  ): Promise<void> =>
+    Word.run(async (context) => {
+      const doc = context.document;
+      doc.load("changeTrackingMode");
+      await context.sync();
+
+      const matches = doc.body.search(action.original, { matchCase: true });
+      matches.load("items");
+      await context.sync();
+      if (matches.items.length === 0) {
+        throw new Error("The approved redline text is no longer in the document.");
+      }
+      if (matches.items.length !== 1) {
+        throw new Error("The approved redline text is ambiguous in the document.");
+      }
+
+      const originalMode = doc.changeTrackingMode;
+      try {
+        doc.changeTrackingMode = Word.ChangeTrackingMode.trackAll;
+        matches.items[0].insertText(
+          action.replacement,
+          Word.InsertLocation.replace
+        );
+        await context.sync();
+      } finally {
+        doc.changeTrackingMode = originalMode;
+        await context.sync();
+      }
+    });
+
+  /**
    * Insert generated content below the paragraph containing the current
    * selection. This never overwrites selected text. Each model paragraph is a
    * real Word paragraph and inherits the surrounding paragraph style and
@@ -275,6 +312,7 @@ export function useWordDoc() {
     releaseSelection,
     replaceSelection,
     applyTrackedEdits,
+    applyTrackedRedline,
     insertBelowSelection,
   };
 }
