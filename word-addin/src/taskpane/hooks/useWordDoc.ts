@@ -1,7 +1,8 @@
 /// <reference types="office-js" />
 
 import { toWordParagraphs, toWordText } from "../lib/wordText";
-import type { RedlineEdit } from "../lib/redline";
+import { sha256Hex } from "../lib/redline";
+import type { PreparedRedlineAction, RedlineEdit } from "../lib/redline";
 
 export interface WordSelectionAnchor {
   range: Word.Range;
@@ -213,6 +214,65 @@ export function useWordDoc() {
     });
 
   /**
+   * Apply one already-verified bundle action. Exactly one current match is
+   * required; applying every occurrence would duplicate a lawyer-approved
+   * change when the same phrase appears more than once.
+   */
+  const applyTrackedRedline = (
+    action: PreparedRedlineAction
+  ): Promise<void> =>
+    Word.run(async (context) => {
+      const doc = context.document;
+      const body = doc.body;
+      doc.load("changeTrackingMode");
+      body.load("text");
+      await context.sync();
+
+      const validateCurrentRange = async (): Promise<void> => {
+        body.load("text");
+        await context.sync();
+        const currentOriginal = body.text.slice(action.start, action.end);
+        if (
+          currentOriginal !== action.original ||
+          (await sha256Hex(currentOriginal)) !== action.before_text_sha256
+        ) {
+          throw new Error("The approved redline range is stale.");
+        }
+      };
+
+      // Re-read the live Word body in this same Word.run immediately before
+      // searching and again immediately before the first write. The component's
+      // earlier snapshot is not trusted across this boundary.
+      await validateCurrentRange();
+      const matches = body.search(action.original, { matchCase: true });
+      matches.load("items");
+      await context.sync();
+      if (matches.items.length === 0) {
+        throw new Error("The approved redline text is no longer in the document.");
+      }
+      if (matches.items.length !== 1) {
+        throw new Error("The approved redline text is ambiguous in the document.");
+      }
+      const match = matches.items[0];
+      match.load("text");
+      await context.sync();
+      if (match.text !== action.original) {
+        throw new Error("The approved redline search result is stale.");
+      }
+      await validateCurrentRange();
+
+      const originalMode = doc.changeTrackingMode;
+      try {
+        doc.changeTrackingMode = Word.ChangeTrackingMode.trackAll;
+        match.insertText(action.replacement, Word.InsertLocation.replace);
+        await context.sync();
+      } finally {
+        doc.changeTrackingMode = originalMode;
+        await context.sync();
+      }
+    });
+
+  /**
    * Insert generated content below the paragraph containing the current
    * selection. This never overwrites selected text. Each model paragraph is a
    * real Word paragraph and inherits the surrounding paragraph style and
@@ -275,6 +335,7 @@ export function useWordDoc() {
     releaseSelection,
     replaceSelection,
     applyTrackedEdits,
+    applyTrackedRedline,
     insertBelowSelection,
   };
 }

@@ -18,6 +18,7 @@ import { EventBlock, DocFindBlock } from "./assistant/EventBlocks";
 import { EditCard } from "./assistant/EditCard";
 import { EditCardsSection } from "./assistant/EditCardsSection";
 import { RESPONSE_GLASS_SURFACE } from "./assistant/messageStyles";
+import { ApprovedRedlinePanel } from "./ApprovedRedlinePanel";
 
 interface ActionSectionState {
   loading: boolean;
@@ -431,6 +432,7 @@ export function DocumentActions(): React.ReactElement {
 
   return (
     <div className="flex h-full flex-col gap-3 overflow-y-auto p-3 @sm:gap-4 @sm:p-4">
+      <ApprovedRedlinePanel />
       {/* --- Improve Writing --- */}
       <Section
         title="Improve Writing"

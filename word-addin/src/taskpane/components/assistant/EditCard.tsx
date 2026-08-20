@@ -1,25 +1,27 @@
-import React from "react";
+import React, { type ReactNode } from "react";
 import type { RedlineEdit } from "../../lib/redline";
 import { EDIT_CARD_SURFACE } from "./messageStyles";
 
-export type EditCardStatus = "pending" | "applied" | "skipped";
+export type EditCardStatus = "pending" | "applied" | "skipped" | "failed";
 
 /**
  * A single proposed tracked change, rendered with the web app's EditCard
  * look: reason line, then the replacement in green and the original in red
  * strikethrough on a serif gray slab. In the pane the card is
- * informational — the change is applied to the live document via the bulk
- * action, and Word's own Review ribbon handles accept/reject afterwards —
- * so instead of Accept/Reject controls it shows an applied/skipped state.
+ * informational — the change is applied to the live document via the explicit
+ * action supplied by its caller, and Word's own Review ribbon handles
+ * accept/reject afterwards — so the card never offers a rejected action.
  */
 export function EditCard({
   edit,
   changeNumber,
   status = "pending",
+  actions,
 }: {
   edit: RedlineEdit;
   changeNumber?: number;
   status?: EditCardStatus;
+  actions?: ReactNode;
 }): React.ReactElement {
   return (
     <div className={`${EDIT_CARD_SURFACE} p-3`}>
@@ -44,9 +46,12 @@ export function EditCard({
         >
           {status === "applied"
             ? "Applied as a tracked change."
-            : "Skipped — the quoted text was not found in the document."}
+            : status === "skipped"
+              ? "Omitted by the lawyer."
+              : "Failed — no change was applied."}
         </p>
       )}
+      {actions && <div className="mt-2 flex flex-wrap gap-2">{actions}</div>}
     </div>
   );
 }

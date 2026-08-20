@@ -11,6 +11,10 @@
  */
 import { configureMikeApiClient } from "@mike/api-client";
 import type { Document } from "@mike/core";
+import type {
+  ApprovedRedlineBundle,
+  RedlineExecutionScope,
+} from "../lib/redline";
 import { getFreshAccessToken, refreshSession } from "../auth/session";
 
 // Guard the `process` reference: webpack's EnvironmentPlugin only substitutes
@@ -71,4 +75,69 @@ export async function listProjectDocuments(
     );
   }
   return res.json() as Promise<Document[]>;
+}
+
+export type AiExecutionSummary = RedlineExecutionScope & {
+  status: "pending" | "running" | "succeeded" | "failed";
+  error_class: string | null;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+};
+
+export class WordAddinApiError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+
+  constructor(status: number, message: string, code: string | null = null) {
+    super(message);
+    this.name = "WordAddinApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+async function getJson<T>(path: string): Promise<T> {
+  const res = await fetchWithRefresh(`${BASE_URL}${path}`, {
+    cache: "no-store",
+    headers: { Accept: "application/json", ...(await getAuthHeaders()) },
+  });
+  if (res.ok) return (await res.json()) as T;
+
+  const body = await res.text().catch(() => "");
+  let code: string | null = null;
+  let detail: string | null = null;
+  try {
+    const parsed = JSON.parse(body) as { code?: unknown; detail?: unknown };
+    code = typeof parsed.code === "string" ? parsed.code : null;
+    detail = typeof parsed.detail === "string" ? parsed.detail : null;
+  } catch {
+    // Keep error text out of the task pane when the server did not return its
+    // structured, content-free error contract.
+  }
+  throw new WordAddinApiError(
+    res.status,
+    detail ?? `Mike API request failed (${res.status}).`,
+    code
+  );
+}
+
+export async function listAiExecutions(
+  projectId: string
+): Promise<AiExecutionSummary[]> {
+  return getJson<AiExecutionSummary[]>(
+    `/projects/${encodeURIComponent(projectId)}/ai-executions`
+  );
+}
+
+export async function getApprovedRedlineBundle(
+  projectId: string,
+  executionId: string,
+  revision = 1
+): Promise<ApprovedRedlineBundle> {
+  return getJson<ApprovedRedlineBundle>(
+    `/projects/${encodeURIComponent(projectId)}/ai-executions/${encodeURIComponent(
+      executionId
+    )}/review/redline-bundle?revision=${revision}`
+  );
 }
