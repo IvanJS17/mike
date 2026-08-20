@@ -4,9 +4,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiReview } from "@/app/lib/mikeApi";
 import { AiReviewSection } from "./AiReviewSection";
 
-const { decideAiReviewItem, completeAiExecutionReview } = vi.hoisted(() => ({
+const { decideAiReviewItem, completeAiExecutionReview, downloadAiReviewReport } = vi.hoisted(() => ({
   decideAiReviewItem: vi.fn(),
   completeAiExecutionReview: vi.fn(),
+  downloadAiReviewReport: vi.fn(),
 }));
 
 vi.mock("@/app/lib/mikeApi", async (importOriginal) => ({
@@ -14,6 +15,7 @@ vi.mock("@/app/lib/mikeApi", async (importOriginal) => ({
   decideAiReviewItem: (...args: unknown[]) => decideAiReviewItem(...args),
   completeAiExecutionReview: (...args: unknown[]) =>
     completeAiExecutionReview(...args),
+  downloadAiReviewReport: (...args: unknown[]) => downloadAiReviewReport(...args),
 }));
 
 const review: AiReview = {
@@ -99,5 +101,27 @@ describe("AiReviewSection", () => {
     expect(
       screen.getByRole("button", { name: "Solicitar cambios" }),
     ).toBeDisabled();
+  });
+
+  it("shows the Word report download action only after approval", () => {
+    const approved: AiReview = {
+      ...review,
+      status: "approved",
+      completed_at: "2026-08-19T12:05:00.000Z",
+      items: [{ ...review.items[0], status: "accepted" }],
+    };
+    render(
+      <AiReviewSection
+        projectId="project-1"
+        executionId="execution-1"
+        review={approved}
+        currentUserId="reviewer-1"
+        onReviewChange={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Descargar informe Word" }),
+    ).toBeEnabled();
   });
 });

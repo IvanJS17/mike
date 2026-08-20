@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
@@ -11,6 +12,18 @@ import {
 } from "../lib/aiReviews";
 import { assertEpochFresh } from "../lib/tenancy";
 import { recordAuditEvent } from "../lib/audit";
+import { generateDocx } from "../lib/chat/tools/documentOps";
+import {
+  buildContentDisposition,
+  deleteFile,
+  downloadFile,
+  uploadFile,
+} from "../lib/storage";
+import { contentSha256 } from "../lib/documentVersions";
+import {
+  prepareAiReviewReport,
+  type AiReviewReportInput,
+} from "../lib/aiReviewReports";
 import type { AiExecutionStatus } from "../lib/aiExecutions";
 
 export const aiReviewsRouter = Router({ mergeParams: true });
@@ -22,7 +35,10 @@ type ExecutionRow = {
   user_id: string;
   matter_id: string | null;
   project_id: string;
+  document_id: string;
+  document_version_id: string;
   status: AiExecutionStatus;
+  created_at?: string;
 };
 
 type ReviewStatus = "in_progress" | "approved" | "changes_requested";
@@ -60,6 +76,22 @@ type ReviewDecisionRow = {
   after_state: Record<string, unknown>;
   comment: string | null;
   created_at: string;
+};
+
+type ReviewExportRow = {
+  id: string;
+  review_id: string;
+  execution_id: string;
+  matter_id: string;
+  project_id: string;
+  source_document_version_id: string;
+  document_id: string;
+  document_version_id: string;
+  report_version: number;
+  content_sha256: string;
+  actor_user_id: string;
+  created_at: string;
+  filename: string;
 };
 
 type ReviewContext = {
@@ -206,6 +238,375 @@ async function loadOutput(db: Db, executionId: string) {
   };
 }
 
+async function loadReviewReportInput(
+  context: ReviewContext,
+  review: ReviewRow,
+): Promise<AiReviewReportInput> {
+  const [{ data: receipt }] = await Promise.all([
+    context.db
+      .from("ai_receipts")
+      .select(
+        "id, execution_id, receipt_version, canonical_json, receipt_sha256",
+      )
+      .eq("execution_id", context.execution.id)
+      .maybeSingle(),
+  ]);
+  const data = await loadReviewData(context.db, review.id);
+  return {
+    execution: context.execution,
+    review,
+    items: data.items.map((item) => ({
+      item_key: item.item_key,
+      finding_text: item.finding_text,
+      status: item.status,
+      citation_refs: item.citation_refs,
+    })),
+    receipt: (receipt as AiReviewReportInput["receipt"] | null) ?? null,
+  };
+}
+
+async function loadReviewExport(
+  db: Db,
+  reviewId: string,
+  sourceDocumentVersionId: string,
+): Promise<ReviewExportRow | null> {
+  const { data } = await db
+    .from("ai_review_exports")
+    .select("*")
+    .eq("review_id", reviewId)
+    .eq("source_document_version_id", sourceDocumentVersionId)
+    .maybeSingle();
+  return (data as ReviewExportRow | null) ?? null;
+}
+
+function reportPath(req: Request): string {
+  return `${req.baseUrl}/${req.params.executionId}/review/report`;
+}
+
+function publicReviewExport(row: ReviewExportRow, req: Request) {
+  return {
+    id: row.id,
+    review_id: row.review_id,
+    execution_id: row.execution_id,
+    matter_id: row.matter_id,
+    project_id: row.project_id,
+    source_document_version_id: row.source_document_version_id,
+    document_id: row.document_id,
+    document_version_id: row.document_version_id,
+    report_version: row.report_version,
+    filename: row.filename,
+    content_sha256: row.content_sha256,
+    actor_user_id: row.actor_user_id,
+    created_at: row.created_at,
+    download_url: `${reportPath(req)}/download`,
+  };
+}
+
+function bytesToBuffer(value: unknown): Buffer | null {
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof ArrayBuffer) return Buffer.from(value);
+  if (ArrayBuffer.isView(value)) {
+    return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  }
+  return null;
+}
+
+function bufferArrayBuffer(value: Buffer): ArrayBuffer {
+  return value.buffer.slice(
+    value.byteOffset,
+    value.byteOffset + value.byteLength,
+  ) as ArrayBuffer;
+}
+
+async function cleanupReportArtifacts(
+  db: Db,
+  storagePath: string | null,
+  documentId: string | null,
+): Promise<void> {
+  if (storagePath) await deleteFile(storagePath).catch(() => {});
+  if (documentId) {
+    await db.from("documents").delete().eq("id", documentId);
+  }
+}
+
+function reportPreparationError(res: Response, code: string): void {
+  const status = code === "scope_mismatch" ? 404 : 409;
+  res.status(status).json({
+    code,
+    detail: "The approved AI review is not available for export",
+  });
+}
+
+async function createReviewReport(req: Request, res: Response) {
+  const context = await loadReviewContext(req, "review");
+  if (!context) {
+    return void res.status(404).json({ detail: "AI execution not found" });
+  }
+  const review = await loadReview(context.db, context.execution.id);
+  if (!review) {
+    return void res.status(404).json({ detail: "AI review not found" });
+  }
+
+  const prepared = prepareAiReviewReport(
+    await loadReviewReportInput(context, review),
+  );
+  if (!prepared.ok) {
+    reportPreparationError(res, prepared.code);
+    return;
+  }
+
+  try {
+    await assertEpochFresh(
+      context.db,
+      context.matterAccess.organizationId,
+      context.matterAccess.authorizationEpoch,
+    );
+  } catch {
+    return void res.status(403).json({
+      code: "authorization_revoked",
+      detail: "Matter authorization changed; report was not generated",
+    });
+  }
+
+  const existing = await loadReviewExport(
+    context.db,
+    review.id,
+    context.execution.document_version_id,
+  );
+  if (existing) {
+    if (
+      existing.execution_id !== context.execution.id ||
+      existing.matter_id !== context.execution.matter_id ||
+      existing.project_id !== context.execution.project_id
+    ) {
+      return void res
+        .status(404)
+        .json({ detail: "AI review report not found" });
+    }
+    return void res.status(200).json(publicReviewExport(existing, req));
+  }
+
+  let storagePath: string | null = null;
+  let reportDocumentId: string | null = null;
+  try {
+    const generated = await generateDocx(
+      "Informe de revisión humana",
+      prepared.sections,
+      context.userId,
+      context.db,
+      { persist: false },
+    );
+    if (!("bytes" in generated) || !("filename" in generated)) {
+      throw new Error(
+        "error" in generated
+          ? String(generated.error)
+          : "DOCX generation failed",
+      );
+    }
+    const bytes = bytesToBuffer(generated.bytes);
+    if (!bytes || bytes.length === 0)
+      throw new Error("DOCX generation returned no bytes");
+    const reportSha256 = contentSha256(bytes);
+    const filename = prepared.filename;
+    reportDocumentId = randomUUID();
+    storagePath = `generated/ai-review-reports/${review.id}/${randomUUID()}.docx`;
+    await uploadFile(
+      storagePath,
+      bufferArrayBuffer(bytes),
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    );
+
+    const { data: document, error: documentError } = await context.db
+      .from("documents")
+      .insert({
+        id: reportDocumentId,
+        project_id: context.execution.project_id,
+        user_id: context.userId,
+        status: "ready",
+      })
+      .select("id")
+      .single();
+    if (documentError || !document) {
+      throw documentError ?? new Error("Failed to record report document");
+    }
+
+    const { data: version, error: versionError } = await context.db
+      .from("document_versions")
+      .insert({
+        document_id: reportDocumentId,
+        storage_path: storagePath,
+        source: "ai_review_report",
+        version_number: 1,
+        filename,
+        file_type: "docx",
+        size_bytes: bytes.byteLength,
+        page_count: null,
+        content_sha256: reportSha256,
+      })
+      .select("id")
+      .single();
+    if (versionError || !version) {
+      throw (
+        versionError ?? new Error("Failed to record report document version")
+      );
+    }
+    const reportVersionId = String((version as { id: string }).id);
+    const { error: currentVersionError } = await context.db
+      .from("documents")
+      .update({ current_version_id: reportVersionId })
+      .eq("id", reportDocumentId);
+    if (currentVersionError) throw currentVersionError;
+
+    await assertEpochFresh(
+      context.db,
+      context.matterAccess.organizationId,
+      context.matterAccess.authorizationEpoch,
+    );
+    const { data: inserted, error: exportError } = await context.db
+      .from("ai_review_exports")
+      .insert({
+        review_id: review.id,
+        execution_id: context.execution.id,
+        matter_id: context.execution.matter_id,
+        project_id: context.execution.project_id,
+        source_document_version_id: context.execution.document_version_id,
+        document_id: reportDocumentId,
+        document_version_id: reportVersionId,
+        report_version: 1,
+        content_sha256: reportSha256,
+        actor_user_id: context.userId,
+        filename,
+      })
+      .select("*")
+      .single();
+    if (exportError || !inserted) {
+      if (exportError?.code === "23505") {
+        await cleanupReportArtifacts(context.db, storagePath, reportDocumentId);
+        const raced = await loadReviewExport(
+          context.db,
+          review.id,
+          context.execution.document_version_id,
+        );
+        if (raced)
+          return void res.status(200).json(publicReviewExport(raced, req));
+      }
+      throw exportError ?? new Error("Failed to record AI review export");
+    }
+    const exportRow = inserted as ReviewExportRow;
+
+    await recordAuditEvent(context.db, {
+      actorUserId: context.userId,
+      organizationId: context.matterAccess.organizationId,
+      eventType: "ai.review.report_exported",
+      eventDetail: {
+        export_id: exportRow.id,
+        review_id: review.id,
+        execution_id: context.execution.id,
+        matter_id: context.execution.matter_id,
+        project_id: context.execution.project_id,
+        source_document_version_id: context.execution.document_version_id,
+        document_id: reportDocumentId,
+        document_version_id: reportVersionId,
+        report_version: 1,
+        content_sha256: reportSha256,
+        receipt_id: prepared.receipt.id,
+        receipt_sha256: prepared.receipt.receipt_sha256,
+      },
+    });
+    return void res.status(201).json(publicReviewExport(exportRow, req));
+  } catch (error) {
+    await cleanupReportArtifacts(context.db, storagePath, reportDocumentId);
+    console.error(
+      "[ai-review-report] generation failed",
+      error instanceof Error ? error.message : String(error),
+    );
+    return void res
+      .status(500)
+      .json({ detail: "Failed to generate AI review report" });
+  }
+}
+
+async function downloadReviewReport(req: Request, res: Response) {
+  const context = await loadReviewContext(req, "review");
+  if (!context)
+    return void res.status(404).json({ detail: "AI execution not found" });
+  const review = await loadReview(context.db, context.execution.id);
+  if (!review)
+    return void res.status(404).json({ detail: "AI review not found" });
+  const prepared = prepareAiReviewReport(
+    await loadReviewReportInput(context, review),
+  );
+  if (!prepared.ok) {
+    reportPreparationError(res, prepared.code);
+    return;
+  }
+  const report = await loadReviewExport(
+    context.db,
+    review.id,
+    context.execution.document_version_id,
+  );
+  if (!report)
+    return void res.status(404).json({ detail: "AI review report not found" });
+  if (
+    report.execution_id !== context.execution.id ||
+    report.matter_id !== context.execution.matter_id ||
+    report.project_id !== context.execution.project_id
+  ) {
+    return void res.status(404).json({ detail: "AI review report not found" });
+  }
+  try {
+    await assertEpochFresh(
+      context.db,
+      context.matterAccess.organizationId,
+      context.matterAccess.authorizationEpoch,
+    );
+  } catch {
+    return void res.status(403).json({
+      code: "authorization_revoked",
+      detail: "Matter authorization changed; report was not downloaded",
+    });
+  }
+
+  const { data: version } = await context.db
+    .from("document_versions")
+    .select(
+      "id, document_id, storage_path, filename, file_type, source, content_sha256, deleted_at",
+    )
+    .eq("id", report.document_version_id)
+    .eq("document_id", report.document_id)
+    .is("deleted_at", null)
+    .maybeSingle();
+  if (
+    !version ||
+    version.source !== "ai_review_report" ||
+    typeof version.storage_path !== "string" ||
+    !version.storage_path.trim()
+  ) {
+    return void res.status(404).json({ detail: "AI review report not found" });
+  }
+  const raw = await downloadFile(String(version.storage_path));
+  if (!raw)
+    return void res.status(404).json({ detail: "AI review report not found" });
+  const bytes = Buffer.from(raw);
+  const digest = contentSha256(bytes);
+  if (digest !== report.content_sha256 || digest !== version.content_sha256) {
+    return void res.status(409).json({
+      code: "report_integrity_failed",
+      detail: "AI review report integrity check failed",
+    });
+  }
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader(
+    "Content-Type",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  );
+  res.setHeader(
+    "Content-Disposition",
+    buildContentDisposition("attachment", report.filename),
+  );
+  return void res.send(bytes);
+}
+
 function sendReviewMutationError(
   res: Response,
   error: { message?: string },
@@ -318,6 +719,16 @@ async function createReview(req: Request, res: Response) {
     });
   }
 
+  let itemSeeds: ReturnType<typeof buildReviewItemSeeds>;
+  try {
+    itemSeeds = buildReviewItemSeeds(output);
+  } catch {
+    return void res.status(422).json({
+      code: "review_unavailable",
+      detail: "The execution has no finding text linked to each citation",
+    });
+  }
+
   const { data: insertedReview, error: reviewError } = await context.db
     .from("ai_reviews")
     .insert({
@@ -334,7 +745,6 @@ async function createReview(req: Request, res: Response) {
   }
 
   const review = insertedReview as ReviewRow;
-  const itemSeeds = buildReviewItemSeeds(output);
   const items: ReviewItemRow[] = [];
   for (const seed of itemSeeds) {
     const { data: insertedItem, error: itemError } = await context.db
@@ -625,6 +1035,17 @@ async function completeReview(req: Request, res: Response) {
     completed_by_user_id: context.userId,
   });
 }
+
+aiReviewsRouter.post(
+  "/:executionId/review/report",
+  requireAuth,
+  createReviewReport,
+);
+aiReviewsRouter.get(
+  "/:executionId/review/report/download",
+  requireAuth,
+  downloadReviewReport,
+);
 
 aiReviewsRouter.post("/:executionId/review", requireAuth, createReview);
 aiReviewsRouter.get("/:executionId/review", requireAuth, getReview);

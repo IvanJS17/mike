@@ -243,6 +243,23 @@ export type AiReview = {
     decisions: AiReviewDecision[];
 };
 
+export type AiReviewReport = {
+    id: string;
+    review_id: string;
+    execution_id: string;
+    matter_id: string;
+    project_id: string;
+    source_document_version_id: string;
+    document_id: string;
+    document_version_id: string;
+    report_version: number;
+    filename: string;
+    content_sha256: string;
+    actor_user_id: string;
+    created_at: string;
+    download_url: string;
+};
+
 export async function createAiExecutionReview(
     projectId: string,
     executionId: string,
@@ -299,6 +316,31 @@ export async function completeAiExecutionReview(
             body: JSON.stringify(payload),
         },
     );
+}
+
+export async function exportAiReviewReport(
+    projectId: string,
+    executionId: string,
+): Promise<AiReviewReport> {
+    return apiRequest<AiReviewReport>(
+        `/projects/${projectId}/ai-executions/${executionId}/review/report`,
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+        },
+    );
+}
+
+export async function downloadAiReviewReport(
+    projectId: string,
+    executionId: string,
+): Promise<{ blob: Blob; filename: string | null; report: AiReviewReport }> {
+    const report = await exportAiReviewReport(projectId, executionId);
+    const download = await apiBlobRequest(
+        `/projects/${projectId}/ai-executions/${executionId}/review/report/download`,
+    );
+    return { ...download, report };
 }
 
 export async function listAiExecutions(

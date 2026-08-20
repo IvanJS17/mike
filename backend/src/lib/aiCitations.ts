@@ -29,6 +29,7 @@ export type ResolvedCitation = {
   page: number;
   span: { start_char: number; end_char: number };
   quote_sha256: string;
+  finding_text: string;
   verified: true;
 };
 
@@ -129,6 +130,9 @@ export function resolveCitation(
   }
   if (end > sourcePage.text.length) return failure();
   if (!isString(value.quote) || !value.quote) return failure();
+  if (!isString(value.finding_text) || !value.finding_text.trim()) {
+    return failure();
+  }
 
   const excerpt = sourcePage.text.slice(start, end);
   if (excerpt !== value.quote) return failure();
@@ -147,6 +151,7 @@ export function resolveCitation(
     page,
     span: { start_char: start, end_char: end },
     quote_sha256,
+    finding_text: value.finding_text.trim(),
     verified: true,
   };
 }
@@ -176,6 +181,7 @@ export function buildCitationReceiptFields(
     page: citation.page,
     span: citation.span,
     quote_sha256: citation.quote_sha256,
+    finding_text: citation.finding_text,
     verified: citation.verified,
   }));
 }

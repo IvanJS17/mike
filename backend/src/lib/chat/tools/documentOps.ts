@@ -93,7 +93,11 @@ export async function generateDocx(
   sections: unknown[],
   userId: string,
   db: ReturnType<typeof createServerSupabase>,
-  options?: { landscape?: boolean; projectId?: string | null },
+  options?: {
+    landscape?: boolean;
+    projectId?: string | null;
+    persist?: boolean;
+  },
 ) {
   try {
     const {
@@ -510,13 +514,16 @@ export async function generateDocx(
         };
       }
     }
-    const docId = crypto.randomUUID().replace(/-/g, "");
     const safeTitle =
       title
         .replace(/[^a-zA-Z0-9 -]/g, "")
         .trim()
         .slice(0, 64) || "document";
     const filename = `${safeTitle}.docx`;
+    if (options?.persist === false) {
+      return { bytes: Buffer.from(buf), filename };
+    }
+    const docId = crypto.randomUUID().replace(/-/g, "");
     const key = generatedDocKey(userId, docId, filename);
 
     await uploadFile(

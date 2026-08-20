@@ -190,6 +190,7 @@ describe("AI execution routes", () => {
           span: { start_char: 0, end_char: quote.length },
           quote,
           quote_sha256: sha256Hex(quote),
+          finding_text: "La parte compradora puede terminar el contrato.",
         },
       ])}</CITATIONS>`,
     );
@@ -260,6 +261,7 @@ describe("AI execution routes", () => {
       /64-character lowercase hexadecimal SHA-256/i,
     );
     expect(providerRequest.systemPrompt).toMatch(/exact quote excerpt/i);
+    expect(providerRequest.systemPrompt).toMatch(/finding_text/);
     expect(writes.filter((write) => write.table === "ai_output_versions")).toHaveLength(1);
     expect(writes.filter((write) => write.table === "ai_receipts")).toHaveLength(1);
     expect(writes.filter((write) => write.table === "audit_events").map((write) => write.operation)).toEqual([
@@ -392,6 +394,7 @@ describe("AI execution routes", () => {
           span: { start_char: 0, end_char: quote.length },
           quote,
           quote_sha256: sha256Hex(quote),
+          finding_text: "La parte compradora puede terminar el contrato.",
         },
       ])}</CITATIONS>`;
     });

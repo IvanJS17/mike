@@ -43,9 +43,16 @@ export function buildReviewItemSeeds(output: {
     ];
   }
 
+  const findingTexts = citations.map((citation) =>
+    nonEmptyText(citation.finding_text),
+  );
+  if (findingTexts.some((findingText) => findingText === null)) {
+    throw new Error("citation finding_text is required");
+  }
+
   return citations.map((citation, index) => ({
     item_key: nonEmptyText(citation.citation_id) ?? `finding-${index + 1}`,
-    original_text: nonEmptyText(citation.finding_text) ?? output.output_text,
+    original_text: findingTexts[index] as string,
     citation_refs: [citation],
   }));
 }

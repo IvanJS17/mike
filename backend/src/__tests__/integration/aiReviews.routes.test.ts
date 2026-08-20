@@ -607,4 +607,27 @@ describe("AI human review routes", () => {
     expect(res.status).toBe(404);
     expect(rows.ai_reviews).toHaveLength(0);
   });
+
+  it("does not create a review when a citation has no linked finding text", async () => {
+    rows.ai_output_versions[0].citation_refs = [
+      {
+        citation_id: "c1",
+        verified: true,
+      },
+      {
+        citation_id: "c2",
+        verified: true,
+      },
+    ];
+
+    const res = await request(app)
+      .post("/projects/project-1/ai-executions/execution-1/review")
+      .set("Authorization", "Bearer test")
+      .send({});
+
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({ code: "review_unavailable" });
+    expect(rows.ai_reviews).toHaveLength(0);
+    expect(rows.ai_review_items).toHaveLength(0);
+  });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { sha256Hex } from "../aiReceipts";
 import {
+  buildCitationReceiptFields,
   parseStrictCitationBlock,
   resolveCitation,
   resolveCitations,
@@ -31,6 +32,7 @@ const validCitation = {
   span: { start_char: 0, end_char: 12 },
   quote: "La parte com",
   quote_sha256: sha256Hex("La parte com"),
+  finding_text: "Hallazgo A",
 };
 
 describe("strict AI citations", () => {
@@ -41,7 +43,34 @@ describe("strict AI citations", () => {
       page: 1,
       span: { start_char: 0, end_char: 12 },
       quote_sha256: sha256Hex("La parte com"),
+      finding_text: "Hallazgo A",
       verified: true,
+    });
+  });
+
+  it("keeps each finding text in the verified citation receipt", () => {
+    const resolved = resolveCitation(validCitation, context);
+    if ("ok" in resolved) throw new Error("expected a resolved citation");
+
+    expect(buildCitationReceiptFields([resolved])).toEqual([
+      {
+        citation_id: "c1",
+        document_version_id: "version-1",
+        page: 1,
+        span: { start_char: 0, end_char: 12 },
+        quote_sha256: sha256Hex("La parte com"),
+        finding_text: "Hallazgo A",
+        verified: true,
+      },
+    ]);
+  });
+
+  it("rejects a citation without its finding text", () => {
+    const { finding_text: _findingText, ...withoutFindingText } = validCitation;
+
+    expect(resolveCitation(withoutFindingText, context)).toEqual({
+      ok: false,
+      error_class: "citation_unresolvable",
     });
   });
 
@@ -132,6 +161,7 @@ describe("strict AI citations", () => {
           page: 1,
           span: { start_char: 0, end_char: 12 },
           quote_sha256: sha256Hex("La parte com"),
+          finding_text: "Hallazgo A",
           verified: true,
         },
       ],
