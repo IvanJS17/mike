@@ -106,6 +106,19 @@ wait_for_http() {
   fail "$service did not answer HTTP ${path} within ${timeout_seconds}s"
 }
 
+wait_for_host_http() {
+  local url="$1" timeout_seconds="${2:-180}" deadline
+  deadline=$((SECONDS + timeout_seconds))
+  while (( SECONDS < deadline )); do
+    if curl --fail --silent --show-error --max-time 3 "$url" >/dev/null 2>&1; then
+      printf 'staging readiness: host HTTP %s\n' "$url"
+      return 0
+    fi
+    sleep 2
+  done
+  fail "staging proxy did not answer host HTTP ${url} within ${timeout_seconds}s"
+}
+
 wait_for_completion() {
   local service="$1" timeout_seconds="${2:-180}" id state exit_code deadline
   deadline=$((SECONDS + timeout_seconds))
@@ -137,5 +150,6 @@ wait_for_completion db-init
 wait_for_health backend
 wait_for_health frontend
 wait_for_health proxy
+wait_for_host_http "$(env_value STAGING_PUBLIC_URL)/healthz"
 
 printf 'staging-up: READY (%s)\n' "$(env_value STAGING_PUBLIC_URL)"

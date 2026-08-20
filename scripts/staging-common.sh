@@ -129,6 +129,16 @@ for name, service in services.items():
 networks = doc.get("networks", {})
 if networks.get("default", {}).get("internal") is not True:
     raise SystemExit("staging default network must be internal")
+if "edge" not in networks or networks["edge"].get("internal") is True:
+    raise SystemExit("staging edge network must be non-internal for the loopback proxy")
+for name, service in services.items():
+    attached = set(service.get("networks") or {})
+    expected_networks = {"default", "edge"} if name == "proxy" else {"default"}
+    if attached != expected_networks:
+        raise SystemExit(
+            f"unexpected staging networks for {name}: {sorted(attached)} "
+            f"(expected {sorted(expected_networks)})"
+        )
 for forbidden in ("mailpit", "rustfs", "storage", "ollama", "studio", "realtime", "analytics"):
     if forbidden in actual:
         raise SystemExit(f"forbidden local-dev service present: {forbidden}")

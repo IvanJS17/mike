@@ -47,6 +47,8 @@ Open `http://localhost:3000` and sign up.
 The staging profile is separate from the full developer stack. It starts only
 frontend, backend, Supabase Postgres/Auth/PostgREST, and one loopback-only proxy;
 there is no Mailpit, RustFS, Ollama, dashboard, or public database/admin port.
+Application services stay on an internal Compose network; only the proxy joins
+the dedicated edge network and its published port binds to loopback.
 
 Create a synthetic, local-only environment file and replace every placeholder:
 
