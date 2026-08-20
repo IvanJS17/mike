@@ -25,6 +25,7 @@ const maybeDescribe =
 const PUBLIC_TABLES = [
     "ai_document_version_pages", "ai_executions", "ai_output_versions", "ai_receipts",
     "ai_reviews", "ai_review_items", "ai_review_decisions", "ai_review_exports",
+    "ai_redline_bundles",
     "audit_events",
     "chat_messages", "chats", "document_edits",
     "document_versions", "document_download_grants", "documents", "hidden_workflows", "library_folders",
