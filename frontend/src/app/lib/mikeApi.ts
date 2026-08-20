@@ -48,12 +48,19 @@ const devLog = (...args: Parameters<typeof console.log>) => {
 export class MikeApiError extends Error {
     status: number;
     code: string | null;
+    data: unknown;
 
-    constructor(args: { message: string; status: number; code?: string | null }) {
+    constructor(args: {
+        message: string;
+        status: number;
+        code?: string | null;
+        data?: unknown;
+    }) {
         super(args.message);
         this.name = "MikeApiError";
         this.status = args.status;
         this.code = args.code ?? null;
+        this.data = args.data ?? null;
     }
 }
 
@@ -145,6 +152,7 @@ async function toApiError(response: Response, path: string) {
                 typeof parsed.detail === "string" && parsed.detail
                     ? parsed.detail
                     : `API error: ${response.status}`,
+            data: parsed,
         });
     } catch {
         devLog("[mike-api] non-ok non-json response", {
@@ -260,6 +268,36 @@ export type AiReviewReport = {
     download_url: string;
 };
 
+export type AiReviewDrivePublicationStatus = "pending" | "published" | "failed";
+
+export type AiReviewDrivePublication = {
+    id: string;
+    export_id: string;
+    review_id: string;
+    execution_id: string;
+    matter_id: string;
+    project_id: string;
+    drive_folder_id: string;
+    file_id: string | null;
+    sha256: string;
+    format_version: string;
+    status: AiReviewDrivePublicationStatus;
+    size_bytes: number | null;
+    checksum: string | null;
+    failure_code: string | null;
+    actor_user_id: string;
+    created_at: string;
+    updated_at: string;
+};
+
+export type MatterDriveFolderSettings = {
+    matter_id: string;
+    project_id: string;
+    drive_folder_id: string | null;
+    role: "matter_owner" | "editor" | "viewer" | "technical_operator" | string;
+    can_edit: boolean;
+};
+
 export async function createAiExecutionReview(
     projectId: string,
     executionId: string,
@@ -341,6 +379,73 @@ export async function downloadAiReviewReport(
         `/projects/${projectId}/ai-executions/${executionId}/review/report/download`,
     );
     return { ...download, report };
+}
+
+function isAiReviewDrivePublication(
+    value: unknown,
+): value is AiReviewDrivePublication {
+    if (!value || typeof value !== "object") return false;
+    const row = value as Record<string, unknown>;
+    return (
+        typeof row.id === "string" &&
+        typeof row.export_id === "string" &&
+        typeof row.review_id === "string" &&
+        typeof row.execution_id === "string" &&
+        typeof row.matter_id === "string" &&
+        typeof row.project_id === "string" &&
+        typeof row.drive_folder_id === "string" &&
+        typeof row.sha256 === "string" &&
+        (row.status === "pending" ||
+            row.status === "published" ||
+            row.status === "failed")
+    );
+}
+
+export async function publishAiReviewReportToDrive(
+    projectId: string,
+    executionId: string,
+): Promise<AiReviewDrivePublication> {
+    try {
+        return await apiRequest<AiReviewDrivePublication>(
+            `/projects/${projectId}/ai-executions/${executionId}/review/report/publish`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({}),
+            },
+        );
+    } catch (error) {
+        if (error instanceof MikeApiError && error.code === "drive_publication_failed") {
+            const publication =
+                (error.data as { publication?: unknown } | null)?.publication;
+            if (isAiReviewDrivePublication(publication)) return publication;
+        }
+        throw error;
+    }
+}
+
+export async function getMatterDriveFolder(
+    projectId: string,
+    matterId: string,
+): Promise<MatterDriveFolderSettings> {
+    return apiRequest<MatterDriveFolderSettings>(
+        `/projects/${projectId}/matters/${matterId}/drive-folder`,
+    );
+}
+
+export async function updateMatterDriveFolder(
+    projectId: string,
+    matterId: string,
+    driveFolderId: string | null,
+): Promise<MatterDriveFolderSettings> {
+    return apiRequest<MatterDriveFolderSettings>(
+        `/projects/${projectId}/matters/${matterId}/drive-folder`,
+        {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ drive_folder_id: driveFolderId }),
+        },
+    );
 }
 
 export async function listAiExecutions(

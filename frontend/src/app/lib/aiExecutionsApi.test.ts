@@ -18,6 +18,9 @@ import {
   getAiExecutionReceipt,
   getAiExecutionReview,
   listAiExecutions,
+  getMatterDriveFolder,
+  publishAiReviewReportToDrive,
+  updateMatterDriveFolder,
 } from "./mikeApi";
 
 const fetchMock = vi.fn();
@@ -162,5 +165,56 @@ describe("AI execution API client", () => {
     ]);
     expect((fetchMock.mock.calls[0]?.[1] as RequestInit).method).toBe("POST");
     expect((fetchMock.mock.calls[1]?.[1] as RequestInit).method).toBeUndefined();
+  });
+
+  it("publishes an approved report without accepting a request-scoped folder", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "publication-1",
+          status: "published",
+          file_id: "drive-file-1",
+        }),
+        { status: 201 },
+      ),
+    );
+
+    await publishAiReviewReportToDrive("project-1", "execution-1");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      "http://localhost:3001/projects/project-1/ai-executions/execution-1/review/report/publish",
+    );
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({});
+  });
+
+  it("reads and updates the matter folder settings in the private project scope", async () => {
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            matter_id: "matter-1",
+            project_id: "project-1",
+            drive_folder_id: "folder-1",
+            role: "matter_owner",
+            can_edit: true,
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    await getMatterDriveFolder("project-1", "matter-1");
+    await updateMatterDriveFolder("project-1", "matter-1", "folder-2");
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "http://localhost:3001/projects/project-1/matters/matter-1/drive-folder",
+      "http://localhost:3001/projects/project-1/matters/matter-1/drive-folder",
+    ]);
+    expect((fetchMock.mock.calls[1]?.[1] as RequestInit).method).toBe("PATCH");
+    expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual({
+      drive_folder_id: "folder-2",
+    });
   });
 });

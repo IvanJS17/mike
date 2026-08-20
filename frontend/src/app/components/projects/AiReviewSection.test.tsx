@@ -4,10 +4,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiReview } from "@/app/lib/mikeApi";
 import { AiReviewSection } from "./AiReviewSection";
 
-const { decideAiReviewItem, completeAiExecutionReview, downloadAiReviewReport } = vi.hoisted(() => ({
+const {
+  decideAiReviewItem,
+  completeAiExecutionReview,
+  downloadAiReviewReport,
+  exportAiReviewReport,
+  publishAiReviewReportToDrive,
+} = vi.hoisted(() => ({
   decideAiReviewItem: vi.fn(),
   completeAiExecutionReview: vi.fn(),
   downloadAiReviewReport: vi.fn(),
+  exportAiReviewReport: vi.fn(),
+  publishAiReviewReportToDrive: vi.fn(),
 }));
 
 vi.mock("@/app/lib/mikeApi", async (importOriginal) => ({
@@ -16,6 +24,9 @@ vi.mock("@/app/lib/mikeApi", async (importOriginal) => ({
   completeAiExecutionReview: (...args: unknown[]) =>
     completeAiExecutionReview(...args),
   downloadAiReviewReport: (...args: unknown[]) => downloadAiReviewReport(...args),
+  exportAiReviewReport: (...args: unknown[]) => exportAiReviewReport(...args),
+  publishAiReviewReportToDrive: (...args: unknown[]) =>
+    publishAiReviewReportToDrive(...args),
 }));
 
 const review: AiReview = {
@@ -123,5 +134,137 @@ describe("AiReviewSection", () => {
     expect(
       screen.getByRole("button", { name: "Descargar informe Word" }),
     ).toBeEnabled();
+  });
+
+  it("exports and publishes the approved report, then exposes the Drive file link", async () => {
+    const user = userEvent.setup();
+    const approved: AiReview = {
+      ...review,
+      status: "approved",
+      completed_at: "2026-08-19T12:05:00.000Z",
+    };
+    exportAiReviewReport.mockResolvedValue({ id: "export-1" });
+    publishAiReviewReportToDrive.mockResolvedValue({
+      id: "publication-1",
+      export_id: "export-1",
+      review_id: "review-1",
+      execution_id: "execution-1",
+      matter_id: "matter-1",
+      project_id: "project-1",
+      drive_folder_id: "folder-1",
+      file_id: "drive-file-1",
+      sha256: "a".repeat(64),
+      format_version: "beta-0.1",
+      status: "published",
+      size_bytes: 10,
+      checksum: "checksum-1",
+      failure_code: null,
+      actor_user_id: "reviewer-1",
+      created_at: "2026-08-19T12:06:00.000Z",
+      updated_at: "2026-08-19T12:06:00.000Z",
+    });
+
+    render(
+      <AiReviewSection
+        projectId="project-1"
+        executionId="execution-1"
+        review={approved}
+        currentUserId="reviewer-1"
+        onReviewChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Publicar en Shared Drive" }));
+
+    await waitFor(() => {
+      expect(exportAiReviewReport).toHaveBeenCalledWith("project-1", "execution-1");
+      expect(publishAiReviewReportToDrive).toHaveBeenCalledWith(
+        "project-1",
+        "execution-1",
+      );
+    });
+    expect(screen.getByTestId("drive-publication-status")).toHaveTextContent(
+      "Publicado",
+    );
+    expect(
+      screen.getByRole("link", { name: "drive-file-1" }),
+    ).toHaveAttribute(
+      "href",
+      "https://drive.google.com/open?id=drive-file-1",
+    );
+  });
+
+  it("shows a failed publication and retries through the same idempotent endpoint", async () => {
+    const user = userEvent.setup();
+    const approved: AiReview = {
+      ...review,
+      status: "approved",
+      completed_at: "2026-08-19T12:05:00.000Z",
+    };
+    exportAiReviewReport.mockResolvedValue({ id: "export-1" });
+    publishAiReviewReportToDrive
+      .mockResolvedValueOnce({
+        id: "publication-1",
+        export_id: "export-1",
+        review_id: "review-1",
+        execution_id: "execution-1",
+        matter_id: "matter-1",
+        project_id: "project-1",
+        drive_folder_id: "folder-1",
+        file_id: null,
+        sha256: "a".repeat(64),
+        format_version: "beta-0.1",
+        status: "failed",
+        size_bytes: null,
+        checksum: null,
+        failure_code: "drive_upload_failed",
+        actor_user_id: "reviewer-1",
+        created_at: "2026-08-19T12:06:00.000Z",
+        updated_at: "2026-08-19T12:06:00.000Z",
+      })
+      .mockResolvedValueOnce({
+        id: "publication-1",
+        export_id: "export-1",
+        review_id: "review-1",
+        execution_id: "execution-1",
+        matter_id: "matter-1",
+        project_id: "project-1",
+        drive_folder_id: "folder-1",
+        file_id: "drive-file-2",
+        sha256: "a".repeat(64),
+        format_version: "beta-0.1",
+        status: "published",
+        size_bytes: 10,
+        checksum: "checksum-2",
+        failure_code: null,
+        actor_user_id: "reviewer-1",
+        created_at: "2026-08-19T12:06:00.000Z",
+        updated_at: "2026-08-19T12:07:00.000Z",
+      });
+
+    render(
+      <AiReviewSection
+        projectId="project-1"
+        executionId="execution-1"
+        review={approved}
+        currentUserId="reviewer-1"
+        onReviewChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Publicar en Shared Drive" }));
+    expect(await screen.findByTestId("drive-publication-status")).toHaveTextContent(
+      "Falló",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Reintentar publicación" }),
+    );
+
+    await waitFor(() => {
+      expect(publishAiReviewReportToDrive).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.getByTestId("drive-publication-status")).toHaveTextContent(
+      "Publicado",
+    );
   });
 });

@@ -17,6 +17,7 @@ import {
 import { useProjectWorkspace } from "@/app/components/projects/ProjectWorkspace";
 import { useAuth } from "@/app/contexts/AuthContext";
 import { AiReviewSection } from "@/app/components/projects/AiReviewSection";
+import { MatterDriveFolderSettings } from "@/app/components/projects/MatterDriveFolderSettings";
 import type { Document } from "@/app/components/shared/types";
 import { LIQUID_PANEL_SURFACE_CLASS } from "@/app/components/ui/liquid-surface";
 
@@ -34,6 +35,7 @@ export function AiExecutionPanel({ projectId }: { projectId: string }) {
   );
   const [documentId, setDocumentId] = useState("");
   const [matterId, setMatterId] = useState("");
+  const [matterSettingsId, setMatterSettingsId] = useState("");
   const [provider, setProvider] = useState<(typeof ROUTE_PROVIDERS)[number]>(
     "deepseek",
   );
@@ -51,6 +53,13 @@ export function AiExecutionPanel({ projectId }: { projectId: string }) {
   useEffect(() => {
     if (!documentId && documents[0]) setDocumentId(documents[0].id);
   }, [documentId, documents]);
+
+  useEffect(() => {
+    if (!matterId && executions[0]?.matter_id) {
+      setMatterId(executions[0].matter_id);
+      setMatterSettingsId(executions[0].matter_id);
+    }
+  }, [executions, matterId]);
 
   const selectedDocument = documents.find((document: Document) => document.id === documentId) ?? null;
 
@@ -98,6 +107,8 @@ export function AiExecutionPanel({ projectId }: { projectId: string }) {
 
   async function selectExecution(next: AiExecution) {
     setExecution(next);
+    setMatterId(next.matter_id ?? "");
+    setMatterSettingsId(next.matter_id ?? "");
     setReview(null);
     setOutput(null);
     setReceipt(null);
@@ -139,6 +150,8 @@ export function AiExecutionPanel({ projectId }: { projectId: string }) {
       setError("Selecciona una versión de documento lista antes de iniciar.");
       return;
     }
+    const normalizedMatterId = matterId.trim();
+    setMatterSettingsId(normalizedMatterId);
     setBusy(true);
     setError(null);
     setOutput(null);
@@ -231,6 +244,7 @@ export function AiExecutionPanel({ projectId }: { projectId: string }) {
               className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2"
               value={matterId}
               onChange={(event) => setMatterId(event.target.value)}
+              onBlur={() => setMatterSettingsId(matterId.trim())}
               placeholder="UUID del asunto asignado"
               disabled={busy}
             />
@@ -269,6 +283,11 @@ export function AiExecutionPanel({ projectId }: { projectId: string }) {
             />
           </label>
         </div>
+
+        <MatterDriveFolderSettings
+          projectId={projectId}
+          matterId={matterSettingsId}
+        />
 
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <button
