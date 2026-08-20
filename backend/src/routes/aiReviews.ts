@@ -34,7 +34,7 @@ import {
   type AiRedlineBundleInput,
 } from "../lib/aiRedlineBundles";
 import type { AiExecutionStatus } from "../lib/aiExecutions";
-import { getGoogleDriveClient } from "../lib/googleDrive";
+import { getGoogleDriveClient, type DriveClient } from "../lib/googleDrive";
 import {
   buildDriveAppProperties,
   DOCX_MIME_TYPE,
@@ -139,6 +139,8 @@ type DrivePublicationRow = {
   execution_id: string;
   matter_id: string;
   project_id: string;
+  organization_id: string;
+  authorization_epoch: number;
   drive_folder_id: string;
   file_id: string | null;
   sha256: string;
@@ -1080,6 +1082,7 @@ function drivePublicationScopeMatches(
     publication.execution_id === context.execution.id &&
     publication.matter_id === context.execution.matter_id &&
     publication.project_id === context.execution.project_id &&
+    publication.organization_id === context.matterAccess.organizationId &&
     publication.drive_folder_id === driveFolderId &&
     publication.sha256 === report.content_sha256 &&
     publication.format_version === DRIVE_FORMAT_VERSION
@@ -1099,6 +1102,18 @@ async function updateDrivePublication(
     .single();
   if (error || !data) return null;
   return data as DrivePublicationRow;
+}
+
+async function assertDrivePublicationAccess(
+  context: ReviewContext,
+): Promise<void> {
+  await assertMatterAccessFresh(
+    context.execution.matter_id!,
+    context.userId,
+    context.db,
+    context.matterAccess,
+    "review",
+  );
 }
 
 async function publishReviewReportToDrive(req: Request, res: Response) {
@@ -1142,7 +1157,8 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
   ) {
     return void res.status(404).json({
       code: "scope_mismatch",
-      detail: "The approved AI review report is not available for Drive publication",
+      detail:
+        "The approved AI review report is not available for Drive publication",
     });
   }
 
@@ -1163,6 +1179,15 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
     return void res.status(409).json({
       code: "drive_folder_not_configured",
       detail: "The matter has no explicit Google Drive folder",
+    });
+  }
+
+  try {
+    await assertDrivePublicationAccess(context);
+  } catch {
+    return void res.status(403).json({
+      code: "authorization_revoked",
+      detail: "Matter authorization changed; Drive publication was not created",
     });
   }
 
@@ -1217,7 +1242,8 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
   ) {
     return void res.status(404).json({
       code: "report_export_invalid",
-      detail: "The approved AI review report is not available for Drive publication",
+      detail:
+        "The approved AI review report is not available for Drive publication",
     });
   }
 
@@ -1226,7 +1252,8 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
   if (!bytes || bytes.length === 0) {
     return void res.status(409).json({
       code: "report_unavailable",
-      detail: "The approved AI review report is not available for Drive publication",
+      detail:
+        "The approved AI review report is not available for Drive publication",
     });
   }
   const reportSha256 = contentSha256(bytes);
@@ -1244,11 +1271,7 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
   }
 
   try {
-    await assertEpochFresh(
-      context.db,
-      context.matterAccess.organizationId,
-      context.matterAccess.authorizationEpoch,
-    );
+    await assertDrivePublicationAccess(context);
   } catch {
     return void res.status(403).json({
       code: "authorization_revoked",
@@ -1270,6 +1293,8 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
       execution_id: context.execution.id,
       matter_id: context.execution.matter_id,
       project_id: context.execution.project_id,
+      organization_id: context.matterAccess.organizationId,
+      authorization_epoch: context.matterAccess.authorizationEpoch,
       drive_folder_id: driveFolderId,
       sha256: reportSha256,
       format_version: DRIVE_FORMAT_VERSION,
@@ -1279,6 +1304,13 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
     .select("*")
     .single();
   if (insertError || !inserted) {
+    if (insertError?.code === "42501") {
+      return void res.status(403).json({
+        code: "authorization_revoked",
+        detail:
+          "Matter authorization changed; Drive publication was not created",
+      });
+    }
     if (insertError?.code === "23505") {
       const raced = await loadDrivePublication(context.db, report.id);
       if (
@@ -1320,8 +1352,15 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
 
   const pending = inserted as DrivePublicationRow;
   let failureCode: DrivePublicationFailureCode = "drive_upload_failed";
+  let drive: DriveClient | null = null;
+  let remoteFileId: string | null = null;
   try {
-    const drive = getGoogleDriveClient();
+    drive = getGoogleDriveClient();
+    try {
+      await assertDrivePublicationAccess(context);
+    } catch {
+      throw new DrivePublicationFailure("authorization_revoked");
+    }
     const remote = await drive.uploadDocx({
       name: report.filename,
       parentId: driveFolderId,
@@ -1329,6 +1368,7 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
       mimeType: DOCX_MIME_TYPE,
       appProperties,
     });
+    remoteFileId = remote.id;
     const verified = await drive.getFile(remote.id);
     const verification = verifyDriveFile({
       file: verified,
@@ -1341,6 +1381,11 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
       failureCode = verification.code;
       throw new DrivePublicationFailure(verification.code);
     }
+    try {
+      await assertDrivePublicationAccess(context);
+    } catch {
+      throw new DrivePublicationFailure("authorization_revoked");
+    }
     const published = await updateDrivePublication(context.db, pending.id, {
       status: "published",
       file_id: verified.id,
@@ -1350,6 +1395,11 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
       updated_at: new Date().toISOString(),
     });
     if (!published) {
+      try {
+        await assertDrivePublicationAccess(context);
+      } catch {
+        throw new DrivePublicationFailure("authorization_revoked");
+      }
       failureCode = "publication_record_failed";
       throw new DrivePublicationFailure(failureCode);
     }
@@ -1376,6 +1426,9 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
   } catch (error) {
     if (error instanceof DrivePublicationFailure) {
       failureCode = error.code;
+    }
+    if (failureCode === "authorization_revoked" && drive && remoteFileId) {
+      await drive.deleteFile(remoteFileId).catch(() => {});
     }
     const failed = await updateDrivePublication(context.db, pending.id, {
       status: "failed",

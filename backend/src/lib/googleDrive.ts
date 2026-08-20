@@ -25,6 +25,7 @@ export type DriveDocxUpload = {
 export interface DriveClient {
   uploadDocx(input: DriveDocxUpload): Promise<DriveFileMetadata>;
   getFile(fileId: string): Promise<DriveFileMetadata>;
+  deleteFile(fileId: string): Promise<void>;
 }
 
 function accessTokenFromConfig(): string {
@@ -159,6 +160,20 @@ class GoogleDriveClient implements DriveClient {
     if (!response.ok)
       throw new Error("Google Drive metadata verification failed");
     return parseDriveFile(await response.json());
+  }
+
+  async deleteFile(fileId: string): Promise<void> {
+    if (!fileId.trim()) throw new Error("Google Drive file id is empty");
+    const response = await fetch(
+      `${DRIVE_API}/files/${encodeURIComponent(fileId)}?supportsAllDrives=true`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${this.accessToken}` },
+      },
+    );
+    if (!response.ok && response.status !== 404) {
+      throw new Error("Google Drive file deletion failed");
+    }
   }
 }
 

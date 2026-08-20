@@ -5,18 +5,21 @@ import type { DriveClient, DriveFileMetadata } from "../../lib/googleDrive";
 
 const {
   checkMatterAccess,
+  assertMatterAccessFresh,
   assertEpochFresh,
   downloadFile,
   recordAuditEvent,
   driveClient,
 } = vi.hoisted(() => ({
   checkMatterAccess: vi.fn(),
+  assertMatterAccessFresh: vi.fn(),
   assertEpochFresh: vi.fn(),
   downloadFile: vi.fn(),
   recordAuditEvent: vi.fn(),
   driveClient: {
     uploadDocx: vi.fn(),
     getFile: vi.fn(),
+    deleteFile: vi.fn(),
   },
 }));
 
@@ -146,6 +149,8 @@ vi.mock("../../middleware/auth", () => ({
 }));
 vi.mock("../../lib/aiAccess", () => ({
   checkMatterAccess: (...args: unknown[]) => checkMatterAccess(...args),
+  assertMatterAccessFresh: (...args: unknown[]) =>
+    assertMatterAccessFresh(...args),
 }));
 vi.mock("../../lib/tenancy", () => ({
   assertEpochFresh: (...args: unknown[]) => assertEpochFresh(...args),
@@ -210,6 +215,7 @@ beforeEach(() => {
     organizationId: "org-1",
     authorizationEpoch: 1,
   });
+  assertMatterAccessFresh.mockResolvedValue(undefined);
   assertEpochFresh.mockResolvedValue(undefined);
   downloadFile.mockResolvedValue(
     reportBytes.buffer.slice(
@@ -231,8 +237,17 @@ beforeEach(() => {
   driveClient.getFile.mockImplementation(async (fileId: string) =>
     driveFile(fileId),
   );
+  driveClient.deleteFile.mockResolvedValue(undefined);
   recordAuditEvent.mockResolvedValue(undefined);
 });
+
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
 
 describe("approved AI review report Drive publication", () => {
   it("uploads the approved DOCX with scoped appProperties and verifies the file", async () => {
@@ -303,6 +318,7 @@ describe("approved AI review report Drive publication", () => {
     expect(second.body.file_id).toBe(first.body.file_id);
     expect(driveClient.uploadDocx).toHaveBeenCalledOnce();
     expect(driveClient.getFile).toHaveBeenCalledOnce();
+    expect(assertMatterAccessFresh.mock.calls.length).toBeGreaterThanOrEqual(3);
     expect(rows.ai_review_drive_publications).toHaveLength(1);
   });
 
@@ -323,7 +339,7 @@ describe("approved AI review report Drive publication", () => {
     ],
     [
       "authorization_revoked",
-      () => assertEpochFresh.mockRejectedValue(new Error("revoked")),
+      () => assertMatterAccessFresh.mockRejectedValue(new Error("revoked")),
     ],
   ] as const)(
     "fails closed for %s without uploading",
@@ -386,5 +402,105 @@ describe("approved AI review report Drive publication", () => {
         }),
       }),
     );
+  });
+
+  it("lets a revoke-wins barrier stop before creating pending", async () => {
+    const checkStarted = deferred();
+    const releaseRevoke = deferred();
+    assertMatterAccessFresh.mockImplementationOnce(async () => {
+      checkStarted.resolve();
+      await releaseRevoke.promise;
+      throw new Error("authorization changed");
+    });
+
+    const responsePromise = request(app)
+      .post(route)
+      .set("Authorization", "Bearer test")
+      .then((response) => response);
+    await checkStarted.promise;
+    releaseRevoke.resolve();
+    const response = await responsePromise;
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe("authorization_revoked");
+    expect(driveClient.uploadDocx).not.toHaveBeenCalled();
+    expect(rows.ai_review_drive_publications).toHaveLength(0);
+  });
+
+  it("marks pending authorization_revoked without calling Drive when revoke wins before upload", async () => {
+    const checkStarted = deferred();
+    const releaseRevoke = deferred();
+    let checks = 0;
+    assertMatterAccessFresh.mockImplementation(async () => {
+      checks += 1;
+      if (checks !== 3) return;
+      checkStarted.resolve();
+      await releaseRevoke.promise;
+      throw new Error("authorization changed");
+    });
+
+    const responsePromise = request(app)
+      .post(route)
+      .set("Authorization", "Bearer test")
+      .then((response) => response);
+    await checkStarted.promise;
+    releaseRevoke.resolve();
+    const response = await responsePromise;
+
+    expect(response.status).toBe(502);
+    expect(response.body.publication).toMatchObject({
+      status: "failed",
+      failure_code: "authorization_revoked",
+      file_id: null,
+    });
+    expect(driveClient.uploadDocx).not.toHaveBeenCalled();
+    expect(rows.ai_review_drive_publications[0].status).not.toBe("published");
+  });
+
+  it("cleans a remote upload and records recoverable revocation when revoke wins before publish", async () => {
+    const uploadStarted = deferred();
+    const releaseUpload = deferred();
+    let revoked = false;
+    assertMatterAccessFresh.mockImplementation(async () => {
+      if (revoked) throw new Error("authorization changed");
+    });
+    driveClient.uploadDocx.mockImplementationOnce(
+      async (input: Parameters<DriveClient["uploadDocx"]>[0]) => {
+        uploadStarted.resolve();
+        await releaseUpload.promise;
+        return driveFile("drive-file-1", {
+          parents: [input.parentId],
+          appProperties: input.appProperties,
+          size: String(input.bytes.byteLength),
+        });
+      },
+    );
+
+    const responsePromise = request(app)
+      .post(route)
+      .set("Authorization", "Bearer test")
+      .then((response) => response);
+    await uploadStarted.promise;
+    revoked = true;
+    releaseUpload.resolve();
+    const response = await responsePromise;
+
+    expect(response.status).toBe(502);
+    expect(response.body).toMatchObject({
+      code: "drive_publication_failed",
+      publication: {
+        status: "failed",
+        failure_code: "authorization_revoked",
+        file_id: null,
+      },
+    });
+    expect(driveClient.uploadDocx).toHaveBeenCalledOnce();
+    expect(driveClient.deleteFile).toHaveBeenCalledWith("drive-file-1");
+    expect(rows.ai_review_drive_publications[0]).toMatchObject({
+      status: "failed",
+      failure_code: "authorization_revoked",
+      file_id: null,
+    });
+    expect(rows.ai_review_drive_publications[0].status).not.toBe("published");
   });
 });

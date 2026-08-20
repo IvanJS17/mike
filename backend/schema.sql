@@ -2795,6 +2795,8 @@ CREATE TABLE IF NOT EXISTS public.ai_review_drive_publications (
   execution_id uuid NOT NULL REFERENCES public.ai_executions(id) ON DELETE CASCADE,
   matter_id uuid NOT NULL REFERENCES public.matters(id) ON DELETE CASCADE,
   project_id uuid NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
+  organization_id uuid NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+  authorization_epoch bigint NOT NULL CHECK (authorization_epoch >= 0),
   drive_folder_id text NOT NULL CHECK (btrim(drive_folder_id) <> ''),
   file_id text,
   sha256 text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
@@ -2836,6 +2838,8 @@ CREATE INDEX IF NOT EXISTS ai_review_drive_publications_matter_idx
   ON public.ai_review_drive_publications(matter_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS ai_review_drive_publications_review_idx
   ON public.ai_review_drive_publications(review_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ai_review_drive_publications_organization_idx
+  ON public.ai_review_drive_publications(organization_id, created_at DESC);
 
 CREATE OR REPLACE FUNCTION public.ai_review_drive_publication_guard()
 RETURNS trigger
@@ -2854,6 +2858,8 @@ DECLARE
   v_matter_project_id uuid;
   v_matter_folder_id text;
   v_organization_id uuid;
+  v_current_epoch bigint;
+  v_revocation_recovery boolean := false;
 BEGIN
   IF TG_OP = 'INSERT' THEN
     SELECT
@@ -2897,16 +2903,79 @@ BEGIN
        OR v_matter_folder_id IS NULL
        OR v_matter_folder_id IS DISTINCT FROM NEW.drive_folder_id
        OR v_export_sha256 IS DISTINCT FROM NEW.sha256
+       OR v_organization_id IS DISTINCT FROM NEW.organization_id
     THEN
       RAISE EXCEPTION 'AI review Drive publication scope is invalid';
     END IF;
+  ELSE
+    IF OLD.status IS DISTINCT FROM 'pending'
+       OR NEW.export_id IS DISTINCT FROM OLD.export_id
+       OR NEW.review_id IS DISTINCT FROM OLD.review_id
+       OR NEW.execution_id IS DISTINCT FROM OLD.execution_id
+       OR NEW.matter_id IS DISTINCT FROM OLD.matter_id
+       OR NEW.project_id IS DISTINCT FROM OLD.project_id
+       OR NEW.organization_id IS DISTINCT FROM OLD.organization_id
+       OR NEW.authorization_epoch IS DISTINCT FROM OLD.authorization_epoch
+       OR NEW.drive_folder_id IS DISTINCT FROM OLD.drive_folder_id
+       OR NEW.sha256 IS DISTINCT FROM OLD.sha256
+       OR NEW.format_version IS DISTINCT FROM OLD.format_version
+       OR NEW.actor_user_id IS DISTINCT FROM OLD.actor_user_id
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+    THEN
+      RAISE EXCEPTION 'AI review Drive publication identity is immutable';
+    END IF;
 
+    IF NEW.status NOT IN ('published', 'failed') THEN
+      RAISE EXCEPTION 'Invalid AI review Drive publication status transition';
+    END IF;
+
+    SELECT w.organization_id
+      INTO v_organization_id
+      FROM public.matters m
+      JOIN public.workspaces w ON w.id = m.workspace_id
+     WHERE m.id = OLD.matter_id;
+  END IF;
+
+  -- revoke_organization_membership takes this same lock before deleting the
+  -- organization membership and bumping the epoch. Whichever operation wins
+  -- is the linearization point for this database-side publication decision.
+  SELECT o.authorization_epoch
+    INTO v_current_epoch
+    FROM public.organizations o
+   WHERE o.id = v_organization_id
+   FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'AI review Drive publication organization does not exist'
+      USING ERRCODE = '42501';
+  END IF;
+  IF v_organization_id IS DISTINCT FROM NEW.organization_id THEN
+    RAISE EXCEPTION 'AI review Drive publication organization scope is invalid'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.status = 'failed'
+       AND NEW.failure_code = 'authorization_revoked'
+       AND v_current_epoch > OLD.authorization_epoch
+    THEN
+      -- A revoke-wins cleanup must be able to close a pending row after the
+      -- membership was removed. The epoch advance proves the revocation and
+      -- the matter assignment preserves the original actor scope; no
+      -- published file is accepted on this recovery path.
+      v_revocation_recovery := true;
+    ELSIF v_current_epoch IS DISTINCT FROM NEW.authorization_epoch THEN
+      RAISE EXCEPTION 'AI review Drive publication authorization changed'
+        USING ERRCODE = '42501';
+    END IF;
+  ELSIF v_current_epoch IS DISTINCT FROM NEW.authorization_epoch THEN
+    RAISE EXCEPTION 'AI review Drive publication authorization changed'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF v_revocation_recovery THEN
     IF NOT EXISTS (
       SELECT 1
         FROM public.matter_memberships mm
-        JOIN public.organization_memberships om
-          ON om.organization_id = v_organization_id
-         AND om.user_id = mm.user_id
        WHERE mm.matter_id = NEW.matter_id
          AND mm.user_id = NEW.actor_user_id
          AND mm.role IN ('matter_owner', 'editor')
@@ -2914,28 +2983,23 @@ BEGIN
       RAISE EXCEPTION 'AI review Drive publication actor is not authorized'
         USING ERRCODE = '42501';
     END IF;
-
     RETURN NEW;
   END IF;
 
-  IF OLD.status IS DISTINCT FROM 'pending'
-     OR NEW.export_id IS DISTINCT FROM OLD.export_id
-     OR NEW.review_id IS DISTINCT FROM OLD.review_id
-     OR NEW.execution_id IS DISTINCT FROM OLD.execution_id
-     OR NEW.matter_id IS DISTINCT FROM OLD.matter_id
-     OR NEW.project_id IS DISTINCT FROM OLD.project_id
-     OR NEW.drive_folder_id IS DISTINCT FROM OLD.drive_folder_id
-     OR NEW.sha256 IS DISTINCT FROM OLD.sha256
-     OR NEW.format_version IS DISTINCT FROM OLD.format_version
-     OR NEW.actor_user_id IS DISTINCT FROM OLD.actor_user_id
-     OR NEW.created_at IS DISTINCT FROM OLD.created_at
-  THEN
-    RAISE EXCEPTION 'AI review Drive publication identity is immutable';
+  IF NOT EXISTS (
+    SELECT 1
+      FROM public.matter_memberships mm
+      JOIN public.organization_memberships om
+        ON om.organization_id = v_organization_id
+       AND om.user_id = mm.user_id
+     WHERE mm.matter_id = NEW.matter_id
+       AND mm.user_id = NEW.actor_user_id
+       AND mm.role IN ('matter_owner', 'editor')
+  ) THEN
+    RAISE EXCEPTION 'AI review Drive publication actor is not authorized'
+      USING ERRCODE = '42501';
   END IF;
 
-  IF NEW.status NOT IN ('published', 'failed') THEN
-    RAISE EXCEPTION 'Invalid AI review Drive publication status transition';
-  END IF;
   RETURN NEW;
 END;
 $$;
