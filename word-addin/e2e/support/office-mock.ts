@@ -185,8 +185,18 @@ export function installOfficeMock(seed: OfficeSeed): void {
           ? [
               {
                 load: (_p?: any) => undefined,
-                insertText: (newText: string, location: string) =>
-                  recordWrite(newText, location, query),
+                get text() {
+                  return query;
+                },
+                insertText: (newText: string, location: string) => {
+                  recordWrite(newText, location, query);
+                  if (location !== InsertLocation.replace) return;
+                  const current: string = w.__OFFICE_SEED__.documentText || "";
+                  const index = current.indexOf(query);
+                  if (index === -1) return;
+                  w.__OFFICE_SEED__.documentText =
+                    current.slice(0, index) + newText + current.slice(index + query.length);
+                },
               },
             ]
           : [];

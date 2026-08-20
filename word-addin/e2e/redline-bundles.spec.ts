@@ -176,6 +176,80 @@ test.describe("approved redline bundles", () => {
     expect(calls.changeTrackingMode).toBe("TrackAll");
   });
 
+  test("fails the action when its target moves after the bundle is opened", async ({
+    addin,
+    page,
+  }) => {
+    const bundle = makeBundle([
+      action("action-a", "Source A.", "Reviewed A."),
+    ]);
+    await mockExecutionPicker(addin, bundle);
+    await gotoActions(addin);
+    await openSelectedBundle(addin);
+
+    await addin.setDocumentText("Moved. Source A. Source B.");
+    await page.getByRole("button", { name: "Apply change 1" }).click();
+
+    await expect(
+      page.getByRole("status", { name: "Redline bundle status" })
+    ).toHaveText("Applied 0, omitted 0, failed 1, pending 0.");
+    await expect(page.getByText("Failed — no change was applied.")).toBeVisible();
+    expect((await addin.wordCalls()).trackedChanges).toEqual([]);
+  });
+
+  test("allows the next action after the prior local action", async ({
+    addin,
+    page,
+  }) => {
+    const bundle = makeBundle([
+      action("action-a", "Source A.", "Reviewed A."),
+      action("action-b", "Source B.", "Reviewed B."),
+    ]);
+    await mockExecutionPicker(addin, bundle);
+    await gotoActions(addin);
+    await openSelectedBundle(addin);
+
+    await page.getByRole("button", { name: "Apply change 1" }).click();
+    await expect.poll(async () => (await addin.wordCalls()).trackedChanges.length).toBe(1);
+    await page.getByRole("button", { name: "Apply change 2" }).click();
+
+    await expect(
+      page.getByRole("status", { name: "Redline bundle status" })
+    ).toHaveText("Applied 2, omitted 0, failed 0, pending 0.");
+    expect((await addin.wordCalls()).trackedChanges).toEqual([
+      { text: "Reviewed A.", location: "Replace", original: "Source A." },
+      { text: "Reviewed B.", location: "Replace", original: "Source B." },
+    ]);
+  });
+
+  test("fails a stale second action after an external change between actions", async ({
+    addin,
+    page,
+  }) => {
+    const bundle = makeBundle([
+      action("action-a", "Source A.", "Reviewed A."),
+      action("action-b", "Source B.", "Reviewed B."),
+    ]);
+    await mockExecutionPicker(addin, bundle);
+    await gotoActions(addin);
+    await openSelectedBundle(addin);
+
+    await page.getByRole("button", { name: "Apply change 1" }).click();
+    await expect.poll(async () => (await addin.wordCalls()).trackedChanges.length).toBe(1);
+
+    // Model the local first replacement, then mutate the second target
+    // externally while leaving another stale occurrence searchable.
+    await addin.setDocumentText("Reviewed A. Changed B. Source B.");
+    await page.getByRole("button", { name: "Apply change 2" }).click();
+
+    await expect(
+      page.getByRole("status", { name: "Redline bundle status" })
+    ).toHaveText("Applied 1, omitted 0, failed 1, pending 0.");
+    expect((await addin.wordCalls()).trackedChanges).toEqual([
+      { text: "Reviewed A.", location: "Replace", original: "Source A." },
+    ]);
+  });
+
   test("fails closed when the before-text span does not match", async ({
     addin,
     page,

@@ -28,6 +28,46 @@ type PreparedBundle = Awaited<
   ReturnType<typeof prepareApprovedRedlineBundle>
 >;
 
+type LocalRedlineSession = {
+  baselineText: string;
+  baselineDocumentSha256: string;
+  expectedDocumentSha256: string | null;
+  bundleId: string;
+  bundleSha256: string;
+  executionId: string;
+  applied: PreparedRedlineAction[];
+};
+
+type DocumentSpan = { start: number; end: number };
+
+function spanAfterLocalActions(
+  action: PreparedRedlineAction,
+  applied: PreparedRedlineAction[]
+): DocumentSpan | null {
+  let offset = 0;
+  for (const previous of applied) {
+    if (previous.end <= action.start) {
+      offset += previous.replacement.length - previous.original.length;
+      continue;
+    }
+    if (previous.start >= action.end) continue;
+    return null;
+  }
+  return { start: action.start + offset, end: action.end + offset };
+}
+
+function expectedDocumentText(session: LocalRedlineSession): string | null {
+  let text = session.baselineText;
+  const applied: PreparedRedlineAction[] = [];
+  for (const action of session.applied) {
+    const span = spanAfterLocalActions(action, applied);
+    if (!span || text.slice(span.start, span.end) !== action.original) return null;
+    text = `${text.slice(0, span.start)}${action.replacement}${text.slice(span.end)}`;
+    applied.push(action);
+  }
+  return text;
+}
+
 function safeErrorMessage(error: unknown): string {
   if (error instanceof RedlineBundleValidationError) return error.message;
   if (error instanceof Error) return error.message;
@@ -59,6 +99,7 @@ export function ApprovedRedlinePanel(): React.ReactElement {
   const [summary, setSummary] = useState<string | null>(null);
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const mountedRef = useRef(true);
+  const localSessionRef = useRef<LocalRedlineSession | null>(null);
   const { readDocumentText, getDocxBlob, applyTrackedRedline } = useWordDoc();
 
   useEffect(() => {
@@ -126,6 +167,7 @@ export function ApprovedRedlinePanel(): React.ReactElement {
     setPrepared(null);
     setActionStates({});
     setSummary(null);
+    localSessionRef.current = null;
     void loadExecutions(projectId);
   };
 
@@ -138,6 +180,7 @@ export function ApprovedRedlinePanel(): React.ReactElement {
     setSummary(null);
     setPrepared(null);
     setActionStates({});
+    localSessionRef.current = null;
     try {
       const [bundle, documentBlob, documentText] = await Promise.all([
         getApprovedRedlineBundle(selectedProjectId, execution.id),
@@ -153,6 +196,15 @@ export function ApprovedRedlinePanel(): React.ReactElement {
       });
       if (!mountedRef.current) return;
       setPrepared(verified);
+      localSessionRef.current = {
+        baselineText: documentText,
+        baselineDocumentSha256: documentSha256,
+        expectedDocumentSha256: documentSha256,
+        bundleId: verified.bundle.id,
+        bundleSha256: verified.bundle.bundle_sha256,
+        executionId: verified.bundle.execution_id,
+        applied: [],
+      };
       setActionStates(
         Object.fromEntries(
           verified.actions.map((action) => [action.action_id, "pending"])
@@ -170,6 +222,7 @@ export function ApprovedRedlinePanel(): React.ReactElement {
     setActionStates({});
     setBusyActionId(null);
     setOpenError(null);
+    localSessionRef.current = null;
     setSummary("Bundle cancelled; no pending changes were applied.");
   };
 
@@ -186,15 +239,119 @@ export function ApprovedRedlinePanel(): React.ReactElement {
       [action.action_id]: "applying",
     }));
     try {
-      await applyTrackedRedline(action);
+      const session = localSessionRef.current;
+      if (!session) {
+        throw new RedlineBundleValidationError(
+          "span-mismatch",
+          "The approved redline session is no longer available."
+        );
+      }
+
+      // Re-fetch the authenticated bundle and execution immediately before
+      // every write. The original document snapshot is used to validate the
+      // immutable bundle; the current text is checked against only the local
+      // replacements already made in this pane.
+      const [freshBundle, freshExecutions, documentBlob, documentText] =
+        await Promise.all([
+          getApprovedRedlineBundle(selectedProjectId, session.executionId),
+          listAiExecutions(selectedProjectId),
+          getDocxBlob(),
+          readDocumentText(),
+        ]);
+      const freshExecution = freshExecutions.find(
+        (execution) => execution.id === session.executionId
+      );
+      if (!freshExecution || freshExecution.status !== "succeeded") {
+        throw new RedlineBundleValidationError(
+          "source-mismatch",
+          "The approved redline execution is no longer valid."
+        );
+      }
+
+      const documentSha256 = await sha256Hex(await documentBlob.arrayBuffer());
+      if (
+        session.expectedDocumentSha256 === null ||
+        documentSha256 !== session.expectedDocumentSha256
+      ) {
+        throw new RedlineBundleValidationError(
+          "source-mismatch",
+          "The current document no longer matches the locally tracked state."
+        );
+      }
+      const freshPrepared = await prepareApprovedRedlineBundle({
+        bundle: freshBundle,
+        execution: freshExecution,
+        documentText: session.baselineText,
+        documentSha256: session.baselineDocumentSha256,
+      });
+      if (
+        freshPrepared.bundle.id !== session.bundleId ||
+        freshPrepared.bundle.bundle_sha256 !== session.bundleSha256
+      ) {
+        throw new RedlineBundleValidationError(
+          "tampered",
+          "The approved redline bundle changed after it was opened."
+        );
+      }
+
+      const expectedText = expectedDocumentText(session);
+      if (expectedText === null || documentText !== expectedText) {
+        throw new RedlineBundleValidationError(
+          "span-mismatch",
+          "The document changed after the approved redline bundle was opened."
+        );
+      }
+      const freshAction = freshPrepared.actions.find(
+        (candidate) => candidate.action_id === action.action_id
+      );
+      if (!freshAction) {
+        throw new RedlineBundleValidationError(
+          "tampered",
+          "The approved redline action is no longer in the bundle."
+        );
+      }
+      const span = spanAfterLocalActions(freshAction, session.applied);
+      if (!span) {
+        throw new RedlineBundleValidationError(
+          "span-mismatch",
+          "The approved redline overlaps a local change."
+        );
+      }
+      const currentOriginal = documentText.slice(span.start, span.end);
+      if (
+        currentOriginal !== freshAction.original ||
+        (await sha256Hex(currentOriginal)) !== freshAction.before_text_sha256
+      ) {
+        throw new RedlineBundleValidationError(
+          "span-mismatch",
+          "The approved redline text is no longer at its approved range."
+        );
+      }
+
+      await applyTrackedRedline({
+        ...freshAction,
+        start: span.start,
+        end: span.end,
+      });
+      session.applied.push(freshAction);
+      try {
+        const appliedDocumentBlob = await getDocxBlob();
+        session.expectedDocumentSha256 = await sha256Hex(
+          await appliedDocumentBlob.arrayBuffer()
+        );
+      } catch {
+        // The tracked change already succeeded. Refuse future writes if the
+        // post-write document hash cannot be captured.
+        session.expectedDocumentSha256 = null;
+      }
       if (!mountedRef.current) return;
       setActionStates((current) => ({
         ...current,
         [action.action_id]: "applied",
       }));
     } catch {
-      // The Word error may contain the selected document text. Keep it out of
-      // logs and the UI; the card only records that this action failed.
+      // The Word/API error may contain the selected document text. Keep it out
+      // of logs and the UI; the card only records that this action failed.
       if (mountedRef.current) {
         setActionStates((current) => ({
           ...current,

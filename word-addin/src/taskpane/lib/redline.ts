@@ -243,6 +243,12 @@ function integer(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value);
 }
 
+type ResolvedBeforeText = {
+  text: string;
+  start: number;
+  end: number;
+};
+
 /**
  * Resolve the exact text represented by an action's hash/span without trusting
  * model text or applying a guessed replacement. The direct span is the normal
@@ -252,7 +258,7 @@ function integer(value: unknown): value is number {
 async function resolveBeforeText(
   documentText: string,
   action: RedlineBundleAction
-): Promise<string> {
+): Promise<ResolvedBeforeText> {
   const length = action.end - action.start;
   if (
     !integer(action.start) ||
@@ -277,7 +283,7 @@ async function resolveBeforeText(
         "An approved redline span is ambiguous in the current document."
       );
     }
-    return direct;
+    return { text: direct, start: action.start, end: action.end };
   }
 
   // A beta action has no plaintext before_text by design. Scan only when the
@@ -290,6 +296,7 @@ async function resolveBeforeText(
   }
 
   let match: string | null = null;
+  let matchStart: number | null = null;
   for (let offset = 0; offset <= documentText.length - length; offset++) {
     const candidate = documentText.slice(offset, offset + length);
     if (await sha256Hex(candidate) !== action.before_text_sha256) continue;
@@ -300,14 +307,19 @@ async function resolveBeforeText(
       );
     }
     match = candidate;
+    matchStart = offset;
   }
-  if (match === null) {
+  if (match === null || matchStart === null) {
     invalidBundle(
       "span-mismatch",
       "The approved redline span could not be verified in the current document."
     );
   }
-  return match;
+  return {
+    text: match,
+    start: matchStart,
+    end: matchStart + length,
+  };
 }
 
 /**
@@ -409,10 +421,12 @@ export async function prepareApprovedRedlineBundle(input: {
       }
     }
 
-    const original = await resolveBeforeText(input.documentText, rawAction);
+    const resolved = await resolveBeforeText(input.documentText, rawAction);
     actions.push({
       ...rawAction,
-      original,
+      start: resolved.start,
+      end: resolved.end,
+      original: resolved.text,
       replacement: rawAction.replacement_text,
     });
   }
