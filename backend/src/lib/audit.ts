@@ -21,7 +21,9 @@ export type AuditEventType =
   | "ai.review.item_decided"
   | "ai.review.completed"
   | "ai.review.report_exported"
-  | "ai.review.redline_bundle_created";
+  | "ai.review.redline_bundle_created"
+  | "ai.review.drive_published"
+  | "ai.review.drive_publication_failed";
 
 export type AiAuditDetailInput = {
   executionId: string;
