@@ -221,7 +221,7 @@ describe("AiReviewSection", () => {
         status: "failed",
         size_bytes: null,
         checksum: null,
-        failure_code: "drive_upload_failed",
+        failure_code: "publication_record_failed",
         actor_user_id: "reviewer-1",
         created_at: "2026-08-19T12:06:00.000Z",
         updated_at: "2026-08-19T12:06:00.000Z",
@@ -274,7 +274,7 @@ describe("AiReviewSection", () => {
     );
   });
 
-  it("does not offer retry for a terminal revoked publication", async () => {
+  it("does not offer retry for an uncertain upload publication", async () => {
     const user = userEvent.setup();
     const approved: AiReview = {
       ...review,
@@ -296,7 +296,7 @@ describe("AiReviewSection", () => {
       status: "failed",
       size_bytes: null,
       checksum: null,
-      failure_code: "authorization_revoked",
+      failure_code: "drive_upload_outcome_unknown",
       actor_user_id: "reviewer-1",
       created_at: "2026-08-19T12:06:00.000Z",
       updated_at: "2026-08-19T12:06:00.000Z",
@@ -318,6 +318,9 @@ describe("AiReviewSection", () => {
     expect(
       await screen.findByTestId("drive-publication-status"),
     ).toHaveTextContent("Falló");
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "No se pudo confirmar si Drive creó el archivo",
+    );
     expect(
       screen.queryByRole("button", { name: "Reintentar publicación" }),
     ).not.toBeInTheDocument();

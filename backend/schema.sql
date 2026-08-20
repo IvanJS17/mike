@@ -2806,6 +2806,7 @@ CREATE TABLE IF NOT EXISTS public.ai_review_drive_publications (
   size_bytes bigint,
   checksum text,
   failure_code text CHECK (failure_code IN (
+    'drive_upload_outcome_unknown',
     'drive_upload_failed',
     'drive_file_invalid',
     'authorization_revoked',
@@ -3075,7 +3076,6 @@ BEGIN
       END IF;
     ELSIF OLD.status = 'failed' AND NEW.status = 'pending' THEN
       IF OLD.failure_code NOT IN (
-        'drive_upload_failed',
         'drive_file_invalid',
         'publication_record_failed'
       ) THEN

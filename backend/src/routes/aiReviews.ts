@@ -1093,15 +1093,8 @@ function drivePublicationScopeMatches(
 
 function isRecoverableDrivePublicationFailure(
   code: DrivePublicationFailureCode | null,
-): code is
-  | "drive_upload_failed"
-  | "drive_file_invalid"
-  | "publication_record_failed" {
-  return (
-    code === "drive_upload_failed" ||
-    code === "drive_file_invalid" ||
-    code === "publication_record_failed"
-  );
+): code is "drive_file_invalid" | "publication_record_failed" {
+  return code === "drive_file_invalid" || code === "publication_record_failed";
 }
 
 async function claimDrivePublicationRetry(
@@ -1461,7 +1454,7 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
     pending = inserted as DrivePublicationRow;
   }
 
-  let failureCode: DrivePublicationFailureCode = "drive_upload_failed";
+  let failureCode: DrivePublicationFailureCode = "drive_upload_outcome_unknown";
   let drive: DriveClient | null = null;
   let remoteFileId: string | null = null;
   try {
@@ -1478,15 +1471,33 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
     } catch {
       throw new DrivePublicationFailure("authorization_revoked");
     }
-    const remote = await drive.uploadDocx({
-      name: report.filename,
-      parentId: driveFolderId,
-      bytes,
-      mimeType: DOCX_MIME_TYPE,
-      appProperties,
-    });
+    // Drive may create the file before a timeout, network error, or response
+    // parse failure. Without a verified id there is nothing safe to clean up.
+    let remote: Awaited<ReturnType<DriveClient["uploadDocx"]>>;
+    try {
+      remote = await drive.uploadDocx({
+        name: report.filename,
+        parentId: driveFolderId,
+        bytes,
+        mimeType: DOCX_MIME_TYPE,
+        appProperties,
+      });
+    } catch {
+      failureCode = "drive_upload_outcome_unknown";
+      throw new DrivePublicationFailure(failureCode);
+    }
+    if (!remote.id.trim()) {
+      failureCode = "drive_upload_outcome_unknown";
+      throw new DrivePublicationFailure(failureCode);
+    }
     remoteFileId = remote.id;
-    const verified = await drive.getFile(remote.id);
+    let verified: Awaited<ReturnType<DriveClient["getFile"]>>;
+    try {
+      verified = await drive.getFile(remote.id);
+    } catch {
+      failureCode = "drive_file_invalid";
+      throw new DrivePublicationFailure(failureCode);
+    }
     const verification = verifyDriveFile({
       file: verified,
       expectedFileId: remote.id,

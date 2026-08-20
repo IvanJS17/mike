@@ -189,7 +189,7 @@ describe("AI execution API client", () => {
     expect(JSON.parse(String(init.body))).toEqual({});
   });
 
-  it("returns a recoverable failed publication from the backend error envelope", async () => {
+  it("returns a terminal uncertain publication from the backend error envelope", async () => {
     fetchMock.mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -207,7 +207,7 @@ describe("AI execution API client", () => {
             sha256: "a".repeat(64),
             format_version: "beta-0.1",
             status: "failed",
-            failure_code: "drive_upload_failed",
+            failure_code: "drive_upload_outcome_unknown",
           },
         }),
         { status: 502 },
@@ -222,7 +222,7 @@ describe("AI execution API client", () => {
     expect(publication).toMatchObject({
       id: "publication-1",
       status: "failed",
-      failure_code: "drive_upload_failed",
+      failure_code: "drive_upload_outcome_unknown",
     });
   });
 

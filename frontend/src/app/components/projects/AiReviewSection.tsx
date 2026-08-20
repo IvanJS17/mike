@@ -57,6 +57,9 @@ function publicationStatusLabel(
   }
 }
 
+const uncertainUploadMessage =
+  "No se pudo confirmar si Drive creó el archivo; esta publicación quedó bloqueada y no se puede reintentar.";
+
 function publicationErrorMessage(error: unknown): string {
   if (!(error instanceof MikeApiError)) {
     return "No se pudo publicar el informe en Shared Drive.";
@@ -70,6 +73,8 @@ function publicationErrorMessage(error: unknown): string {
       return "El acceso al matter cambió; no se publicó el informe.";
     case "drive_cleanup_failed":
       return "No se pudo confirmar la limpieza del archivo remoto; la publicación quedó bloqueada.";
+    case "drive_upload_outcome_unknown":
+      return uncertainUploadMessage;
     case "export_hash_mismatch":
     case "publication_integrity_failed":
       return "El informe aprobado cambió y no se puede publicar.";
@@ -87,10 +92,17 @@ function canRetryPublication(
 ): boolean {
   return (
     publication?.status === "failed" &&
-    (publication.failure_code === "drive_upload_failed" ||
-      publication.failure_code === "drive_file_invalid" ||
+    (publication.failure_code === "drive_file_invalid" ||
       publication.failure_code === "publication_record_failed")
   );
+}
+
+function publicationFailureMessage(
+  failureCode: AiReviewDrivePublication["failure_code"],
+): string | null {
+  return failureCode === "drive_upload_outcome_unknown"
+    ? uncertainUploadMessage
+    : null;
 }
 
 export function AiReviewSection({
@@ -225,6 +237,11 @@ export function AiReviewSection({
       );
       setPublication(nextPublication);
       setPublicationStatus(nextPublication.status);
+      setError(
+        nextPublication.status === "failed"
+          ? publicationFailureMessage(nextPublication.failure_code)
+          : null,
+      );
     } catch (publicationError) {
       if (
         publicationError instanceof MikeApiError &&
