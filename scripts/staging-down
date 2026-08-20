@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/staging-common.sh
+source "$ROOT/scripts/staging-common.sh"
+
+case "${1:-}" in
+  "") ;;
+  --help|-h)
+    printf 'Usage: STAGING_ENV_FILE=.env.staging scripts/staging-down\n'
+    exit 0
+    ;;
+  *)
+    fail "unknown argument: $1"
+    ;;
+esac
+
+require_command docker
+compose down --volumes --remove-orphans
+
+remaining="$(docker ps -aq --filter "label=com.docker.compose.project=$STAGING_PROJECT")"
+[[ -z "$remaining" ]] || fail "project cleanup left attributed containers: $STAGING_PROJECT"
+remaining="$(docker volume ls -q --filter "label=com.docker.compose.project=$STAGING_PROJECT")"
+[[ -z "$remaining" ]] || fail "project cleanup left attributed volumes: $STAGING_PROJECT"
+remaining="$(docker network ls -q --filter "label=com.docker.compose.project=$STAGING_PROJECT")"
+[[ -z "$remaining" ]] || fail "project cleanup left attributed networks: $STAGING_PROJECT"
+printf 'staging-down: CLEAN (%s)\n' "$STAGING_PROJECT"
