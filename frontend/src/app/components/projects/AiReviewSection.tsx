@@ -1,12 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   completeAiExecutionReview,
   decideAiReviewItem,
   downloadAiReviewReport,
+  exportAiReviewReport,
+  getAiReviewDrivePublication,
+  MikeApiError,
+  publishAiReviewReportToDrive,
   type AiReview,
+  type AiReviewDrivePublication,
   type AiReviewItem,
+  type AiReviewReport,
 } from "@/app/lib/mikeApi";
 
 type Props = {
@@ -39,6 +45,76 @@ function itemStateLabel(item: AiReviewItem): string {
   }
 }
 
+function publicationStatusLabel(
+  status: AiReviewDrivePublication["status"],
+): string {
+  switch (status) {
+    case "pending":
+      return "Pendiente";
+    case "published":
+      return "Publicado";
+    case "failed":
+      return "Falló";
+  }
+}
+
+const uncertainUploadMessage =
+  "No se pudo confirmar si Drive creó el archivo; esta publicación quedó bloqueada y no se puede reintentar.";
+
+function publicationErrorMessage(error: unknown): string {
+  if (!(error instanceof MikeApiError)) {
+    return "No se pudo publicar el informe en Shared Drive.";
+  }
+  switch (error.code) {
+    case "drive_folder_not_configured":
+      return "Configura primero la carpeta Shared Drive del matter.";
+    case "review_not_approved":
+      return "Solo se puede publicar una revisión aprobada.";
+    case "authorization_revoked":
+      return "El acceso al matter cambió; no se publicó el informe.";
+    case "drive_cleanup_failed":
+      return "No se pudo confirmar la limpieza del archivo remoto; la publicación quedó bloqueada.";
+    case "drive_upload_outcome_unknown":
+      return uncertainUploadMessage;
+    case "export_hash_mismatch":
+    case "publication_integrity_failed":
+      return "El informe aprobado cambió y no se puede publicar.";
+    case "drive_publication_not_retryable":
+      return "Esta publicación no se puede reintentar porque el estado de seguridad es terminal.";
+    case "drive_publication_failed":
+      return "La publicación falló. Puedes reintentar sin cambiar la carpeta.";
+    default:
+      return "No se pudo publicar el informe en Shared Drive.";
+  }
+}
+
+function canRetryPublication(
+  publication: AiReviewDrivePublication | null,
+): boolean {
+  return (
+    publication?.status === "failed" &&
+    (publication.failure_code === "drive_file_invalid" ||
+      publication.failure_code === "publication_record_failed")
+  );
+}
+
+function publicationFailureMessage(
+  failureCode: AiReviewDrivePublication["failure_code"],
+): string | null {
+  switch (failureCode) {
+    case "drive_upload_outcome_unknown":
+      return uncertainUploadMessage;
+    case "authorization_revoked":
+      return "El acceso al matter cambió; no se publicó el informe.";
+    case "drive_cleanup_failed":
+      return "No se pudo confirmar la limpieza del archivo remoto; la publicación quedó bloqueada.";
+    case "publication_failed":
+      return "No se pudo publicar el informe en Shared Drive.";
+    default:
+      return null;
+  }
+}
+
 export function AiReviewSection({
   projectId,
   executionId,
@@ -52,9 +128,60 @@ export function AiReviewSection({
   const [busyItemId, setBusyItemId] = useState<string | null>(null);
   const [busyCompletion, setBusyCompletion] = useState(false);
   const [busyReport, setBusyReport] = useState(false);
+  const [busyPublication, setBusyPublication] = useState(false);
+  const [report, setReport] = useState<AiReviewReport | null>(null);
+  const [publication, setPublication] =
+    useState<AiReviewDrivePublication | null>(null);
+  const [publicationStatus, setPublicationStatus] = useState<
+    AiReviewDrivePublication["status"] | null
+  >(null);
+  const [publicationLoading, setPublicationLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const isAssignedReviewer = currentUserId === review.reviewer_user_id;
   const canAct = isAssignedReviewer && review.status === "in_progress";
+
+  useEffect(() => {
+    let cancelled = false;
+    setPublication(null);
+    setPublicationStatus(null);
+    setError(null);
+    if (review.status !== "approved") {
+      setPublicationLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setPublicationLoading(true);
+    void getAiReviewDrivePublication(projectId, executionId)
+      .then((nextPublication) => {
+        if (cancelled) return;
+        setPublication(nextPublication);
+        setPublicationStatus(nextPublication.status);
+        setError(
+          nextPublication.status === "failed"
+            ? publicationFailureMessage(nextPublication.failure_code)
+            : null,
+        );
+      })
+      .catch((publicationError) => {
+        if (cancelled) return;
+        if (
+          publicationError instanceof MikeApiError &&
+          publicationError.status === 404
+        ) {
+          return;
+        }
+        setError(publicationErrorMessage(publicationError));
+      })
+      .finally(() => {
+        if (!cancelled) setPublicationLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [executionId, projectId, review.id, review.status]);
 
   async function decide(
     item: AiReviewItem,
@@ -128,6 +255,7 @@ export function AiReviewSection({
     setError(null);
     try {
       const result = await downloadAiReviewReport(projectId, executionId);
+      setReport(result.report);
       const blobUrl = URL.createObjectURL(result.blob);
       const anchor = document.createElement("a");
       anchor.href = blobUrl;
@@ -144,6 +272,42 @@ export function AiReviewSection({
       );
     } finally {
       setBusyReport(false);
+    }
+  }
+
+  async function publishReport() {
+    if (busyPublication || review.status !== "approved") return;
+    setBusyPublication(true);
+    setError(null);
+    setPublicationStatus("pending");
+    try {
+      if (!report) {
+        const exported = await exportAiReviewReport(projectId, executionId);
+        setReport(exported);
+      }
+      const nextPublication = await publishAiReviewReportToDrive(
+        projectId,
+        executionId,
+      );
+      setPublication(nextPublication);
+      setPublicationStatus(nextPublication.status);
+      setError(
+        nextPublication.status === "failed"
+          ? publicationFailureMessage(nextPublication.failure_code)
+          : null,
+      );
+    } catch (publicationError) {
+      if (
+        publicationError instanceof MikeApiError &&
+        publicationError.code === "drive_publication_failed"
+      ) {
+        setPublicationStatus("failed");
+      } else {
+        setPublicationStatus(null);
+      }
+      setError(publicationErrorMessage(publicationError));
+    } finally {
+      setBusyPublication(false);
     }
   }
 
@@ -168,16 +332,62 @@ export function AiReviewSection({
               : "Cambios solicitados"}
         </span>
         {review.status === "approved" && (
-          <button
-            type="button"
-            className="rounded-lg bg-indigo-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-            onClick={() => void downloadReport()}
-            disabled={busyReport}
-          >
-            {busyReport ? "Generando informe…" : "Descargar informe Word"}
-          </button>
+          <>
+            <button
+              type="button"
+              className="rounded-lg bg-indigo-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+              onClick={() => void downloadReport()}
+              disabled={busyReport || busyPublication}
+            >
+              {busyReport ? "Generando informe…" : "Descargar informe Word"}
+            </button>
+            {!publicationStatus && (
+              <button
+                type="button"
+                className="rounded-lg bg-emerald-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                onClick={() => void publishReport()}
+                disabled={busyReport || busyPublication || publicationLoading}
+              >
+                {publicationLoading
+                  ? "Consultando publicación…"
+                  : "Publicar en Shared Drive"}
+              </button>
+            )}
+          </>
         )}
       </div>
+
+      {publicationStatus && (
+        <div
+          className="mt-3 flex flex-wrap items-center gap-3 rounded-lg bg-white px-3 py-2 text-sm"
+          data-testid="drive-publication-status"
+        >
+          <span className="font-medium text-gray-700">
+            Shared Drive: {publicationStatusLabel(publicationStatus)}
+          </span>
+          {publicationStatus === "published" && publication?.file_id && (
+            <a
+              className="font-mono text-xs text-emerald-700 underline"
+              href={`https://drive.google.com/open?id=${encodeURIComponent(publication.file_id)}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {publication.file_id}
+            </a>
+          )}
+          {publicationStatus === "failed" &&
+            canRetryPublication(publication) && (
+              <button
+                type="button"
+                className="rounded-lg border border-rose-300 px-3 py-1.5 text-xs font-medium text-rose-700 disabled:opacity-50"
+                onClick={() => void publishReport()}
+                disabled={busyPublication}
+              >
+                {busyPublication ? "Reintentando…" : "Reintentar publicación"}
+              </button>
+            )}
+        </div>
+      )}
 
       {!isAssignedReviewer && (
         <p className="mt-3 rounded-lg bg-white px-3 py-2 text-sm text-gray-600">

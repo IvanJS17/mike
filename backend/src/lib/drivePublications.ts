@@ -70,9 +70,10 @@ export function verifyDriveFile(input: {
 }
 
 export type DrivePublicationFailureCode =
-  | "drive_upload_failed"
+  | "drive_upload_outcome_unknown"
   | "drive_file_invalid"
   | "authorization_revoked"
-  | "publication_record_failed";
+  | "publication_record_failed"
+  | "drive_cleanup_failed";
 
 export type DrivePublicationStatus = "pending" | "published" | "failed";
