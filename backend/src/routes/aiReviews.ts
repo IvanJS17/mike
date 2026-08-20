@@ -34,6 +34,14 @@ import {
   type AiRedlineBundleInput,
 } from "../lib/aiRedlineBundles";
 import type { AiExecutionStatus } from "../lib/aiExecutions";
+import { getGoogleDriveClient } from "../lib/googleDrive";
+import {
+  buildDriveAppProperties,
+  DOCX_MIME_TYPE,
+  DRIVE_FORMAT_VERSION,
+  verifyDriveFile,
+  type DrivePublicationFailureCode,
+} from "../lib/drivePublications";
 
 export const aiReviewsRouter = Router({ mergeParams: true });
 
@@ -122,6 +130,26 @@ type RedlineBundleRow = {
   actions_count: number;
   actor_user_id: string;
   created_at: string;
+};
+
+type DrivePublicationRow = {
+  id: string;
+  export_id: string;
+  review_id: string;
+  execution_id: string;
+  matter_id: string;
+  project_id: string;
+  drive_folder_id: string;
+  file_id: string | null;
+  sha256: string;
+  format_version: string;
+  status: "pending" | "published" | "failed";
+  size_bytes: number | null;
+  checksum: string | null;
+  failure_code: DrivePublicationFailureCode | null;
+  actor_user_id: string;
+  created_at: string;
+  updated_at: string;
 };
 
 type ReviewContext = {
@@ -999,6 +1027,399 @@ async function downloadReviewReport(req: Request, res: Response) {
   return void res.send(bytes);
 }
 
+class DrivePublicationFailure extends Error {
+  constructor(readonly code: DrivePublicationFailureCode) {
+    super(code);
+  }
+}
+
+function publicDrivePublication(row: DrivePublicationRow) {
+  return {
+    id: row.id,
+    export_id: row.export_id,
+    review_id: row.review_id,
+    execution_id: row.execution_id,
+    matter_id: row.matter_id,
+    project_id: row.project_id,
+    drive_folder_id: row.drive_folder_id,
+    file_id: row.file_id,
+    sha256: row.sha256,
+    format_version: row.format_version,
+    status: row.status,
+    size_bytes: row.size_bytes,
+    checksum: row.checksum,
+    failure_code: row.failure_code,
+    actor_user_id: row.actor_user_id,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+async function loadDrivePublication(
+  db: Db,
+  exportId: string,
+): Promise<DrivePublicationRow | null> {
+  const { data } = await db
+    .from("ai_review_drive_publications")
+    .select("*")
+    .eq("export_id", exportId)
+    .maybeSingle();
+  return (data as DrivePublicationRow | null) ?? null;
+}
+
+function drivePublicationScopeMatches(
+  publication: DrivePublicationRow,
+  context: ReviewContext,
+  review: ReviewRow,
+  report: ReviewExportRow,
+  driveFolderId: string,
+): boolean {
+  return (
+    publication.export_id === report.id &&
+    publication.review_id === review.id &&
+    publication.execution_id === context.execution.id &&
+    publication.matter_id === context.execution.matter_id &&
+    publication.project_id === context.execution.project_id &&
+    publication.drive_folder_id === driveFolderId &&
+    publication.sha256 === report.content_sha256 &&
+    publication.format_version === DRIVE_FORMAT_VERSION
+  );
+}
+
+async function updateDrivePublication(
+  db: Db,
+  publicationId: string,
+  updates: Record<string, unknown>,
+): Promise<DrivePublicationRow | null> {
+  const { data, error } = await db
+    .from("ai_review_drive_publications")
+    .update(updates)
+    .eq("id", publicationId)
+    .select("*")
+    .single();
+  if (error || !data) return null;
+  return data as DrivePublicationRow;
+}
+
+async function publishReviewReportToDrive(req: Request, res: Response) {
+  const context = await loadReviewContext(req, "review");
+  if (!context) {
+    return void res.status(404).json({ detail: "AI execution not found" });
+  }
+  const review = await loadReview(context.db, context.execution.id);
+  if (!review) {
+    return void res.status(404).json({ detail: "AI review not found" });
+  }
+  if (context.execution.status !== "succeeded") {
+    return void res.status(409).json({
+      code: "execution_not_succeeded",
+      detail: "The AI review report is not available for Drive publication",
+    });
+  }
+  if (review.status !== "approved") {
+    return void res.status(409).json({
+      code: "review_not_approved",
+      detail: "The AI review report is not available for Drive publication",
+    });
+  }
+
+  const report = await loadReviewExport(
+    context.db,
+    review.id,
+    context.execution.document_version_id,
+  );
+  if (!report) {
+    return void res.status(404).json({
+      code: "report_export_not_found",
+      detail: "The approved AI review report export was not found",
+    });
+  }
+  if (
+    report.execution_id !== context.execution.id ||
+    report.matter_id !== context.execution.matter_id ||
+    report.project_id !== context.execution.project_id ||
+    report.source_document_version_id !== context.execution.document_version_id
+  ) {
+    return void res.status(404).json({
+      code: "scope_mismatch",
+      detail: "The approved AI review report is not available for Drive publication",
+    });
+  }
+
+  const { data: matter } = await context.db
+    .from("matters")
+    .select("id, project_id, drive_folder_id")
+    .eq("id", context.execution.matter_id)
+    .maybeSingle();
+  const driveFolderId =
+    typeof matter?.drive_folder_id === "string"
+      ? matter.drive_folder_id.trim()
+      : "";
+  if (
+    !matter ||
+    matter.project_id !== context.execution.project_id ||
+    !driveFolderId
+  ) {
+    return void res.status(409).json({
+      code: "drive_folder_not_configured",
+      detail: "The matter has no explicit Google Drive folder",
+    });
+  }
+
+  const existing = await loadDrivePublication(context.db, report.id);
+  if (existing) {
+    if (
+      !drivePublicationScopeMatches(
+        existing,
+        context,
+        review,
+        report,
+        driveFolderId,
+      )
+    ) {
+      return void res.status(409).json({
+        code: "publication_integrity_failed",
+        detail: "The Drive publication metadata does not match the report",
+      });
+    }
+    if (existing.status === "published" && existing.file_id) {
+      return void res.status(200).json(publicDrivePublication(existing));
+    }
+    if (existing.status === "failed") {
+      return void res.status(409).json({
+        code: "drive_publication_failed",
+        detail: "The Drive publication previously failed",
+      });
+    }
+    return void res.status(409).json({
+      code: "drive_publication_pending",
+      detail: "The Drive publication is already in progress",
+    });
+  }
+
+  const { data: version } = await context.db
+    .from("document_versions")
+    .select(
+      "id, document_id, storage_path, filename, file_type, source, size_bytes, content_sha256, deleted_at",
+    )
+    .eq("id", report.document_version_id)
+    .eq("document_id", report.document_id)
+    .is("deleted_at", null)
+    .maybeSingle();
+  if (
+    !version ||
+    version.source !== "ai_review_report" ||
+    version.filename !== report.filename ||
+    version.filename !== "Informe de revision humana.docx" ||
+    version.file_type !== "docx" ||
+    typeof version.storage_path !== "string" ||
+    !version.storage_path.trim()
+  ) {
+    return void res.status(404).json({
+      code: "report_export_invalid",
+      detail: "The approved AI review report is not available for Drive publication",
+    });
+  }
+
+  const raw = await downloadFile(version.storage_path);
+  const bytes = raw ? bytesToBuffer(raw) : null;
+  if (!bytes || bytes.length === 0) {
+    return void res.status(409).json({
+      code: "report_unavailable",
+      detail: "The approved AI review report is not available for Drive publication",
+    });
+  }
+  const reportSha256 = contentSha256(bytes);
+  if (
+    reportSha256 !== report.content_sha256 ||
+    reportSha256 !== version.content_sha256 ||
+    (version.size_bytes !== null &&
+      version.size_bytes !== undefined &&
+      Number(version.size_bytes) !== bytes.byteLength)
+  ) {
+    return void res.status(409).json({
+      code: "export_hash_mismatch",
+      detail: "The report bytes do not match the approved export hash",
+    });
+  }
+
+  try {
+    await assertEpochFresh(
+      context.db,
+      context.matterAccess.organizationId,
+      context.matterAccess.authorizationEpoch,
+    );
+  } catch {
+    return void res.status(403).json({
+      code: "authorization_revoked",
+      detail: "Matter authorization changed; Drive publication was not created",
+    });
+  }
+
+  const appProperties = buildDriveAppProperties({
+    matterId: context.execution.matter_id,
+    reviewId: review.id,
+    exportId: report.id,
+    sha256: reportSha256,
+  });
+  const { data: inserted, error: insertError } = await context.db
+    .from("ai_review_drive_publications")
+    .insert({
+      export_id: report.id,
+      review_id: review.id,
+      execution_id: context.execution.id,
+      matter_id: context.execution.matter_id,
+      project_id: context.execution.project_id,
+      drive_folder_id: driveFolderId,
+      sha256: reportSha256,
+      format_version: DRIVE_FORMAT_VERSION,
+      status: "pending",
+      actor_user_id: context.userId,
+    })
+    .select("*")
+    .single();
+  if (insertError || !inserted) {
+    if (insertError?.code === "23505") {
+      const raced = await loadDrivePublication(context.db, report.id);
+      if (
+        raced &&
+        drivePublicationScopeMatches(
+          raced,
+          context,
+          review,
+          report,
+          driveFolderId,
+        )
+      ) {
+        if (raced.status === "published" && raced.file_id) {
+          return void res.status(200).json(publicDrivePublication(raced));
+        }
+        return void res.status(409).json({
+          code:
+            raced.status === "failed"
+              ? "drive_publication_failed"
+              : "drive_publication_pending",
+          detail:
+            raced.status === "failed"
+              ? "The Drive publication previously failed"
+              : "The Drive publication is already in progress",
+        });
+      }
+      if (raced) {
+        return void res.status(409).json({
+          code: "publication_integrity_failed",
+          detail: "The Drive publication metadata does not match the report",
+        });
+      }
+    }
+    return void res.status(500).json({
+      code: "publication_record_failed",
+      detail: "The Drive publication could not be recorded",
+    });
+  }
+
+  const pending = inserted as DrivePublicationRow;
+  let failureCode: DrivePublicationFailureCode = "drive_upload_failed";
+  try {
+    const drive = getGoogleDriveClient();
+    const remote = await drive.uploadDocx({
+      name: report.filename,
+      parentId: driveFolderId,
+      bytes,
+      mimeType: DOCX_MIME_TYPE,
+      appProperties,
+    });
+    const verified = await drive.getFile(remote.id);
+    const verification = verifyDriveFile({
+      file: verified,
+      expectedFileId: remote.id,
+      parentId: driveFolderId,
+      bytes,
+      appProperties,
+    });
+    if (verification.ok === false) {
+      failureCode = verification.code;
+      throw new DrivePublicationFailure(verification.code);
+    }
+    const published = await updateDrivePublication(context.db, pending.id, {
+      status: "published",
+      file_id: verified.id,
+      size_bytes: verification.sizeBytes,
+      checksum: verification.checksum,
+      failure_code: null,
+      updated_at: new Date().toISOString(),
+    });
+    if (!published) {
+      failureCode = "publication_record_failed";
+      throw new DrivePublicationFailure(failureCode);
+    }
+    await recordAuditEvent(context.db, {
+      actorUserId: context.userId,
+      organizationId: context.matterAccess.organizationId,
+      eventType: "ai.review.drive_published",
+      eventDetail: {
+        publication_id: published.id,
+        export_id: report.id,
+        review_id: review.id,
+        execution_id: context.execution.id,
+        matter_id: context.execution.matter_id,
+        project_id: context.execution.project_id,
+        drive_folder_id: driveFolderId,
+        file_id: verified.id,
+        sha256: reportSha256,
+        format_version: DRIVE_FORMAT_VERSION,
+        size_bytes: verification.sizeBytes,
+        checksum: verification.checksum,
+      },
+    });
+    return void res.status(201).json(publicDrivePublication(published));
+  } catch (error) {
+    if (error instanceof DrivePublicationFailure) {
+      failureCode = error.code;
+    }
+    const failed = await updateDrivePublication(context.db, pending.id, {
+      status: "failed",
+      file_id: null,
+      size_bytes: null,
+      checksum: null,
+      failure_code: failureCode,
+      updated_at: new Date().toISOString(),
+    });
+    const failedPublication: DrivePublicationRow = failed ?? {
+      ...pending,
+      status: "failed",
+      file_id: null,
+      size_bytes: null,
+      checksum: null,
+      failure_code: failureCode,
+      updated_at: new Date().toISOString(),
+    };
+    await recordAuditEvent(context.db, {
+      actorUserId: context.userId,
+      organizationId: context.matterAccess.organizationId,
+      eventType: "ai.review.drive_publication_failed",
+      eventDetail: {
+        publication_id: pending.id,
+        export_id: report.id,
+        review_id: review.id,
+        execution_id: context.execution.id,
+        matter_id: context.execution.matter_id,
+        project_id: context.execution.project_id,
+        drive_folder_id: driveFolderId,
+        sha256: reportSha256,
+        format_version: DRIVE_FORMAT_VERSION,
+        failure_code: failureCode,
+      },
+    });
+    console.error("[ai-review-drive] publication failed", failureCode);
+    return void res.status(502).json({
+      code: "drive_publication_failed",
+      detail: "The report was not published to Google Drive",
+      publication: publicDrivePublication(failedPublication),
+    });
+  }
+}
+
 function sendReviewMutationError(
   res: Response,
   error: { message?: string },
@@ -1428,6 +1849,11 @@ async function completeReview(req: Request, res: Response) {
   });
 }
 
+aiReviewsRouter.post(
+  "/:executionId/review/report/publish",
+  requireAuth,
+  publishReviewReportToDrive,
+);
 aiReviewsRouter.post(
   "/:executionId/review/report",
   requireAuth,
