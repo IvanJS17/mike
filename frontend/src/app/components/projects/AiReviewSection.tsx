@@ -68,13 +68,29 @@ function publicationErrorMessage(error: unknown): string {
       return "Solo se puede publicar una revisión aprobada.";
     case "authorization_revoked":
       return "El acceso al matter cambió; no se publicó el informe.";
+    case "drive_cleanup_failed":
+      return "No se pudo confirmar la limpieza del archivo remoto; la publicación quedó bloqueada.";
     case "export_hash_mismatch":
+    case "publication_integrity_failed":
       return "El informe aprobado cambió y no se puede publicar.";
+    case "drive_publication_not_retryable":
+      return "Esta publicación no se puede reintentar porque el estado de seguridad es terminal.";
     case "drive_publication_failed":
       return "La publicación falló. Puedes reintentar sin cambiar la carpeta.";
     default:
       return "No se pudo publicar el informe en Shared Drive.";
   }
+}
+
+function canRetryPublication(
+  publication: AiReviewDrivePublication | null,
+): boolean {
+  return (
+    publication?.status === "failed" &&
+    (publication.failure_code === "drive_upload_failed" ||
+      publication.failure_code === "drive_file_invalid" ||
+      publication.failure_code === "publication_record_failed")
+  );
 }
 
 export function AiReviewSection({
@@ -286,16 +302,17 @@ export function AiReviewSection({
               {publication.file_id}
             </a>
           )}
-          {publicationStatus === "failed" && (
-            <button
-              type="button"
-              className="rounded-lg border border-rose-300 px-3 py-1.5 text-xs font-medium text-rose-700 disabled:opacity-50"
-              onClick={() => void publishReport()}
-              disabled={busyPublication}
-            >
-              {busyPublication ? "Reintentando…" : "Reintentar publicación"}
-            </button>
-          )}
+          {publicationStatus === "failed" &&
+            canRetryPublication(publication) && (
+              <button
+                type="button"
+                className="rounded-lg border border-rose-300 px-3 py-1.5 text-xs font-medium text-rose-700 disabled:opacity-50"
+                onClick={() => void publishReport()}
+                disabled={busyPublication}
+              >
+                {busyPublication ? "Reintentando…" : "Reintentar publicación"}
+              </button>
+            )}
         </div>
       )}
 

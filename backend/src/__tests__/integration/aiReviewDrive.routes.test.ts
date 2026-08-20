@@ -91,6 +91,7 @@ const rows: Record<string, Record<string, unknown>[]> = {
 };
 
 let ids = 0;
+let failPublicationPublishUpdate = false;
 
 function nextId(table: string): string {
   ids += 1;
@@ -100,6 +101,7 @@ function nextId(table: string): string {
 function queryFor(table: string) {
   let current = [...(rows[table] ?? [])];
   const query: Record<string, any> = {};
+  let pendingUpdate: Record<string, unknown> | null = null;
   query.select = vi.fn(() => query);
   query.eq = vi.fn((column: string, value: unknown) => {
     current = current.filter((row) => row[column] === value);
@@ -116,10 +118,28 @@ function queryFor(table: string) {
     return query;
   });
   query.update = vi.fn((payload: Record<string, unknown>) => {
-    for (const row of current) Object.assign(row, payload);
+    pendingUpdate = payload;
     return query;
   });
-  query.single = vi.fn(async () => ({ data: current[0] ?? null, error: null }));
+  query.single = vi.fn(async () => {
+    if (pendingUpdate) {
+      if (
+        table === "ai_review_drive_publications" &&
+        pendingUpdate.status === "published" &&
+        failPublicationPublishUpdate
+      ) {
+        failPublicationPublishUpdate = false;
+        pendingUpdate = null;
+        return {
+          data: null,
+          error: { code: "P0001", message: "publication record failed" },
+        };
+      }
+      for (const row of current) Object.assign(row, pendingUpdate);
+      pendingUpdate = null;
+    }
+    return { data: current[0] ?? null, error: null };
+  });
   query.maybeSingle = query.single;
   query.then = (
     resolve: (value: unknown) => unknown,
@@ -199,6 +219,7 @@ function driveFile(
 
 beforeEach(() => {
   ids = 0;
+  failPublicationPublishUpdate = false;
   vi.clearAllMocks();
   rows.ai_review_drive_publications.length = 0;
   rows.ai_reviews[0].status = "approved";
@@ -375,6 +396,7 @@ describe("approved AI review report Drive publication", () => {
       failure_code: "drive_file_invalid",
       file_id: null,
     });
+    expect(driveClient.deleteFile).toHaveBeenCalledWith("drive-file-1");
     expect(JSON.stringify(response.body)).not.toContain("other-folder");
   });
 
@@ -502,5 +524,216 @@ describe("approved AI review report Drive publication", () => {
       file_id: null,
     });
     expect(rows.ai_review_drive_publications[0].status).not.toBe("published");
+  });
+
+  it("does not make a remote-cleanup failure retryable", async () => {
+    driveClient.getFile.mockResolvedValue(
+      driveFile("drive-file-1", { parents: ["other-folder"] }),
+    );
+    driveClient.deleteFile.mockRejectedValueOnce(
+      new Error("Drive deletion unavailable"),
+    );
+
+    const first = await request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+
+    expect(first.status).toBe(502);
+    expect(first.body.publication).toMatchObject({
+      status: "failed",
+      failure_code: "drive_cleanup_failed",
+      file_id: null,
+    });
+
+    const second = await request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe("drive_publication_not_retryable");
+    expect(driveClient.uploadDocx).toHaveBeenCalledOnce();
+  });
+
+  it("cleans a previous remote file before retrying the same publication", async () => {
+    rows.ai_review_drive_publications.push({
+      id: "publication-existing",
+      export_id: "export-1",
+      review_id: "review-1",
+      execution_id: "execution-1",
+      matter_id: "matter-1",
+      project_id: "project-1",
+      organization_id: "org-1",
+      authorization_epoch: 1,
+      drive_folder_id: "shared-drive-folder-1",
+      file_id: "old-drive-file",
+      sha256: reportSha256,
+      format_version: "beta-0.1",
+      status: "failed",
+      size_bytes: null,
+      checksum: null,
+      failure_code: "drive_upload_failed",
+      actor_user_id: "reviewer-1",
+      created_at: "2026-08-19T12:06:00.000Z",
+      updated_at: "2026-08-19T12:06:00.000Z",
+    });
+
+    const response = await request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({
+      id: "publication-existing",
+      status: "published",
+      file_id: "drive-file-1",
+    });
+    expect(driveClient.deleteFile).toHaveBeenCalledWith("old-drive-file");
+    expect(driveClient.uploadDocx).toHaveBeenCalledOnce();
+  });
+
+  it("retries a recoverable failed publication with the same publication identity", async () => {
+    driveClient.uploadDocx.mockRejectedValueOnce(
+      new Error("temporary Drive outage"),
+    );
+
+    const first = await request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+    expect(first.status).toBe(502);
+    expect(first.body.publication).toMatchObject({
+      id: "ai_review_drive_publications-1",
+      status: "failed",
+      failure_code: "drive_upload_failed",
+    });
+
+    const second = await request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+
+    expect(second.status).toBe(201);
+    expect(second.body).toMatchObject({
+      id: first.body.publication.id,
+      status: "published",
+      file_id: "drive-file-1",
+    });
+    expect(rows.ai_review_drive_publications).toHaveLength(1);
+    expect(rows.ai_review_drive_publications[0]).toMatchObject({
+      id: first.body.publication.id,
+      status: "published",
+      file_id: "drive-file-1",
+      failure_code: null,
+    });
+    expect(driveClient.uploadDocx).toHaveBeenCalledTimes(2);
+  });
+
+  it("cleans the remote file when recording a publication fails before retry", async () => {
+    failPublicationPublishUpdate = true;
+
+    const first = await request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+
+    expect(first.status).toBe(502);
+    expect(first.body.publication).toMatchObject({
+      status: "failed",
+      failure_code: "publication_record_failed",
+    });
+    expect(driveClient.deleteFile).toHaveBeenCalledWith("drive-file-1");
+
+    const second = await request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+
+    expect(second.status).toBe(201);
+    expect(second.body.id).toBe(first.body.publication.id);
+    expect(driveClient.uploadDocx).toHaveBeenCalledTimes(2);
+    expect(driveClient.deleteFile).toHaveBeenCalledWith("drive-file-1");
+  });
+
+  it("does not retry an authorization-revoked publication", async () => {
+    let accessChecks = 0;
+    assertMatterAccessFresh.mockImplementation(async () => {
+      accessChecks += 1;
+      if (accessChecks === 3) throw new Error("authorization changed");
+    });
+
+    const first = await request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+    expect(first.status).toBe(502);
+    expect(first.body.publication.failure_code).toBe("authorization_revoked");
+
+    assertMatterAccessFresh.mockResolvedValue(undefined);
+    const second = await request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe("drive_publication_not_retryable");
+    expect(driveClient.uploadDocx).not.toHaveBeenCalled();
+  });
+
+  it("rejects a retry when the approved export hash no longer matches", async () => {
+    driveClient.uploadDocx.mockRejectedValueOnce(
+      new Error("temporary Drive outage"),
+    );
+
+    const first = await request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+    expect(first.status).toBe(502);
+
+    rows.ai_review_exports[0].content_sha256 = "b".repeat(64);
+    const second = await request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe("publication_integrity_failed");
+    expect(driveClient.uploadDocx).toHaveBeenCalledOnce();
+  });
+
+  it("serializes concurrent retries so only the claiming request uploads", async () => {
+    driveClient.uploadDocx.mockRejectedValueOnce(
+      new Error("temporary Drive outage"),
+    );
+    const first = await request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+    expect(first.status).toBe(502);
+
+    const uploadStarted = deferred();
+    const releaseUpload = deferred();
+    driveClient.uploadDocx.mockImplementationOnce(
+      async (input: Parameters<DriveClient["uploadDocx"]>[0]) => {
+        uploadStarted.resolve();
+        await releaseUpload.promise;
+        return driveFile("drive-file-1", {
+          parents: [input.parentId],
+          appProperties: input.appProperties,
+          size: String(input.bytes.byteLength),
+        });
+      },
+    );
+
+    const retryOne = request(app)
+      .post(route)
+      .set("Authorization", "Bearer test")
+      .then((response) => response);
+    await uploadStarted.promise;
+    const retryTwo = request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+
+    const second = await retryTwo;
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe("drive_publication_pending");
+
+    releaseUpload.resolve();
+    const firstRetry = await retryOne;
+    expect(firstRetry.status).toBe(201);
+    expect(firstRetry.body.id).toBe(first.body.publication.id);
+    expect(driveClient.uploadDocx).toHaveBeenCalledTimes(2);
+    expect(rows.ai_review_drive_publications).toHaveLength(1);
   });
 });

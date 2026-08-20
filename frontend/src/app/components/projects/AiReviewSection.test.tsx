@@ -23,7 +23,8 @@ vi.mock("@/app/lib/mikeApi", async (importOriginal) => ({
   decideAiReviewItem: (...args: unknown[]) => decideAiReviewItem(...args),
   completeAiExecutionReview: (...args: unknown[]) =>
     completeAiExecutionReview(...args),
-  downloadAiReviewReport: (...args: unknown[]) => downloadAiReviewReport(...args),
+  downloadAiReviewReport: (...args: unknown[]) =>
+    downloadAiReviewReport(...args),
   exportAiReviewReport: (...args: unknown[]) => exportAiReviewReport(...args),
   publishAiReviewReportToDrive: (...args: unknown[]) =>
     publishAiReviewReportToDrive(...args),
@@ -174,10 +175,15 @@ describe("AiReviewSection", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Publicar en Shared Drive" }));
+    await user.click(
+      screen.getByRole("button", { name: "Publicar en Shared Drive" }),
+    );
 
     await waitFor(() => {
-      expect(exportAiReviewReport).toHaveBeenCalledWith("project-1", "execution-1");
+      expect(exportAiReviewReport).toHaveBeenCalledWith(
+        "project-1",
+        "execution-1",
+      );
       expect(publishAiReviewReportToDrive).toHaveBeenCalledWith(
         "project-1",
         "execution-1",
@@ -186,9 +192,7 @@ describe("AiReviewSection", () => {
     expect(screen.getByTestId("drive-publication-status")).toHaveTextContent(
       "Publicado",
     );
-    expect(
-      screen.getByRole("link", { name: "drive-file-1" }),
-    ).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "drive-file-1" })).toHaveAttribute(
       "href",
       "https://drive.google.com/open?id=drive-file-1",
     );
@@ -252,10 +256,12 @@ describe("AiReviewSection", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Publicar en Shared Drive" }));
-    expect(await screen.findByTestId("drive-publication-status")).toHaveTextContent(
-      "Falló",
+    await user.click(
+      screen.getByRole("button", { name: "Publicar en Shared Drive" }),
     );
+    expect(
+      await screen.findByTestId("drive-publication-status"),
+    ).toHaveTextContent("Falló");
     await user.click(
       screen.getByRole("button", { name: "Reintentar publicación" }),
     );
@@ -266,5 +272,54 @@ describe("AiReviewSection", () => {
     expect(screen.getByTestId("drive-publication-status")).toHaveTextContent(
       "Publicado",
     );
+  });
+
+  it("does not offer retry for a terminal revoked publication", async () => {
+    const user = userEvent.setup();
+    const approved: AiReview = {
+      ...review,
+      status: "approved",
+      completed_at: "2026-08-19T12:05:00.000Z",
+    };
+    exportAiReviewReport.mockResolvedValue({ id: "export-1" });
+    publishAiReviewReportToDrive.mockResolvedValue({
+      id: "publication-1",
+      export_id: "export-1",
+      review_id: "review-1",
+      execution_id: "execution-1",
+      matter_id: "matter-1",
+      project_id: "project-1",
+      drive_folder_id: "folder-1",
+      file_id: null,
+      sha256: "a".repeat(64),
+      format_version: "beta-0.1",
+      status: "failed",
+      size_bytes: null,
+      checksum: null,
+      failure_code: "authorization_revoked",
+      actor_user_id: "reviewer-1",
+      created_at: "2026-08-19T12:06:00.000Z",
+      updated_at: "2026-08-19T12:06:00.000Z",
+    });
+
+    render(
+      <AiReviewSection
+        projectId="project-1"
+        executionId="execution-1"
+        review={approved}
+        currentUserId="reviewer-1"
+        onReviewChange={vi.fn()}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Publicar en Shared Drive" }),
+    );
+    expect(
+      await screen.findByTestId("drive-publication-status"),
+    ).toHaveTextContent("Falló");
+    expect(
+      screen.queryByRole("button", { name: "Reintentar publicación" }),
+    ).not.toBeInTheDocument();
   });
 });

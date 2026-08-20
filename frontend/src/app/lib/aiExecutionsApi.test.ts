@@ -189,6 +189,43 @@ describe("AI execution API client", () => {
     expect(JSON.parse(String(init.body))).toEqual({});
   });
 
+  it("returns a recoverable failed publication from the backend error envelope", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          code: "drive_publication_failed",
+          detail: "The report was not published to Google Drive",
+          publication: {
+            id: "publication-1",
+            export_id: "export-1",
+            review_id: "review-1",
+            execution_id: "execution-1",
+            matter_id: "matter-1",
+            project_id: "project-1",
+            drive_folder_id: "folder-1",
+            file_id: null,
+            sha256: "a".repeat(64),
+            format_version: "beta-0.1",
+            status: "failed",
+            failure_code: "drive_upload_failed",
+          },
+        }),
+        { status: 502 },
+      ),
+    );
+
+    const publication = await publishAiReviewReportToDrive(
+      "project-1",
+      "execution-1",
+    );
+
+    expect(publication).toMatchObject({
+      id: "publication-1",
+      status: "failed",
+      failure_code: "drive_upload_failed",
+    });
+  });
+
   it("reads and updates the matter folder settings in the private project scope", async () => {
     fetchMock.mockImplementation(() =>
       Promise.resolve(

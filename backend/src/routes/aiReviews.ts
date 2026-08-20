@@ -1083,10 +1083,53 @@ function drivePublicationScopeMatches(
     publication.matter_id === context.execution.matter_id &&
     publication.project_id === context.execution.project_id &&
     publication.organization_id === context.matterAccess.organizationId &&
+    publication.authorization_epoch ===
+      context.matterAccess.authorizationEpoch &&
     publication.drive_folder_id === driveFolderId &&
     publication.sha256 === report.content_sha256 &&
     publication.format_version === DRIVE_FORMAT_VERSION
   );
+}
+
+function isRecoverableDrivePublicationFailure(
+  code: DrivePublicationFailureCode | null,
+): code is
+  | "drive_upload_failed"
+  | "drive_file_invalid"
+  | "publication_record_failed" {
+  return (
+    code === "drive_upload_failed" ||
+    code === "drive_file_invalid" ||
+    code === "publication_record_failed"
+  );
+}
+
+async function claimDrivePublicationRetry(
+  db: Db,
+  publication: DrivePublicationRow,
+): Promise<{
+  data: DrivePublicationRow | null;
+  error: { code?: string; message?: string } | null;
+}> {
+  const { data, error } = await db
+    .from("ai_review_drive_publications")
+    .update({
+      status: "pending",
+      file_id: null,
+      size_bytes: null,
+      checksum: null,
+      failure_code: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", publication.id)
+    .eq("status", "failed")
+    .eq("failure_code", publication.failure_code)
+    .select("*")
+    .maybeSingle();
+  return {
+    data: (data as DrivePublicationRow | null) ?? null,
+    error: error ?? null,
+  };
 }
 
 async function updateDrivePublication(
@@ -1211,15 +1254,19 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
       return void res.status(200).json(publicDrivePublication(existing));
     }
     if (existing.status === "failed") {
+      if (!isRecoverableDrivePublicationFailure(existing.failure_code)) {
+        return void res.status(409).json({
+          code: "drive_publication_not_retryable",
+          detail: "The Drive publication failure cannot be retried",
+          publication: publicDrivePublication(existing),
+        });
+      }
+    } else {
       return void res.status(409).json({
-        code: "drive_publication_failed",
-        detail: "The Drive publication previously failed",
+        code: "drive_publication_pending",
+        detail: "The Drive publication is already in progress",
       });
     }
-    return void res.status(409).json({
-      code: "drive_publication_pending",
-      detail: "The Drive publication is already in progress",
-    });
   }
 
   const { data: version } = await context.db
@@ -1285,33 +1332,26 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
     exportId: report.id,
     sha256: reportSha256,
   });
-  const { data: inserted, error: insertError } = await context.db
-    .from("ai_review_drive_publications")
-    .insert({
-      export_id: report.id,
-      review_id: review.id,
-      execution_id: context.execution.id,
-      matter_id: context.execution.matter_id,
-      project_id: context.execution.project_id,
-      organization_id: context.matterAccess.organizationId,
-      authorization_epoch: context.matterAccess.authorizationEpoch,
-      drive_folder_id: driveFolderId,
-      sha256: reportSha256,
-      format_version: DRIVE_FORMAT_VERSION,
-      status: "pending",
-      actor_user_id: context.userId,
-    })
-    .select("*")
-    .single();
-  if (insertError || !inserted) {
-    if (insertError?.code === "42501") {
-      return void res.status(403).json({
-        code: "authorization_revoked",
-        detail:
-          "Matter authorization changed; Drive publication was not created",
+  let pending: DrivePublicationRow;
+  let previousRemoteFileId: string | null = null;
+  if (existing?.status === "failed") {
+    previousRemoteFileId = existing.file_id;
+    const { data: claimed, error: claimError } =
+      await claimDrivePublicationRetry(context.db, existing);
+    if (claimError) {
+      if (claimError.code === "42501") {
+        return void res.status(403).json({
+          code: "authorization_revoked",
+          detail:
+            "Matter authorization changed; Drive publication was not created",
+        });
+      }
+      return void res.status(409).json({
+        code: "publication_integrity_failed",
+        detail: "The Drive publication metadata does not match the report",
       });
     }
-    if (insertError?.code === "23505") {
+    if (!claimed) {
       const raced = await loadDrivePublication(context.db, report.id);
       if (
         raced &&
@@ -1326,36 +1366,113 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
         if (raced.status === "published" && raced.file_id) {
           return void res.status(200).json(publicDrivePublication(raced));
         }
-        return void res.status(409).json({
-          code:
-            raced.status === "failed"
+        if (raced.status === "failed") {
+          return void res.status(409).json({
+            code: isRecoverableDrivePublicationFailure(raced.failure_code)
               ? "drive_publication_failed"
-              : "drive_publication_pending",
-          detail:
-            raced.status === "failed"
+              : "drive_publication_not_retryable",
+            detail: isRecoverableDrivePublicationFailure(raced.failure_code)
               ? "The Drive publication previously failed"
-              : "The Drive publication is already in progress",
-        });
-      }
-      if (raced) {
+              : "The Drive publication failure cannot be retried",
+            ...(isRecoverableDrivePublicationFailure(raced.failure_code)
+              ? { publication: publicDrivePublication(raced) }
+              : {}),
+          });
+        }
         return void res.status(409).json({
-          code: "publication_integrity_failed",
-          detail: "The Drive publication metadata does not match the report",
+          code: "drive_publication_pending",
+          detail: "The Drive publication is already in progress",
         });
       }
+      return void res.status(409).json({
+        code: "drive_publication_pending",
+        detail: "The Drive publication is already in progress",
+      });
     }
-    return void res.status(500).json({
-      code: "publication_record_failed",
-      detail: "The Drive publication could not be recorded",
-    });
+    pending = claimed;
+  } else {
+    const { data: inserted, error: insertError } = await context.db
+      .from("ai_review_drive_publications")
+      .insert({
+        export_id: report.id,
+        review_id: review.id,
+        execution_id: context.execution.id,
+        matter_id: context.execution.matter_id,
+        project_id: context.execution.project_id,
+        organization_id: context.matterAccess.organizationId,
+        authorization_epoch: context.matterAccess.authorizationEpoch,
+        drive_folder_id: driveFolderId,
+        sha256: reportSha256,
+        format_version: DRIVE_FORMAT_VERSION,
+        status: "pending",
+        actor_user_id: context.userId,
+      })
+      .select("*")
+      .single();
+    if (insertError || !inserted) {
+      if (insertError?.code === "42501") {
+        return void res.status(403).json({
+          code: "authorization_revoked",
+          detail:
+            "Matter authorization changed; Drive publication was not created",
+        });
+      }
+      if (insertError?.code === "23505") {
+        const raced = await loadDrivePublication(context.db, report.id);
+        if (
+          raced &&
+          drivePublicationScopeMatches(
+            raced,
+            context,
+            review,
+            report,
+            driveFolderId,
+          )
+        ) {
+          if (raced.status === "published" && raced.file_id) {
+            return void res.status(200).json(publicDrivePublication(raced));
+          }
+          return void res.status(409).json({
+            code:
+              raced.status === "failed"
+                ? "drive_publication_failed"
+                : "drive_publication_pending",
+            detail:
+              raced.status === "failed"
+                ? "The Drive publication previously failed"
+                : "The Drive publication is already in progress",
+            ...(raced.status === "failed"
+              ? { publication: publicDrivePublication(raced) }
+              : {}),
+          });
+        }
+        if (raced) {
+          return void res.status(409).json({
+            code: "publication_integrity_failed",
+            detail: "The Drive publication metadata does not match the report",
+          });
+        }
+      }
+      return void res.status(500).json({
+        code: "publication_record_failed",
+        detail: "The Drive publication could not be recorded",
+      });
+    }
+    pending = inserted as DrivePublicationRow;
   }
 
-  const pending = inserted as DrivePublicationRow;
   let failureCode: DrivePublicationFailureCode = "drive_upload_failed";
   let drive: DriveClient | null = null;
   let remoteFileId: string | null = null;
   try {
     drive = getGoogleDriveClient();
+    if (previousRemoteFileId) {
+      try {
+        await drive.deleteFile(previousRemoteFileId);
+      } catch {
+        throw new DrivePublicationFailure("drive_cleanup_failed");
+      }
+    }
     try {
       await assertDrivePublicationAccess(context);
     } catch {
@@ -1427,8 +1544,12 @@ async function publishReviewReportToDrive(req: Request, res: Response) {
     if (error instanceof DrivePublicationFailure) {
       failureCode = error.code;
     }
-    if (failureCode === "authorization_revoked" && drive && remoteFileId) {
-      await drive.deleteFile(remoteFileId).catch(() => {});
+    if (drive && remoteFileId) {
+      try {
+        await drive.deleteFile(remoteFileId);
+      } catch {
+        failureCode = "drive_cleanup_failed";
+      }
     }
     const failed = await updateDrivePublication(context.db, pending.id, {
       status: "failed",
