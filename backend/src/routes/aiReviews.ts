@@ -719,6 +719,16 @@ async function createReview(req: Request, res: Response) {
     });
   }
 
+  let itemSeeds: ReturnType<typeof buildReviewItemSeeds>;
+  try {
+    itemSeeds = buildReviewItemSeeds(output);
+  } catch {
+    return void res.status(422).json({
+      code: "review_unavailable",
+      detail: "The execution has no finding text linked to each citation",
+    });
+  }
+
   const { data: insertedReview, error: reviewError } = await context.db
     .from("ai_reviews")
     .insert({
@@ -735,7 +745,6 @@ async function createReview(req: Request, res: Response) {
   }
 
   const review = insertedReview as ReviewRow;
-  const itemSeeds = buildReviewItemSeeds(output);
   const items: ReviewItemRow[] = [];
   for (const seed of itemSeeds) {
     const { data: insertedItem, error: itemError } = await context.db

@@ -78,6 +78,18 @@ describe("AI human review rules", () => {
     ]);
   });
 
+  it("does not reuse the complete output for citations without a finding", () => {
+    expect(() =>
+      buildReviewItemSeeds({
+        output_text: "Hallazgo A\nHallazgo B",
+        citation_refs: [
+          { citation_id: "c1", verified: true },
+          { citation_id: "c2", verified: true },
+        ],
+      }),
+    ).toThrow("finding_text");
+  });
+
   it("records the before and after state for an edited finding", () => {
     expect(
       applyAiReviewDecision(pendingItem, {

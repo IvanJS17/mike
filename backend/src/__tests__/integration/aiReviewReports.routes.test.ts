@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import { canonicalJson, sha256Hex } from "../../lib/aiReceipts";
+import {
+  buildCitationReceiptFields,
+  resolveCitations,
+} from "../../lib/aiCitations";
+import { buildReviewItemSeeds } from "../../lib/aiReviews";
 
 const {
   checkMatterAccess,
@@ -336,5 +341,87 @@ describe("approved AI review report route", () => {
     expect(generateDocx).not.toHaveBeenCalled();
     expect(uploadFile).not.toHaveBeenCalled();
     expect(rows.ai_review_exports).toHaveLength(1);
+  });
+
+  it("exports only the accepted finding after materializing and reviewing two citations", async () => {
+    const sourceText = "Source A. Source B.";
+    const candidates = [
+      {
+        citation_id: "c1",
+        document_id: "source-document-1",
+        document_version_id: "source-version-1",
+        page: 1,
+        span: { start_char: 0, end_char: 9 },
+        quote: "Source A.",
+        quote_sha256: sha256Hex("Source A."),
+        finding_text: "Hallazgo A aceptado",
+      },
+      {
+        citation_id: "c2",
+        document_id: "source-document-1",
+        document_version_id: "source-version-1",
+        page: 1,
+        span: { start_char: 10, end_char: sourceText.length },
+        quote: "Source B.",
+        quote_sha256: sha256Hex("Source B."),
+        finding_text: "Hallazgo B rechazado",
+      },
+    ];
+    const resolved = resolveCitations(candidates, {
+      documentId: "source-document-1",
+      documentVersionId: "source-version-1",
+      documentContentSha256: "a".repeat(64),
+      sourceContentSha256: "a".repeat(64),
+      pageCount: 1,
+      pages: [
+        {
+          page: 1,
+          text: sourceText,
+          textSha256: sha256Hex(sourceText),
+        },
+      ],
+    });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+
+    const seeds = buildReviewItemSeeds({
+      output_text: "Hallazgo A aceptado\nHallazgo B rechazado",
+      citation_refs: buildCitationReceiptFields(
+        resolved.citations,
+      ) as unknown[],
+    });
+    expect(seeds.map((seed) => seed.original_text)).toEqual([
+      "Hallazgo A aceptado",
+      "Hallazgo B rechazado",
+    ]);
+    Object.assign(rows.ai_review_items[0], {
+      item_key: seeds[0].item_key,
+      original_text: seeds[0].original_text,
+      finding_text: seeds[0].original_text,
+      citation_refs: seeds[0].citation_refs,
+      status: "accepted",
+    });
+    rows.ai_review_items.push({
+      id: "item-2",
+      review_id: "review-1",
+      item_key: seeds[1].item_key,
+      original_text: seeds[1].original_text,
+      finding_text: seeds[1].original_text,
+      citation_refs: seeds[1].citation_refs,
+      status: "rejected",
+    });
+
+    const response = await request(app)
+      .post(route)
+      .set("Authorization", "Bearer test");
+
+    expect(response.status).toBe(201);
+    const sections = generateDocx.mock.calls[0]?.[1] as {
+      heading: string;
+      content: string;
+    }[];
+    const reportSource = sections.map((section) => section.content).join("\n");
+    expect(reportSource).toContain("Hallazgo A aceptado");
+    expect(reportSource).not.toContain("Hallazgo B rechazado");
   });
 });
