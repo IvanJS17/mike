@@ -29,18 +29,18 @@ import {
   sortReceiptCitations,
 } from "../lib/aiReceipts";
 import { assertEpochFresh } from "../lib/tenancy";
+import {
+  CIVIL_MERCANTIL_MX_PLAYBOOK_ID,
+  CIVIL_MERCANTIL_MX_PLAYBOOK_PROMPT,
+  CIVIL_MERCANTIL_MX_PLAYBOOK_VERSION,
+} from "../lib/civilMercantilePlaybook";
 import type { AiExecutionStatus } from "../lib/aiExecutions";
 
 export const aiExecutionsRouter = Router({ mergeParams: true });
 
 const RECEIPT_VERSION = "beta-0.1";
 const REVIEW_KIND = "civil-commercial-contract-review";
-const DEFAULT_WORKFLOW_ID = "beta-0.1-contract-review";
-const DEFAULT_WORKFLOW_VERSION = "1";
-const DEFAULT_PLAYBOOK = [
-  "Review the supplied legal document as a civil-commercial contract review.",
-  "Return a concise Markdown answer. Every factual statement based on the document must be supported by the strict citation block requested below.",
-].join("\n");
+const CUSTOM_WORKFLOW_VERSION_FALLBACK = "1";
 
 const NULL_USAGE = {
   input_tokens: null,
@@ -359,9 +359,9 @@ async function createExecution(req: Request, res: import("express").Response) {
     return void res.status(404).json({ detail: "Document not found" });
   }
 
-  let workflowId = DEFAULT_WORKFLOW_ID;
-  let workflowVersion = DEFAULT_WORKFLOW_VERSION;
-  let playbook = DEFAULT_PLAYBOOK;
+  let workflowId = CIVIL_MERCANTIL_MX_PLAYBOOK_ID;
+  let workflowVersion = CIVIL_MERCANTIL_MX_PLAYBOOK_VERSION;
+  let playbook = CIVIL_MERCANTIL_MX_PLAYBOOK_PROMPT;
   if (parsedWorkflow.value) {
     const { data: workflow } = await db
       .from("workflows")
@@ -373,7 +373,7 @@ async function createExecution(req: Request, res: import("express").Response) {
       return void res.status(404).json({ detail: "Workflow not found" });
     }
     workflowId = String(workflow.id);
-    workflowVersion = asIso(workflow.created_at as string | null) ?? DEFAULT_WORKFLOW_VERSION;
+    workflowVersion = asIso(workflow.created_at as string | null) ?? CUSTOM_WORKFLOW_VERSION_FALLBACK;
     playbook = workflow.prompt_md;
   }
   const playbookSha256 = sha256Hex(playbook);

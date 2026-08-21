@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
-import { sha256Hex } from "../../lib/aiReceipts";
+import { sha256Hex, buildExecutionInputHash } from "../../lib/aiReceipts";
+import {
+  CIVIL_MERCANTIL_MX_PLAYBOOK_ID,
+  CIVIL_MERCANTIL_MX_PLAYBOOK_PROMPT,
+  CIVIL_MERCANTIL_MX_PLAYBOOK_VERSION,
+} from "../../lib/civilMercantilePlaybook";
 
 const { completeText, resolveModelRouteForUser, checkProjectAccess, checkMatterAccess, loadAiDocumentVersionPages } =
   vi.hoisted(() => ({
@@ -36,6 +41,20 @@ const rows = {
     {
       id: "org-1",
       authorization_epoch: 1,
+    },
+  ],
+  workflows: [
+    {
+      id: "workflow-custom-1",
+      user_id: "user-1",
+      prompt_md: "# Custom workflow\nOnly use this workflow.",
+      created_at: "2026-08-20T12:00:00.000Z",
+    },
+    {
+      id: "workflow-custom-no-version",
+      user_id: "user-1",
+      prompt_md: "# Legacy custom workflow",
+      created_at: null,
     },
   ],
   ai_document_version_pages: [
@@ -262,6 +281,38 @@ describe("AI execution routes", () => {
     );
     expect(providerRequest.systemPrompt).toMatch(/exact quote excerpt/i);
     expect(providerRequest.systemPrompt).toMatch(/finding_text/);
+    expect(providerRequest.systemPrompt).toContain("R1 Partes/capacidad");
+    expect(providerRequest.systemPrompt).toContain("R10 Formalidades");
+    expect(providerRequest.systemPrompt).toContain("quote_sha256");
+    const executionInsert = writes.find(
+      (write) => write.table === "ai_executions" && write.operation === "insert",
+    );
+    expect(executionInsert?.payload).toMatchObject({
+      workflow_id: CIVIL_MERCANTIL_MX_PLAYBOOK_ID,
+      workflow_version: CIVIL_MERCANTIL_MX_PLAYBOOK_VERSION,
+      playbook_sha256: sha256Hex(CIVIL_MERCANTIL_MX_PLAYBOOK_PROMPT),
+    });
+    expect(executionInsert?.payload?.input_sha256).toBe(
+      buildExecutionInputHash({
+        document_version_id: "version-1",
+        document_content_sha256: "a".repeat(64),
+        workflow_version: CIVIL_MERCANTIL_MX_PLAYBOOK_VERSION,
+        playbook_sha256: sha256Hex(CIVIL_MERCANTIL_MX_PLAYBOOK_PROMPT),
+      }),
+    );
+    const receiptInsert = writes.find(
+      (write) => write.table === "ai_receipts" && write.operation === "insert",
+    );
+    expect(receiptInsert?.payload?.canonical_json).toMatchObject({
+      input: {
+        input_sha256: executionInsert?.payload?.input_sha256,
+      },
+      playbook: {
+        workflow_id: CIVIL_MERCANTIL_MX_PLAYBOOK_ID,
+        workflow_version: CIVIL_MERCANTIL_MX_PLAYBOOK_VERSION,
+        playbook_sha256: sha256Hex(CIVIL_MERCANTIL_MX_PLAYBOOK_PROMPT),
+      },
+    });
     expect(writes.filter((write) => write.table === "ai_output_versions")).toHaveLength(1);
     expect(writes.filter((write) => write.table === "ai_receipts")).toHaveLength(1);
     expect(writes.filter((write) => write.table === "audit_events").map((write) => write.operation)).toEqual([
@@ -270,6 +321,73 @@ describe("AI execution routes", () => {
     ]);
     expect(JSON.stringify(writes)).not.toContain("server-only-secret");
     expect(JSON.stringify(writes)).not.toContain(pageText);
+  });
+
+  it("uses a custom workflow without mixing in the default playbook", async () => {
+    const customPlaybook = "# Custom workflow\nOnly use this workflow.";
+    const res = await request(app)
+      .post("/projects/project-1/ai-executions")
+      .set("Authorization", "Bearer test")
+      .send({
+        matter_id: "matter-1",
+        document_version_id: "version-1",
+        workflow_id: "workflow-custom-1",
+        route: {
+          provider: "deepseek",
+          model: "deepseek-chat",
+          credential_ref: "deepseek:v1",
+        },
+      });
+
+    expect(res.status).toBe(201);
+    const providerRequest = completeText.mock.calls[0]?.[0] as {
+      systemPrompt: string;
+    };
+    expect(providerRequest.systemPrompt).toContain(customPlaybook);
+    expect(providerRequest.systemPrompt).not.toContain("R1 Partes/capacidad");
+    expect(providerRequest.systemPrompt).not.toContain(
+      CIVIL_MERCANTIL_MX_PLAYBOOK_ID,
+    );
+    const executionInsert = writes.find(
+      (write) => write.table === "ai_executions" && write.operation === "insert",
+    );
+    expect(executionInsert?.payload).toMatchObject({
+      workflow_id: "workflow-custom-1",
+      workflow_version: "2026-08-20T12:00:00.000Z",
+      playbook_sha256: sha256Hex(customPlaybook),
+      input_sha256: buildExecutionInputHash({
+        document_version_id: "version-1",
+        document_content_sha256: "a".repeat(64),
+        workflow_version: "2026-08-20T12:00:00.000Z",
+        playbook_sha256: sha256Hex(customPlaybook),
+      }),
+    });
+  });
+
+  it("keeps the existing fallback version for custom workflows", async () => {
+    const res = await request(app)
+      .post("/projects/project-1/ai-executions")
+      .set("Authorization", "Bearer test")
+      .send({
+        matter_id: "matter-1",
+        document_version_id: "version-1",
+        workflow_id: "workflow-custom-no-version",
+        route: {
+          provider: "deepseek",
+          model: "deepseek-chat",
+          credential_ref: "deepseek:v1",
+        },
+      });
+
+    expect(res.status).toBe(201);
+    const executionInsert = writes.find(
+      (write) => write.table === "ai_executions" && write.operation === "insert",
+    );
+    expect(executionInsert?.payload).toMatchObject({
+      workflow_id: "workflow-custom-no-version",
+      workflow_version: "1",
+      playbook_sha256: sha256Hex("# Legacy custom workflow"),
+    });
   });
 
   it("fails closed when the stored source bytes do not match the frozen document version", async () => {
