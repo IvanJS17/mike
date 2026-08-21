@@ -1,0 +1,465 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+EXPECTED_TARGET='recovery-test'
+EXPECTED_SOURCE='staging'
+BACKUP_DUMP_PATH=''
+BACKUP_MANIFEST_PATH=''
+BACKUP_TEMP_DUMP=''
+BACKUP_TEMP_MANIFEST=''
+BACKUP_COMPLETE=0
+
+fail() {
+  printf 'staging-recovery: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  printf '%s\n' \
+    'Usage:' \
+    '  STAGING_RECOVERY_SOURCE=staging PG* scripts/staging-recovery backup --output-dir DIR' \
+    '  STAGING_RECOVERY_TARGET=recovery-test STAGING_RECOVERY_TARGET_EPHEMERAL=true PG* scripts/staging-recovery restore-verify --dump FILE --manifest FILE' \
+    '' \
+    'Credentials must be supplied through PGPASSWORD or a mode-0600 PGPASSFILE.' >&2
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
+}
+
+require_regular_file() {
+  local path="$1" label="$2"
+  [[ -f "$path" && ! -L "$path" ]] || fail "$label must be a regular non-symlink file: $path"
+}
+
+cleanup_backup_artifacts() {
+  local status=$?
+  trap - EXIT
+  [[ -z "$BACKUP_TEMP_DUMP" ]] || rm -f -- "$BACKUP_TEMP_DUMP"
+  [[ -z "$BACKUP_TEMP_MANIFEST" ]] || rm -f -- "$BACKUP_TEMP_MANIFEST"
+  if (( ! BACKUP_COMPLETE )); then
+    [[ -z "$BACKUP_DUMP_PATH" ]] || rm -f -- "$BACKUP_DUMP_PATH"
+    [[ -z "$BACKUP_MANIFEST_PATH" ]] || rm -f -- "$BACKUP_MANIFEST_PATH"
+  fi
+  exit "$status"
+}
+
+validate_connection_env() {
+  local key mode
+  for key in PGHOST PGPORT PGUSER PGDATABASE; do
+    [[ -n "${!key-}" ]] || fail "$key is required through the environment"
+  done
+  [[ "$PGPORT" =~ ^[0-9]+$ ]] || fail 'PGPORT must be numeric'
+  [[ -z "${PGSERVICE-}" && -z "${PGSERVICEFILE-}" ]] ||
+    fail 'PGSERVICE and PGSERVICEFILE are not supported; set explicit PG* connection variables'
+  if [[ -z "${PGPASSWORD-}" && -z "${PGPASSFILE-}" ]]; then
+    fail 'set PGPASSWORD or PGPASSFILE; interactive credential prompts are disabled'
+  fi
+  if [[ -n "${PGPASSFILE-}" ]]; then
+    require_regular_file "$PGPASSFILE" PGPASSFILE
+    mode="$(stat -c '%a' "$PGPASSFILE")"
+    [[ "$mode" == '600' || "$mode" == '400' ]] ||
+      fail 'PGPASSFILE must have mode 0600 or 0400'
+  fi
+  export PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-10}"
+}
+
+psql_query() {
+  local query="$1"
+  psql \
+    --no-psqlrc \
+    --no-align \
+    --tuples-only \
+    --quiet \
+    --field-separator='|' \
+    --set=ON_ERROR_STOP=1 \
+    --command="$query"
+}
+
+read -r -d '' CRITICAL_INVARIANT_SQL <<'SQL' || true
+select 'matters', count(*)::text,
+  encode(digest(coalesce(string_agg(to_jsonb(t)::text, E'\n' order by to_jsonb(t)::text), ''), 'sha256'), 'hex')
+from public.matters t
+union all
+select 'documents', count(*)::text,
+  encode(digest(coalesce(string_agg(to_jsonb(t)::text, E'\n' order by to_jsonb(t)::text), ''), 'sha256'), 'hex')
+from public.documents t
+union all
+select 'document_versions', count(*)::text,
+  encode(digest(coalesce(string_agg(to_jsonb(t)::text, E'\n' order by to_jsonb(t)::text), ''), 'sha256'), 'hex')
+from public.document_versions t
+union all
+select 'ai_reviews', count(*)::text,
+  encode(digest(coalesce(string_agg(to_jsonb(t)::text, E'\n' order by to_jsonb(t)::text), ''), 'sha256'), 'hex')
+from public.ai_reviews t
+union all
+select 'ai_review_drive_publications', count(*)::text,
+  encode(digest(coalesce(string_agg(to_jsonb(t)::text, E'\n' order by to_jsonb(t)::text), ''), 'sha256'), 'hex')
+from public.ai_review_drive_publications t
+order by 1;
+SQL
+
+read -r -d '' MARKER_SQL <<'SQL' || true
+select jsonb_build_object(
+  'id', id,
+  'mode', mode,
+  'schema_sha256', schema_sha256
+)::text
+from public._mike_staging_bootstrap
+where id is true;
+SQL
+
+validate_marker() {
+  local marker_json="$1"
+  printf '%s\n' "$marker_json" | python3 -c '
+import json
+import re
+import sys
+
+rows = [line.strip() for line in sys.stdin if line.strip()]
+if len(rows) != 1:
+    raise SystemExit("staging bootstrap marker must contain exactly one row")
+try:
+    marker = json.loads(rows[0])
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"staging bootstrap marker is not valid JSON: {exc}")
+if marker.get("id") is not True or marker.get("mode") != "fresh":
+    raise SystemExit("staging bootstrap marker is not the canonical fresh marker")
+schema_sha256 = marker.get("schema_sha256")
+if not isinstance(schema_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", schema_sha256):
+    raise SystemExit("staging bootstrap marker has an invalid schema checksum")
+mode = marker["mode"]
+print(f"{mode}|{schema_sha256}")
+'
+}
+
+normalize_invariants() {
+  python3 -c '
+import json
+import re
+import sys
+
+expected = {
+    "matters",
+    "documents",
+    "document_versions",
+    "ai_reviews",
+    "ai_review_drive_publications",
+}
+result = {}
+for raw in sys.stdin:
+    line = raw.strip()
+    if not line:
+        continue
+    parts = line.split("|", 2)
+    if len(parts) != 3:
+        raise SystemExit("critical invariant row is malformed")
+    table, count, digest = parts
+    if table in result or table not in expected:
+        raise SystemExit("critical invariant table set is invalid")
+    if not count.isdigit() or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise SystemExit("critical invariant value is invalid")
+    result[table] = {"count": int(count), "sha256": digest}
+if set(result) != expected:
+    raise SystemExit("critical invariant table set is incomplete")
+print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+'
+}
+
+parse_manifest() {
+  local manifest="$1" dump_name="$2"
+  python3 - "$manifest" "$dump_name" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+path, dump_name = sys.argv[1:]
+try:
+    manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"manifest is unreadable or invalid JSON: {exc}")
+if manifest.get("format") != "mike-staging-recovery/v1":
+    raise SystemExit("manifest format is unsupported")
+if manifest.get("dump_file") != dump_name:
+    raise SystemExit("manifest dump_file does not match the requested dump")
+if not isinstance(manifest.get("created_at"), str) or not manifest["created_at"]:
+    raise SystemExit("manifest timestamp is missing")
+sha256 = manifest.get("sha256")
+if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+    raise SystemExit("manifest checksum is invalid")
+size_bytes = manifest.get("size_bytes")
+if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes < 1:
+    raise SystemExit("manifest size is invalid")
+marker = manifest.get("schema_marker")
+if not isinstance(marker, dict):
+    raise SystemExit("manifest schema marker is missing")
+if marker.get("id") is not True or marker.get("mode") != "fresh":
+    raise SystemExit("manifest schema marker is not canonical")
+schema_sha256 = marker.get("schema_sha256")
+if not isinstance(schema_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", schema_sha256):
+    raise SystemExit("manifest schema checksum is invalid")
+if manifest.get("schema_version") != f"fresh:{schema_sha256}":
+    raise SystemExit("manifest schema version does not match its marker")
+invariants = manifest.get("critical_invariants")
+expected = {
+    "matters",
+    "documents",
+    "document_versions",
+    "ai_reviews",
+    "ai_review_drive_publications",
+}
+if not isinstance(invariants, dict) or set(invariants) != expected:
+    raise SystemExit("manifest critical invariant table set is invalid")
+for table, invariant in invariants.items():
+    if not isinstance(invariant, dict):
+        raise SystemExit(f"manifest invariant is invalid: {table}")
+    count = invariant.get("count")
+    digest = invariant.get("sha256")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise SystemExit(f"manifest invariant count is invalid: {table}")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise SystemExit(f"manifest invariant checksum is invalid: {table}")
+print("|".join([
+    sha256,
+    str(size_bytes),
+    marker["mode"],
+    schema_sha256,
+    json.dumps(invariants, sort_keys=True, separators=(",", ":")),
+]))
+PY
+}
+
+backup() {
+  local output_dir='' dump_path manifest_path temp_dump temp_manifest
+  local marker_json marker_fields marker_mode schema_sha256 invariant_lines invariant_json
+  local timestamp dump_basename created_at digest size_bytes
+  while (($#)); do
+    case "$1" in
+      --output-dir)
+        (($# >= 2)) || fail '--output-dir requires a directory'
+        output_dir="$2"
+        shift 2
+        ;;
+      --help|-h)
+        usage
+        return 0
+        ;;
+      *)
+        fail "unknown backup argument: $1"
+        ;;
+    esac
+  done
+  [[ -n "$output_dir" ]] || fail 'backup requires --output-dir'
+  [[ -d "$output_dir" && ! -L "$output_dir" ]] ||
+    fail "backup output directory must be a regular directory: $output_dir"
+  [[ "${STAGING_RECOVERY_SOURCE-}" == "$EXPECTED_SOURCE" ]] ||
+    fail 'backup requires STAGING_RECOVERY_SOURCE=staging'
+  validate_connection_env
+  require_command pg_dump
+  require_command pg_restore
+  require_command sha256sum
+  require_command stat
+  require_command python3
+
+  marker_json="$(psql_query "$MARKER_SQL")" || fail 'could not read the staging schema marker'
+  marker_fields="$(validate_marker "$marker_json")" || fail 'staging schema marker validation failed'
+  IFS='|' read -r marker_mode schema_sha256 <<<"$marker_fields"
+
+  invariant_lines="$(psql_query "$CRITICAL_INVARIANT_SQL")" ||
+    fail 'could not calculate critical table invariants'
+  invariant_json="$(printf '%s\n' "$invariant_lines" | normalize_invariants)" ||
+    fail 'critical table invariants are invalid'
+
+  timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  created_at="$timestamp"
+  dump_basename="staging-recovery-${timestamp//[-:]/}-$$.dump"
+  dump_path="$output_dir/$dump_basename"
+  manifest_path="$dump_path.manifest.json"
+  temp_dump="$dump_path.tmp"
+  temp_manifest="$manifest_path.tmp"
+  [[ ! -e "$dump_path" && ! -e "$manifest_path" && ! -e "$temp_dump" && ! -e "$temp_manifest" ]] ||
+    fail 'refusing to overwrite an existing recovery artifact'
+  BACKUP_DUMP_PATH="$dump_path"
+  BACKUP_MANIFEST_PATH="$manifest_path"
+  BACKUP_TEMP_DUMP="$temp_dump"
+  BACKUP_TEMP_MANIFEST="$temp_manifest"
+  trap cleanup_backup_artifacts EXIT
+
+  rm -f -- "$temp_dump" "$temp_manifest"
+  if ! pg_dump --format=custom --no-owner --no-acl --file="$temp_dump"; then
+    rm -f -- "$temp_dump"
+    fail 'pg_dump failed'
+  fi
+  chmod 0600 "$temp_dump"
+  require_regular_file "$temp_dump" recovery-dump
+  size_bytes="$(stat -c '%s' "$temp_dump")"
+  [[ "$size_bytes" =~ ^[1-9][0-9]*$ ]] || fail 'pg_dump produced an empty dump'
+  digest="$(sha256sum -- "$temp_dump")"
+  digest="${digest%% *}"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || fail 'could not calculate the dump checksum'
+  pg_restore --list "$temp_dump" >/dev/null || fail 'pg_dump did not produce a readable custom archive'
+
+  python3 - "$temp_manifest" "$dump_basename" "$created_at" "$marker_mode" "$schema_sha256" "$digest" "$size_bytes" "$invariant_json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, dump_name, created_at, marker_mode, schema_sha256, digest, size_bytes, invariant_json = sys.argv[1:]
+manifest = {
+    "format": "mike-staging-recovery/v1",
+    "dump_file": dump_name,
+    "created_at": created_at,
+    "schema_marker": {
+        "id": True,
+        "mode": marker_mode,
+        "schema_sha256": schema_sha256,
+    },
+    "schema_version": f"{marker_mode}:{schema_sha256}",
+    "sha256": digest,
+    "size_bytes": int(size_bytes),
+    "critical_invariants": json.loads(invariant_json),
+}
+Path(path).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+Path(path).chmod(0o600)
+PY
+  require_regular_file "$temp_manifest" recovery-manifest
+  mv -- "$temp_dump" "$dump_path"
+  mv -- "$temp_manifest" "$manifest_path"
+  chmod 0600 "$dump_path" "$manifest_path"
+  BACKUP_COMPLETE=1
+  printf 'staging-recovery backup: PASS (%s)\n' "$dump_path"
+}
+
+restore_verify() {
+  local dump='' manifest='' manifest_fields expected_sha expected_size expected_mode expected_schema_sha expected_invariants
+  local actual_size actual_digest actual_db relation_count custom_schemas actual_marker invariants_json
+  while (($#)); do
+    case "$1" in
+      --dump)
+        (($# >= 2)) || fail '--dump requires a file'
+        dump="$2"
+        shift 2
+        ;;
+      --manifest)
+        (($# >= 2)) || fail '--manifest requires a file'
+        manifest="$2"
+        shift 2
+        ;;
+      --help|-h)
+        usage
+        return 0
+        ;;
+      *)
+        fail "unknown restore-verify argument: $1"
+        ;;
+    esac
+  done
+  [[ -n "$dump" && -n "$manifest" ]] ||
+    fail 'restore-verify requires --dump and --manifest'
+  require_regular_file "$dump" recovery-dump
+  require_regular_file "$manifest" recovery-manifest
+  [[ "$(stat -c '%a' "$dump")" == '600' ]] || fail 'recovery dump must have mode 0600'
+  [[ "$(stat -c '%a' "$manifest")" == '600' ]] || fail 'recovery manifest must have mode 0600'
+  require_command pg_restore
+  require_command psql
+  require_command sha256sum
+  require_command stat
+  require_command python3
+
+  manifest_fields="$(parse_manifest "$manifest" "$(basename "$dump")")" || fail 'recovery manifest validation failed'
+  IFS='|' read -r expected_sha expected_size expected_mode expected_schema_sha expected_invariants <<<"$manifest_fields"
+  actual_size="$(stat -c '%s' "$dump")"
+  [[ "$actual_size" == "$expected_size" ]] || fail 'recovery dump size does not match the manifest'
+  actual_digest="$(sha256sum -- "$dump")"
+  actual_digest="${actual_digest%% *}"
+  [[ "$actual_digest" == "$expected_sha" ]] || fail 'recovery dump checksum does not match the manifest'
+  pg_restore --list "$dump" >/dev/null || fail 'recovery dump is not a readable custom archive'
+
+  [[ "${STAGING_RECOVERY_TARGET-}" == "$EXPECTED_TARGET" ]] ||
+    fail 'restore-verify requires STAGING_RECOVERY_TARGET=recovery-test'
+  [[ "${STAGING_RECOVERY_TARGET_EPHEMERAL-}" == 'true' ]] ||
+    fail 'restore-verify requires STAGING_RECOVERY_TARGET_EPHEMERAL=true'
+  [[ "${PGDATABASE-}" == "$EXPECTED_TARGET" ]] ||
+    fail 'restore-verify requires PGDATABASE=recovery-test'
+  validate_connection_env
+
+  actual_db="$(psql_query 'select current_database();')"
+  read -r actual_db <<<"$actual_db"
+  [[ "$actual_db" == "$EXPECTED_TARGET" ]] ||
+    fail 'connected database is not the explicit recovery-test target'
+  relation_count="$(psql_query "
+select count(*)
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where n.nspname not in ('pg_catalog', 'information_schema')
+  and n.nspname not like 'pg_toast%'
+  and c.relkind in ('r', 'p', 'v', 'm', 'S', 'f');
+")"
+  read -r relation_count <<<"$relation_count"
+  [[ "$relation_count" == '0' ]] ||
+    fail 'recovery-test target is not empty; refusing to restore'
+  custom_schemas="$(psql_query "
+select coalesce(string_agg(nspname, ',' order by nspname), '')
+from pg_namespace
+where nspname not in ('pg_catalog', 'information_schema', 'public')
+  and nspname not like 'pg_toast%'
+  and nspname not like 'pg_temp_%'
+  and nspname not like 'pg_toast_temp_%';
+")"
+  read -r custom_schemas <<<"$custom_schemas"
+  [[ -z "$custom_schemas" ]] ||
+    fail "recovery-test target has unexpected schemas: $custom_schemas"
+
+  pg_restore \
+    --dbname="$PGDATABASE" \
+    --exit-on-error \
+    --single-transaction \
+    --no-owner \
+    --no-acl \
+    "$dump" || fail 'restore into recovery-test failed'
+
+  actual_marker="$(psql_query "$MARKER_SQL")" || fail 'restored schema marker cannot be read'
+  printf '%s\n' "$actual_marker" | python3 -c 'import json, re, sys
+rows = [line.strip() for line in sys.stdin if line.strip()]
+if len(rows) != 1:
+    raise SystemExit("restored schema marker must contain exactly one row")
+marker = json.loads(rows[0])
+expected_mode, expected_schema_sha = sys.argv[1:]
+if marker.get("id") is not True or marker.get("mode") != expected_mode or marker.get("schema_sha256") != expected_schema_sha:
+    raise SystemExit("restored schema marker does not match the backup manifest")
+if not re.fullmatch(r"[0-9a-f]{64}", marker["schema_sha256"]):
+    raise SystemExit("restored schema marker checksum is invalid")
+' "$expected_mode" "$expected_schema_sha" || fail 'restored schema marker verification failed'
+
+  invariants_json="$(psql_query "$CRITICAL_INVARIANT_SQL" | normalize_invariants)" ||
+    fail 'could not calculate restored critical table invariants'
+  [[ "$invariants_json" == "$expected_invariants" ]] ||
+    fail 'restored critical table invariants do not match the backup manifest'
+  printf 'staging-recovery restore-verify: PASS (target=%s, critical_tables=5)\n' "$EXPECTED_TARGET"
+}
+
+main() {
+  local command="${1:-}"
+  if (($#)); then
+    shift
+  fi
+  case "$command" in
+    backup)
+      backup "$@"
+      ;;
+    restore-verify)
+      restore_verify "$@"
+      ;;
+    --help|-h)
+      usage
+      ;;
+    *)
+      usage
+      fail 'choose backup or restore-verify'
+      ;;
+  esac
+}
+
+main "$@"
