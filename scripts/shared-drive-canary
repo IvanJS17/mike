@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+if (( $# != 0 )); then
+  printf 'shared-drive-canary: FAIL: command-line arguments are not accepted\n' >&2
+  exit 1
+fi
+exec node --experimental-strip-types "$ROOT/scripts/shared-drive-canary.ts"

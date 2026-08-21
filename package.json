@@ -5,7 +5,8 @@
         "test:e2e": "playwright test",
         "test:e2e:local": "bash scripts/e2e-local-stack.sh",
         "test:e2e:headed": "playwright test --headed",
-        "test:e2e:ui": "playwright test --ui"
+        "test:e2e:ui": "playwright test --ui",
+        "test:shared-drive-canary": "node --experimental-strip-types --test scripts/shared-drive-canary.test.ts"
     },
     "devDependencies": {
         "@axe-core/playwright": "^4.12.1",
