@@ -150,6 +150,6 @@ wait_for_completion db-init
 wait_for_health backend
 wait_for_health frontend
 wait_for_health proxy
-wait_for_host_http "$(env_value STAGING_PUBLIC_URL)/healthz"
+wait_for_host_http "$(env_value STAGING_PUBLIC_URL)/api/health"
 
 printf 'staging-up: READY (%s)\n' "$(env_value STAGING_PUBLIC_URL)"

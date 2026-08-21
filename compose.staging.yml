@@ -4,8 +4,13 @@
 # only the application, Supabase core, and one loopback-only reverse proxy.
 # Do not add Mailpit, RustFS, Ollama, dashboards, or other local-dev helpers.
 
+x-staging-owner-labels: &staging-owner-labels
+  com.mike.staging.owner: ${STAGING_COMPOSE_PROJECT:-mike-staging}
+  com.mike.staging.root: ${STAGING_ROOT:?STAGING_ROOT is required}
+
 services:
   db:
+    labels: *staging-owner-labels
     image: supabase/postgres:17.6.1.136
     environment:
       POSTGRES_DB: postgres
@@ -29,6 +34,7 @@ services:
     restart: "no"
 
   auth:
+    labels: *staging-owner-labels
     image: supabase/gotrue:v2.189.0
     environment:
       GOTRUE_API_HOST: 0.0.0.0
@@ -59,6 +65,7 @@ services:
     restart: "no"
 
   rest:
+    labels: *staging-owner-labels
     image: postgrest/postgrest:v14.12
     environment:
       PGRST_DB_URI: postgres://authenticator:${STAGING_POSTGRES_PASSWORD:?STAGING_POSTGRES_PASSWORD is required}@db:5432/postgres
@@ -71,6 +78,7 @@ services:
     restart: "no"
 
   db-init:
+    labels: *staging-owner-labels
     image: supabase/postgres:17.6.1.136
     environment:
       PGHOST: db
@@ -93,6 +101,7 @@ services:
     restart: "no"
 
   backend:
+    labels: *staging-owner-labels
     build:
       context: ./backend
     environment:
@@ -126,6 +135,7 @@ services:
     restart: "no"
 
   frontend:
+    labels: *staging-owner-labels
     build:
       context: ./frontend
       args:
@@ -150,6 +160,7 @@ services:
     restart: "no"
 
   proxy:
+    labels: *staging-owner-labels
     image: nginx:1.27.5-alpine
     ports:
       - "127.0.0.1:${STAGING_PROXY_PORT:?STAGING_PROXY_PORT is required}:8000"
@@ -177,9 +188,12 @@ services:
 
 volumes:
   staging_db_data:
+    labels: *staging-owner-labels
 
 networks:
   default:
     internal: true
+    labels: *staging-owner-labels
   edge:
     internal: false
+    labels: *staging-owner-labels

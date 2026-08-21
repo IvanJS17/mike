@@ -2,6 +2,7 @@
 set -euo pipefail
 
 STAGING_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+export STAGING_ROOT
 STAGING_COMPOSE_FILE="$STAGING_ROOT/compose.staging.yml"
 STAGING_ENV_FILE="${STAGING_ENV_FILE:-$STAGING_ROOT/.env.staging}"
 
@@ -41,8 +42,9 @@ env_value() {
 
 STAGING_PROJECT="$(env_value STAGING_COMPOSE_PROJECT || true)"
 STAGING_PROJECT="${STAGING_PROJECT:-mike-staging}"
-if [[ ! "$STAGING_PROJECT" =~ ^mike-staging(-[a-z0-9][a-z0-9_-]*)?$ ]]; then
-  fail "STAGING_COMPOSE_PROJECT must be mike-staging or start with mike-staging-"
+if [[ "$STAGING_PROJECT" != "mike-staging" &&
+  ! "$STAGING_PROJECT" =~ ^mike-staging-smoke-[0-9]+$ ]]; then
+  fail "STAGING_COMPOSE_PROJECT must be mike-staging or a generated mike-staging-smoke-PID project"
 fi
 
 compose() {
@@ -101,12 +103,15 @@ validate_env() {
 assert_contract() {
   local rendered services expected service
   rendered="$(compose config --format json)"
-  printf '%s\n' "$rendered" | python3 -c '
+  printf '%s\n' "$rendered" | STAGING_PROJECT="$STAGING_PROJECT" STAGING_ROOT="$STAGING_ROOT" python3 -c '
 import json
+import os
 import sys
 
 doc = json.load(sys.stdin)
 services = doc.get("services", {})
+expected_owner = os.environ["STAGING_PROJECT"]
+expected_root = os.environ["STAGING_ROOT"]
 expected = {"auth", "backend", "db", "db-init", "frontend", "proxy", "rest"}
 actual = set(services)
 if actual != expected:
@@ -116,6 +121,10 @@ if services["db-init"].get("command") != ["fresh"]:
 if any("migrations" in str(volume) for volume in services["db-init"].get("volumes", [])):
     raise SystemExit("staging db-init must not mount historical migrations")
 for name, service in services.items():
+    if service.get("labels", {}).get("com.mike.staging.owner") != expected_owner:
+        raise SystemExit(f"staging service is missing its owner label: {name}")
+    if service.get("labels", {}).get("com.mike.staging.root") != expected_root:
+        raise SystemExit(f"staging service is missing its worktree label: {name}")
     ports = service.get("ports") or []
     if name != "proxy" and ports:
         raise SystemExit(f"non-proxy service publishes host ports: {name}")
@@ -139,6 +148,12 @@ for name, service in services.items():
             f"unexpected staging networks for {name}: {sorted(attached)} "
             f"(expected {sorted(expected_networks)})"
         )
+for section in ("volumes", "networks"):
+    for name, resource in doc.get(section, {}).items():
+        if resource.get("labels", {}).get("com.mike.staging.owner") != expected_owner:
+            raise SystemExit(f"staging {section[:-1]} is missing its owner label: {name}")
+        if resource.get("labels", {}).get("com.mike.staging.root") != expected_root:
+            raise SystemExit(f"staging {section[:-1]} is missing its worktree label: {name}")
 for forbidden in ("mailpit", "rustfs", "storage", "ollama", "studio", "realtime", "analytics"):
     if forbidden in actual:
         raise SystemExit(f"forbidden local-dev service present: {forbidden}")
