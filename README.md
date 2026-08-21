@@ -42,6 +42,50 @@ docker compose up --build
 
 Open `http://localhost:3000` and sign up.
 
+### Reproducible local staging for Beta Jurídica 0.1
+
+The staging profile is separate from the full developer stack. It starts only
+frontend, backend, Supabase Postgres/Auth/PostgREST, and one loopback-only proxy;
+there is no Mailpit, RustFS, Ollama, dashboard, or public database/admin port.
+Application services stay on an internal Compose network; only the proxy joins
+the dedicated edge network and its published port binds to loopback.
+
+Create a synthetic, local-only environment file and replace every placeholder:
+
+```bash
+cp .env.staging.example .env.staging
+# Set the JWT/key values in .env.staging; do not commit that file.
+```
+
+Validate the rendered contract without starting containers:
+
+```bash
+STAGING_ENV_FILE=.env.staging scripts/staging-up --contract-only
+```
+
+Start and stop only the staging Compose project:
+
+```bash
+STAGING_ENV_FILE=.env.staging scripts/staging-up
+STAGING_ENV_FILE=.env.staging scripts/staging-down
+```
+
+For a disposable smoke with generated synthetic values, real health checks, an
+empty Auth database, and mandatory teardown, run:
+
+```bash
+scripts/staging-smoke.sh
+```
+
+The smoke uses an ephemeral loopback port and never contacts a real provider or
+uses real data.
+
+Staging has one database bootstrap path: `fresh`. On an empty database it loads
+`backend/schema.sql` once, which is the current canonical schema, and it never
+replays `backend/migrations/`. If the database is already initialized, the
+bootstrap is a safe no-op; any other non-empty or ambiguous state fails closed.
+Upgrade mode is not supported by `scripts/staging-db-init.sh`.
+
 Local service endpoints:
 
 | Service | Address | Notes |

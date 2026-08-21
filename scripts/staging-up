@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/staging-common.sh
+source "$ROOT/scripts/staging-common.sh"
+
+case "${1:-}" in
+  "") ;;
+  --contract-only) CONTRACT_ONLY=1 ;;
+  --help|-h)
+    printf 'Usage: STAGING_ENV_FILE=.env.staging scripts/staging-up [--contract-only]\n'
+    exit 0
+    ;;
+  *)
+    fail "unknown argument: $1"
+    ;;
+esac
+
+require_command docker
+require_command python3
+require_command curl
+validate_env
+compose config --quiet
+assert_contract
+
+if [[ "${CONTRACT_ONLY:-0}" == "1" ]]; then
+  printf 'staging contract: PASS (%s)\n' "$STAGING_PROJECT"
+  exit 0
+fi
+
+# Pull only missing external runtime images. The frontend/backend images are
+# built from this worktree so the smoke uses the reviewed source tree without
+# requiring a registry round-trip when their base layers are already local.
+compose pull --policy missing --quiet db auth rest proxy
+compose build frontend backend
+compose up -d --remove-orphans
+
+wait_for_health() {
+  local service="$1" timeout_seconds="${2:-180}" id state health deadline
+  deadline=$((SECONDS + timeout_seconds))
+  while (( SECONDS < deadline )); do
+    id="$(compose ps -q "$service" 2>/dev/null || true)"
+    if [[ -n "$id" ]]; then
+      state="$(docker inspect --format '{{.State.Status}}' "$id" 2>/dev/null || true)"
+      health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$id" 2>/dev/null || true)"
+      if [[ "$state" == "running" && "$health" == "healthy" ]]; then
+        printf 'staging health: %s healthy\n' "$service"
+        return 0
+      fi
+      if [[ "$state" == "exited" || "$state" == "dead" ]]; then
+        compose logs --no-color --tail 80 "$service" >&2 || true
+        fail "$service exited before becoming healthy"
+      fi
+    fi
+    sleep 2
+  done
+  compose logs --no-color --tail 80 "$service" >&2 || true
+  fail "$service did not become healthy within ${timeout_seconds}s"
+}
+
+wait_for_running() {
+  local service="$1" timeout_seconds="${2:-180}" id state deadline
+  deadline=$((SECONDS + timeout_seconds))
+  while (( SECONDS < deadline )); do
+    id="$(compose ps -q "$service" 2>/dev/null || true)"
+    if [[ -n "$id" ]]; then
+      state="$(docker inspect --format '{{.State.Status}}' "$id" 2>/dev/null || true)"
+      if [[ "$state" == "running" ]]; then
+        printf 'staging readiness: %s running\n' "$service"
+        return 0
+      fi
+      if [[ "$state" == "exited" || "$state" == "dead" ]]; then
+        compose logs --no-color --tail 80 "$service" >&2 || true
+        fail "$service exited before becoming ready"
+      fi
+    fi
+    sleep 2
+  done
+  compose logs --no-color --tail 80 "$service" >&2 || true
+  fail "$service did not become running within ${timeout_seconds}s"
+}
+
+wait_for_http() {
+  local service="$1" port="$2" path="$3" timeout_seconds="${4:-180}"
+  local id state address deadline
+  deadline=$((SECONDS + timeout_seconds))
+  while (( SECONDS < deadline )); do
+    id="$(compose ps -q "$service" 2>/dev/null || true)"
+    if [[ -n "$id" ]]; then
+      state="$(docker inspect --format '{{.State.Status}}' "$id" 2>/dev/null || true)"
+      if [[ "$state" == "exited" || "$state" == "dead" ]]; then
+        compose logs --no-color --tail 80 "$service" >&2 || true
+        fail "$service exited before its HTTP readiness check"
+      fi
+      address="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$id" 2>/dev/null || true)"
+      if [[ "$state" == "running" && -n "$address" ]] &&
+        curl --fail --silent --show-error --max-time 3 "http://$address:$port$path" >/dev/null 2>&1; then
+        printf 'staging readiness: %s HTTP %s\n' "$service" "$path"
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  compose logs --no-color --tail 80 "$service" >&2 || true
+  fail "$service did not answer HTTP ${path} within ${timeout_seconds}s"
+}
+
+wait_for_host_http() {
+  local url="$1" timeout_seconds="${2:-180}" deadline
+  deadline=$((SECONDS + timeout_seconds))
+  while (( SECONDS < deadline )); do
+    if curl --fail --silent --show-error --max-time 3 "$url" >/dev/null 2>&1; then
+      printf 'staging readiness: host HTTP %s\n' "$url"
+      return 0
+    fi
+    sleep 2
+  done
+  fail "staging proxy did not answer host HTTP ${url} within ${timeout_seconds}s"
+}
+
+wait_for_completion() {
+  local service="$1" timeout_seconds="${2:-180}" id state exit_code deadline
+  deadline=$((SECONDS + timeout_seconds))
+  while (( SECONDS < deadline )); do
+    id="$(compose ps -aq "$service" 2>/dev/null || true)"
+    if [[ -n "$id" ]]; then
+      state="$(docker inspect --format '{{.State.Status}}' "$id" 2>/dev/null || true)"
+      exit_code="$(docker inspect --format '{{.State.ExitCode}}' "$id" 2>/dev/null || true)"
+      if [[ "$state" == "exited" ]]; then
+        if [[ "$exit_code" == "0" ]]; then
+          printf 'staging readiness: %s completed\n' "$service"
+          return 0
+        fi
+        compose logs --no-color --tail 120 "$service" >&2 || true
+        fail "$service completed with exit code $exit_code"
+      fi
+    fi
+    sleep 2
+  done
+  compose logs --no-color --tail 120 "$service" >&2 || true
+  fail "$service did not complete within ${timeout_seconds}s"
+}
+
+wait_for_health db
+wait_for_health auth
+wait_for_running rest
+wait_for_http rest 3000 /
+wait_for_completion db-init
+wait_for_health backend
+wait_for_health frontend
+wait_for_health proxy
+wait_for_host_http "$(env_value STAGING_PUBLIC_URL)/api/health"
+
+printf 'staging-up: READY (%s)\n' "$(env_value STAGING_PUBLIC_URL)"

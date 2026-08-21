@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/staging-common.sh
+source "$ROOT/scripts/staging-common.sh"
+
+case "${1:-}" in
+  "") ;;
+  --help|-h)
+    printf 'Usage: STAGING_ENV_FILE=.env.staging scripts/staging-down\n'
+    exit 0
+    ;;
+  *)
+    fail "unknown argument: $1"
+    ;;
+esac
+
+require_command docker
+
+assert_owned_resources() {
+  local kind="$1" ids="$2" owner_format="$3" root_format="$4" id owner root
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    owner="$(docker inspect --format "$owner_format" "$id" 2>/dev/null || true)"
+    [[ "$owner" == "$STAGING_PROJECT" ]] ||
+      fail "refusing to clean $kind $id: owner label does not match $STAGING_PROJECT"
+    root="$(docker inspect --format "$root_format" "$id" 2>/dev/null || true)"
+    [[ "$root" == "$STAGING_ROOT" ]] ||
+      fail "refusing to clean $kind $id: worktree label does not match $STAGING_ROOT"
+  done <<<"$ids"
+}
+
+containers="$(docker ps -aq --filter "label=com.docker.compose.project=$STAGING_PROJECT")"
+assert_owned_resources container "$containers" \
+  '{{ index .Config.Labels "com.mike.staging.owner" }}' \
+  '{{ index .Config.Labels "com.mike.staging.root" }}'
+while IFS= read -r id; do
+  [[ -n "$id" ]] || continue
+  working_dir="$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$id" 2>/dev/null || true)"
+  [[ -z "$working_dir" || "$working_dir" == "$STAGING_ROOT" ]] ||
+    fail "refusing to clean container $id from another staging worktree: $working_dir"
+done <<<"$containers"
+
+volumes="$(docker volume ls -q --filter "label=com.docker.compose.project=$STAGING_PROJECT")"
+assert_owned_resources volume "$volumes" \
+  '{{ index .Labels "com.mike.staging.owner" }}' \
+  '{{ index .Labels "com.mike.staging.root" }}'
+networks="$(docker network ls -q --filter "label=com.docker.compose.project=$STAGING_PROJECT")"
+assert_owned_resources network "$networks" \
+  '{{ index .Labels "com.mike.staging.owner" }}' \
+  '{{ index .Labels "com.mike.staging.root" }}'
+
+compose down --volumes --remove-orphans
+
+remaining="$(docker ps -aq --filter "label=com.docker.compose.project=$STAGING_PROJECT")"
+[[ -z "$remaining" ]] || fail "project cleanup left attributed containers: $STAGING_PROJECT"
+remaining="$(docker volume ls -q --filter "label=com.docker.compose.project=$STAGING_PROJECT")"
+[[ -z "$remaining" ]] || fail "project cleanup left attributed volumes: $STAGING_PROJECT"
+remaining="$(docker network ls -q --filter "label=com.docker.compose.project=$STAGING_PROJECT")"
+[[ -z "$remaining" ]] || fail "project cleanup left attributed networks: $STAGING_PROJECT"
+printf 'staging-down: CLEAN (%s)\n' "$STAGING_PROJECT"
