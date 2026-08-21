@@ -5,19 +5,19 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 RECOVERY="$ROOT/scripts/staging-recovery"
 TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mike-staging-recovery-test.XXXXXX")"
 BACKUP_DIR="$TEST_DIR/backups"
-PORT="$(python3 - <<'PY'
-import socket
-
-with socket.socket() as sock:
-    sock.bind(("127.0.0.1", 0))
-    print(sock.getsockname()[1])
-PY
-)"
 CONTAINER="mike-staging-recovery-test-$$"
 PROJECT_LABEL="mike-staging-recovery-test"
+POSTGRES_IMAGE='postgres:17-alpine'
+POSTGRES_CONTAINER_PORT=5432
+POSTGRES_USER='postgres'
+POSTGRES_DB='postgres'
 PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
 POSTGRES_ENV_FILE="$TEST_DIR/postgres.env"
-container_started=0
+READINESS_TIMEOUT_SECONDS="${STAGING_RECOVERY_TEST_READINESS_TIMEOUT_SECONDS:-120}"
+FAILURE_TIMEOUT_SECONDS="${STAGING_RECOVERY_TEST_FAILURE_TIMEOUT_SECONDS:-5}"
+CLEANUP_TIMEOUT_SECONDS="${STAGING_RECOVERY_TEST_CLEANUP_TIMEOUT_SECONDS:-10}"
+TEST_SUCCESS=0
+declare -a CONTAINERS=()
 
 fail() {
   printf 'staging-recovery-test: %s\n' "$*" >&2
@@ -34,21 +34,163 @@ assert_not_contains() {
   [[ "$haystack" != *"$needle"* ]] || fail "output contained forbidden secret text"
 }
 
+require_positive_integer() {
+  local name="$1" value="$2"
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || fail "$name must be a positive integer"
+}
+
+allocate_port() {
+  python3 - <<'PY'
+import socket
+
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+}
+
+container_ids() {
+  docker ps -aq --filter "name=^${1}$"
+}
+
+container_snapshot() {
+  docker inspect \
+    --format '{{.State.Status}}|{{.State.ExitCode}}|{{.State.Error}}' \
+    "$1"
+}
+
+sanitize_diagnostic() {
+  local diagnostic="$1" secret="${2-}"
+  if [[ -n "$secret" ]]; then
+    diagnostic="${diagnostic//"$secret"/[redacted]}"
+  fi
+  printf '%s' "$diagnostic"
+}
+
+wait_for_postgres() {
+  local container="$1" port="$2" password="$3" postgres_user="$4" postgres_db="$5" timeout_seconds="$6"
+  local deadline=$((SECONDS + timeout_seconds))
+  local snapshot state exit_code state_error diagnostic
+
+  while :; do
+    if ! snapshot="$(container_snapshot "$container" 2>/dev/null)" || [[ -z "$snapshot" ]]; then
+      fail "PostgreSQL readiness failed: container $container disappeared while waiting"
+    fi
+    IFS='|' read -r state exit_code state_error <<< "$snapshot"
+    state="${state:-unknown}"
+    exit_code="${exit_code:-unknown}"
+    state_error="${state_error:-none}"
+    diagnostic="$(sanitize_diagnostic \
+      "container=$container probe_port=$port state=$state exit_code=$exit_code error=$state_error" \
+      "$password")"
+
+    case "$state" in
+      exited|dead|removing)
+        fail "PostgreSQL readiness failed: terminal container state ($diagnostic)"
+        ;;
+    esac
+
+    if docker exec "$container" \
+      pg_isready \
+      --port="$port" \
+      --username="$postgres_user" \
+      --dbname="$postgres_db" >/dev/null 2>&1 &&
+      docker exec \
+        --env "PGPASSWORD=$password" \
+        --env PGCONNECT_TIMEOUT=1 \
+        "$container" \
+        psql \
+        --no-psqlrc \
+        --quiet \
+        --username="$postgres_user" \
+        --dbname="$postgres_db" \
+        --command='SELECT 1' >/dev/null 2>&1; then
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      fail "PostgreSQL readiness timed out after ${timeout_seconds}s ($diagnostic)"
+    fi
+    sleep 1
+done
+}
+
+wait_for_container_absent() {
+  local container="$1" deadline="$2"
+  local ids
+
+  while :; do
+    if ! ids="$(container_ids "$container" 2>/dev/null)"; then
+      printf 'staging-recovery-test: unable to inspect cleanup container %s\n' "$container" >&2
+      return 1
+    fi
+    [[ -z "$ids" ]] && return 0
+    if (( SECONDS >= deadline )); then
+      printf 'staging-recovery-test: cleanup deadline exceeded for container %s\n' "$container" >&2
+      return 1
+    fi
+    sleep 1
+done
+}
+
+remove_container() {
+  local container="$1" ids deadline remaining
+  deadline=$((SECONDS + CLEANUP_TIMEOUT_SECONDS))
+  if ! ids="$(container_ids "$container" 2>/dev/null)"; then
+    printf 'staging-recovery-test: unable to inspect container %s before cleanup\n' "$container" >&2
+    return 1
+  fi
+  if [[ -n "$ids" ]]; then
+    remaining=$((deadline - SECONDS))
+    if (( remaining > 0 )); then
+      timeout --signal=TERM --kill-after=2s "${remaining}s" \
+        docker rm -f "$container" >/dev/null 2>&1 || true
+    fi
+  fi
+  wait_for_container_absent "$container" "$deadline"
+}
+
+container_is_absent() {
+  local ids
+  ids="$(container_ids "$1" 2>/dev/null)" || return 1
+  [[ -z "$ids" ]]
+}
+
+register_container() {
+  CONTAINERS+=("$1")
+}
+
 cleanup() {
   local current=$?
+  local container
   trap - EXIT INT TERM
   set +e
-  if (( container_started )) && docker ps -aq --filter "name=^${CONTAINER}$" | grep -q .; then
-    docker rm -f "$CONTAINER" >/dev/null 2>&1
-  fi
-  if (( container_started )) && docker ps -aq --filter "name=^${CONTAINER}$" | grep -q .; then
-    printf 'staging-recovery-test: cleanup left container %s\n' "$CONTAINER" >&2
-    current=1
-  fi
-  rm -rf "$TEST_DIR"
+
+  for container in "${CONTAINERS[@]}"; do
+    remove_container "$container" || {
+      printf 'staging-recovery-test: cleanup left container %s\n' "$container" >&2
+      current=1
+    }
+  done
+
+  rm -rf -- "$TEST_DIR"
   if [[ -e "$TEST_DIR" ]]; then
     printf 'staging-recovery-test: cleanup left temporary files\n' >&2
     current=1
+  fi
+
+  for container in "${CONTAINERS[@]}"; do
+    if ! container_is_absent "$container"; then
+      printf 'staging-recovery-test: verified container residue %s\n' "$container" >&2
+      current=1
+    fi
+  done
+  if [[ -e "$TEST_DIR" ]]; then
+    printf 'staging-recovery-test: verified temporary residue %s\n' "$TEST_DIR" >&2
+    current=1
+  fi
+
+  if (( current == 0 && TEST_SUCCESS )); then
+    printf 'staging-recovery-test: PASS (corruption rejected, clean restore verified, cleanup verified)\n'
   fi
   exit "$current"
 }
@@ -56,36 +198,75 @@ trap cleanup EXIT INT TERM
 
 [[ -x "$RECOVERY" ]] || fail "missing executable recovery CLI: $RECOVERY"
 command -v docker >/dev/null 2>&1 || fail 'docker is required'
+command -v timeout >/dev/null 2>&1 || fail 'timeout is required'
 command -v pg_dump >/dev/null 2>&1 || fail 'pg_dump is required'
 command -v pg_restore >/dev/null 2>&1 || fail 'pg_restore is required'
 command -v psql >/dev/null 2>&1 || fail 'psql is required'
 command -v python3 >/dev/null 2>&1 || fail 'python3 is required'
+require_positive_integer STAGING_RECOVERY_TEST_READINESS_TIMEOUT_SECONDS "$READINESS_TIMEOUT_SECONDS"
+require_positive_integer STAGING_RECOVERY_TEST_FAILURE_TIMEOUT_SECONDS "$FAILURE_TIMEOUT_SECONDS"
+require_positive_integer STAGING_RECOVERY_TEST_CLEANUP_TIMEOUT_SECONDS "$CLEANUP_TIMEOUT_SECONDS"
+
+PORT="$(allocate_port)"
+
+run_readiness_failure_test() {
+  local failure_output failure_status failure_elapsed failure_started
+
+  failure_started=$SECONDS
+  set +e
+  failure_output="$(wait_for_postgres \
+    "$CONTAINER" \
+    1 \
+    "$PASSWORD" \
+    "$POSTGRES_USER" \
+    "$POSTGRES_DB" \
+    "$FAILURE_TIMEOUT_SECONDS" 2>&1)"
+  failure_status=$?
+  set -e
+  failure_elapsed=$((SECONDS - failure_started))
+
+  (( failure_status != 0 )) || fail 'invalid-port readiness failure was accepted'
+  (( failure_elapsed <= FAILURE_TIMEOUT_SECONDS + 2 )) ||
+    fail "invalid-port failure exceeded readiness deadline: ${failure_elapsed}s"
+  assert_contains "$failure_output" 'timed out'
+  assert_contains "$failure_output" 'state=running'
+  assert_not_contains "$failure_output" "$PASSWORD"
+}
 
 mkdir -p "$BACKUP_DIR"
-printf 'POSTGRES_PASSWORD=%s\n' "$PASSWORD" > "$POSTGRES_ENV_FILE"
+printf 'POSTGRES_PASSWORD=%s\nPOSTGRES_USER=%s\nPOSTGRES_DB=%s\n' \
+  "$PASSWORD" "$POSTGRES_USER" "$POSTGRES_DB" > "$POSTGRES_ENV_FILE"
 chmod 0600 "$POSTGRES_ENV_FILE"
-[[ -z "$(docker ps -aq --filter "name=^${CONTAINER}$")" ]] ||
+[[ -z "$(container_ids "$CONTAINER")" ]] ||
   fail "refusing to reuse an existing container name: $CONTAINER"
+register_container "$CONTAINER"
 
-docker run --detach --rm \
+docker run --detach \
   --name "$CONTAINER" \
   --label "com.mike.staging.recovery-test=$PROJECT_LABEL" \
   --env-file "$POSTGRES_ENV_FILE" \
-  --publish "127.0.0.1:$PORT:5432" \
-  supabase/postgres:17.6.1.136 >/dev/null
-container_started=1
+  --publish "127.0.0.1:$PORT:$POSTGRES_CONTAINER_PORT" \
+  --no-healthcheck \
+  "$POSTGRES_IMAGE" >/dev/null
+
+run_readiness_failure_test
 
 export PGHOST=127.0.0.1
 export PGPORT="$PORT"
-export PGUSER=postgres
+export PGUSER="$POSTGRES_USER"
 export PGPASSWORD="$PASSWORD"
+export PGDATABASE="$POSTGRES_DB"
 export PGCONNECT_TIMEOUT=5
 
-until psql --no-psqlrc --quiet --dbname=postgres --command='select 1' >/dev/null 2>&1; do
-  sleep 1
-done
+wait_for_postgres \
+  "$CONTAINER" \
+  "$POSTGRES_CONTAINER_PORT" \
+  "$PASSWORD" \
+  "$POSTGRES_USER" \
+  "$POSTGRES_DB" \
+  "$READINESS_TIMEOUT_SECONDS"
 
-psql --no-psqlrc --set ON_ERROR_STOP=1 --dbname=postgres <<'SQL'
+psql --no-psqlrc --set ON_ERROR_STOP=1 --dbname="$POSTGRES_DB" <<'SQL'
 CREATE DATABASE staging_source;
 CREATE DATABASE "recovery-test";
 SQL
@@ -237,4 +418,5 @@ for table in _mike_staging_bootstrap matters documents document_versions ai_revi
     fail "restored table has no synthetic rows: $table ($count)"
 done
 
-printf 'staging-recovery-test: PASS (corruption rejected, clean restore verified, teardown armed)\n'
+TEST_SUCCESS=1
+exit 0
