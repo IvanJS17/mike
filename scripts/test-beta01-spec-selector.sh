@@ -14,7 +14,14 @@
 #       cero mutaciones (sin backend/.env, sin dirs /tmp/beta01-smoke.*);
 #   c4. el lifecycle Gate 1 queda intacto: los casos exitosos recorren el
 #       boot completo (minio -> supabase -> env -> build -> servers) y
-#       terminan con teardown limpio (exit 0).
+#       terminan con teardown limpio (exit 0);
+#   c5. (Gate 2 fix A) el runner crea BETA01_FAKE_STATE_FILE dentro de su
+#       SMOKE_DIR, lo exporta antes de bootear backend/spec (ambos ven el
+#       MISMO path runner-owned, inicializado vacío) y el teardown lo elimina
+#       con SMOKE_DIR sin imprimir jamás su contenido;
+#   c6. (Gate 2 fix A) un BETA01_FAKE_STATE_FILE heredado arbitrario queda
+#       reemplazado por el path del runner antes de mutar nada: ningún hijo
+#       ve el path heredado y el archivo arbitrario externo no se toca.
 #
 # El stack completo se simula con stubs en un PATH prefijado; cada stub
 # registra su invocación en CALLS, así "cero mutaciones" es una aserción
@@ -32,7 +39,12 @@ REPO="$TMP/repo"
 BIN="$TMP/bin"
 CALLS="$TMP/calls.log"
 PLAYWRIGHT_CMD="$TMP/playwright.cmd"
-export CALLS PLAYWRIGHT_CMD
+# Gate 2 fix A: los stubs del stack registran aquí el BETA01_FAKE_STATE_FILE
+# que VE cada lado (backend vía npm run dev, spec vía npx playwright) y el
+# estado del archivo en ese momento (inicializado vacío por el runner).
+STATE_ENV="$TMP/state-env.log"
+RUN_OUT="$TMP/run.out"
+export CALLS PLAYWRIGHT_CMD STATE_ENV RUN_OUT
 PRE_SMOKE_DIRS="$(ls -d /tmp/beta01-smoke.* 2>/dev/null | wc -l)"
 CHECKS=0
 FAILS=0
@@ -82,7 +94,17 @@ cat >"$BIN/npm" <<'STUB'
 #!/usr/bin/env bash
 printf 'npm %s\n' "$*" >>"$CALLS"
 case "$*" in
-  *"run dev "*) printf '%s\n' 'beta01-fakes preloaded (stub)' ;;
+  *"run dev "*)
+    # Backend process (fix A): registra el fake state path que VE y que el
+    # archivo fue inicializado vacío por el runner antes del boot.
+    printf 'backend-fake-state=%s\n' "${BETA01_FAKE_STATE_FILE:-UNSET}" >>"$STATE_ENV"
+    if [ -n "${BETA01_FAKE_STATE_FILE:-}" ] && [ -f "$BETA01_FAKE_STATE_FILE" ] && [ ! -s "$BETA01_FAKE_STATE_FILE" ]; then
+      printf 'backend-fake-state-init=empty\n' >>"$STATE_ENV"
+    else
+      printf 'backend-fake-state-init=BAD\n' >>"$STATE_ENV"
+    fi
+    printf '%s\n' 'beta01-fakes preloaded (stub)'
+    ;;
 esac
 exit 0
 STUB
@@ -95,6 +117,14 @@ case "$*" in
     ;;
   *"playwright test"*)
     printf '%s\n' "$*" >>"$PLAYWRIGHT_CMD"
+    # Spec process (fix A): registra el fake state path que VE y que el
+    # archivo está inicializado (vacío) al arrancar Playwright.
+    printf 'spec-fake-state=%s\n' "${BETA01_FAKE_STATE_FILE:-UNSET}" >>"$STATE_ENV"
+    if [ -n "${BETA01_FAKE_STATE_FILE:-}" ] && [ -f "$BETA01_FAKE_STATE_FILE" ] && [ ! -s "$BETA01_FAKE_STATE_FILE" ]; then
+      printf 'spec-fake-state-init=empty\n' >>"$STATE_ENV"
+    else
+      printf 'spec-fake-state-init=BAD\n' >>"$STATE_ENV"
+    fi
     ;;
 esac
 exit 0
@@ -127,13 +157,16 @@ chmod +x "$BIN"/*
 # ---------------------------------------------------------------------------
 run_ok() {
   local value="$1" expected="$2" label="$3" rc cmd
+  local backend_state spec_state backend_init spec_init
   : >"$CALLS"
+  : >"$STATE_ENV"
+  : >"$RUN_OUT"
   rm -f "$PLAYWRIGHT_CMD"
   set +e
   if [ "$value" = "__UNSET__" ]; then
-    PATH="$BIN:$PATH" bash "$REPO/scripts/e2e-beta01-setup-smoke.sh" >/dev/null 2>&1
+    PATH="$BIN:$PATH" bash "$REPO/scripts/e2e-beta01-setup-smoke.sh" >"$RUN_OUT" 2>&1
   else
-    BETA01_SMOKE_SPEC="$value" PATH="$BIN:$PATH" bash "$REPO/scripts/e2e-beta01-setup-smoke.sh" >/dev/null 2>&1
+    BETA01_SMOKE_SPEC="$value" PATH="$BIN:$PATH" bash "$REPO/scripts/e2e-beta01-setup-smoke.sh" >"$RUN_OUT" 2>&1
   fi
   rc=$?
   set -e
@@ -155,6 +188,45 @@ run_ok() {
     ok "$label: teardown — sin dirs /tmp/beta01-smoke.* residuales"
   else
     bad "$label: teardown — quedaron dirs /tmp/beta01-smoke.*"
+  fi
+
+  # Gate 2 fix A: el runner crea/exporta BETA01_FAKE_STATE_FILE dentro de su
+  # SMOKE_DIR; backend (npm run dev) y spec (npx playwright) ven el MISMO
+  # path runner-owned (jamás un valor heredado/arbitrario), el archivo está
+  # inicializado vacío antes de mutar, y el runner nunca imprime su contenido.
+  backend_state="$(sed -n 's/^backend-fake-state=//p' "$STATE_ENV" | head -1 || true)"
+  spec_state="$(sed -n 's/^spec-fake-state=//p' "$STATE_ENV" | head -1 || true)"
+  backend_init="$(sed -n 's/^backend-fake-state-init=//p' "$STATE_ENV" | head -1 || true)"
+  spec_init="$(sed -n 's/^spec-fake-state-init=//p' "$STATE_ENV" | head -1 || true)"
+  case "$backend_state" in
+    /tmp/beta01-smoke.*/fake-state.json)
+      ok "$label: fixA — backend ve el fake state path del runner en SMOKE_DIR" ;;
+    *) bad "$label: fixA — backend NO ve path runner-owned (got: $backend_state)" ;;
+  esac
+  case "$spec_state" in
+    /tmp/beta01-smoke.*/fake-state.json)
+      ok "$label: fixA — spec ve el fake state path del runner en SMOKE_DIR" ;;
+    *) bad "$label: fixA — spec NO ve path runner-owned (got: $spec_state)" ;;
+  esac
+  if [ -n "$backend_state" ] && [ "$backend_state" = "$spec_state" ]; then
+    ok "$label: fixA — backend y spec comparten el MISMO fake state path"
+  else
+    bad "$label: fixA — paths backend/spec difieren o faltan"
+  fi
+  if [ "$backend_init" = "empty" ]; then
+    ok "$label: fixA — fake state inicializado vacío antes del boot del backend"
+  else
+    bad "$label: fixA — fake state NO vacío en el boot del backend (got: $backend_init)"
+  fi
+  if [ "$spec_init" = "empty" ]; then
+    ok "$label: fixA — fake state vacío al arrancar el spec"
+  else
+    bad "$label: fixA — fake state NO vacío al arrancar el spec (got: $spec_init)"
+  fi
+  if grep -qE 'provider_calls|drive_upload_calls' "$RUN_OUT"; then
+    bad "$label: fixA — el runner imprimió contenido del fake state"
+  else
+    ok "$label: fixA — el runner nunca imprime el contenido del fake state"
   fi
 }
 
@@ -199,6 +271,16 @@ run_ok "" e2e/beta01-setup-smoke.spec.ts "empty"
 
 printf '[c2] BETA01_SMOKE_SPEC=AI -> spec IA\n'
 run_ok e2e/beta01-ai-smoke.spec.ts e2e/beta01-ai-smoke.spec.ts "ai"
+
+printf '[fixA] BETA01_FAKE_STATE_FILE heredado arbitrario -> reemplazado antes de mutar\n'
+ARBITRARY_STATE="$TMP/arbitrary-fake-state.json"
+printf '%s\n' '{"provider_calls":999,"drive_upload_calls":7,"junk":"arbitrary"}' >"$ARBITRARY_STATE"
+BETA01_FAKE_STATE_FILE="$ARBITRARY_STATE" run_ok e2e/beta01-ai-smoke.spec.ts e2e/beta01-ai-smoke.spec.ts "ai-with-inherited-state"
+if grep -q '"junk"' "$ARBITRARY_STATE" 2>/dev/null; then
+  ok "fixA — el archivo heredado arbitrario no se mutó (reemplazo limpio por path del runner)"
+else
+  bad "fixA — el archivo heredado arbitrario fue alterado"
+fi
 
 printf '[c3] path arbitrario -> fail con cero mutaciones\n'
 expect_reject "e2e/other.spec.ts" "arbitrary-path"

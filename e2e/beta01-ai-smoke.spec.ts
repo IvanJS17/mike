@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { test, expect, type Page } from "@playwright/test";
 
@@ -39,9 +38,11 @@ const DOCX_FIXTURE = path.join(__dirname, "fixtures/beta01-contract.docx");
 // The guard resolves API_BASE below from env/.env; it stays a module-level
 // default so apiRequest() reads the same validated value.
 let API_BASE = "http://localhost:3001";
-const FAKE_STATE_FILE =
-  process.env.BETA01_FAKE_STATE_FILE ??
-  path.join(os.tmpdir(), "mike-beta01-fake-provider.json");
+// Gate 2 fix A: el spec lee el MISMO path que el runner crea/exporta dentro
+// de SMOKE_DIR (BETA01_FAKE_STATE_FILE). NO hay fallback: un path arbitrario
+// heredado (p.ej. un archivo viejo de una corrida anterior) nunca debe
+// leerse; si el runner no exportó la variable, el test falla temprano.
+const FAKE_STATE_FILE = process.env.BETA01_FAKE_STATE_FILE ?? "";
 
 const OWNER_PASSWORD = "Beta01OwnerPass-2026!";
 const REVIEWER_PASSWORD = "Beta01ReviewerPass-2026!";
@@ -622,6 +623,14 @@ test.describe("Beta 0.1 AI smoke (Gate 2)", () => {
   }) => {
     test.setTimeout(180_000);
     const config = runtimeConfig();
+    // Fail-fast: el fake state path SIEMPRE lo provee el runner (Gate 2 fix
+    // A). Sin él, no hay archivo legítimo que leer y un path arbitrario
+    // heredado jamás debe usarse.
+    if (!FAKE_STATE_FILE) {
+      throw new Error(
+        "BETA01_FAKE_STATE_FILE no exportado por el runner: el spec AI lee el fake state path owned del runner (Gate 2 fix A)",
+      );
+    }
     fs.rmSync(FAKE_STATE_FILE, { force: true });
 
     const suffix = `${Date.now()}-${randomUUID().slice(0, 8)}`;

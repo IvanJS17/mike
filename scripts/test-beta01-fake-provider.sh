@@ -14,7 +14,13 @@
 #   c3. la resolución contractual del backend (backend/src/lib/aiCitations.ts,
 #       pura, sin stack) acepta el candidato íntegro y RECHAZA el caso
 #       contractual negativo: omitir quote_sha256 (o escribirlo en mayúsculas
-#       o con un valor incorrecto) falla con citation_unresolvable.
+#       o con un valor incorrecto) falla con citation_unresolvable;
+#   c4. (Gate 2 fix A) un valor heredado arbitrario en el fake state file se
+#       limpia/reemplaza antes de mutar: el fake NUNCA lee el archivo (sus
+#       contadores viven en memoria desde 0) y saveState() reemplaza el
+#       contenido al escribir; la siembra {provider_calls:999, junk} queda
+#       sustituida por el estado real (provider_calls===1) y el residuo
+#       desaparece; el cleanup elimina el archivo con $TMP.
 #
 # Cero red: el scope de la ejecución se sirve desde un stub en memoria
 # preloaded ANTES del fake provider (el fake captura ese stub como
@@ -215,7 +221,11 @@ const expected = [
     );
   }
 
-  // Determinismo (c2): una sola llamada al provider por ejecución.
+  // Determinismo (c2): una sola llamada al provider por ejecución. El state
+  // file fue sembrado ANTES con un valor heredado arbitrario
+  // ({provider_calls:999, junk}) — Gate 2 fix A: el fake nunca lo leyó y
+  // saveState() lo reemplazó al escribir, así que provider_calls===1 sobre
+  // el archivo YA reemplazado y el residuo 'junk' desapareció.
   const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
   check(
     "provider_calls === 1",
@@ -225,6 +235,10 @@ const expected = [
   check(
     "drive_upload_calls === 0 (sin Drive en este gate)",
     state.drive_upload_calls === 0,
+  );
+  check(
+    "state file reemplazado: sin residuo del valor heredado arbitrario",
+    state.junk === undefined,
   );
 
   if (failures > 0) {
@@ -335,6 +349,11 @@ sed -i "s|__LIB_PATH__|$ROOT/backend/src/lib/aiCitations|" "$NEGATIVE_TS"
 # Runner: fake-provider contract y caso negativo, ambos sin stack.
 # ---------------------------------------------------------------------------
 STATE_FILE="$TMP/fake-state.json"
+# Gate 2 fix A: el state file nace con un valor heredado arbitrario (como un
+# archivo viejo de una corrida anterior). El fake no lee ese contenido y
+# saveState() lo reemplaza al escribir; el driver afirma provider_calls===1 y
+# la ausencia del residuo 'junk' sobre el archivo YA reemplazado.
+printf '%s\n' '{"provider_calls":999,"drive_upload_calls":7,"junk":"arbitrary"}' >"$STATE_FILE"
 
 set +e
 (

@@ -19,7 +19,13 @@
 #   - única otra opción: e2e/beta01-ai-smoke.spec.ts (Gate 2 IA, receipts y
 #     citations sintéticos);
 #   - cualquier otro valor (path, flags, whitespace) falla ANTES de cualquier
-#     acción de stack o mutación del repositorio.
+#     acción de stack o mutación del repositorio;
+#   - BETA01_FAKE_STATE_FILE (Gate 2 fix A): path owned por el runner dentro
+#     de SMOKE_DIR, exportado ANTES de arrancar backend/fakes e inicializado
+#     vacío (ningún valor heredado/arbitrario llega a hijos); beta01-fakes.cjs
+#     persiste ahí provider/drive counters y el spec AI afirma provider=1/
+#     drive=0 leyendo ese mismo path; el teardown lo elimina junto con
+#     SMOKE_DIR y nunca imprime su contenido.
 #
 # Teardown is unconditional (trap EXIT): every process and container this
 # script started is stopped/removed, and it fails if any of its own
@@ -72,6 +78,15 @@ BUILD_LOG="$SMOKE_DIR/frontend-build.log"
 # com.mike.beta01.run) and scopes the ownership state file.
 RUN_ID="$(basename "$SMOKE_DIR")"
 MINIO_STATE="$SMOKE_DIR/minio-owner.json"
+# Gate 2 fix A: fake state file owned by the runner. BETA01_FAKE_STATE_FILE
+# apunta SIEMPRE al archivo de ESTA corrida dentro de SMOKE_DIR, así ningún
+# valor heredado/arbitrario llega al backend ni al spec; se exporta ANTES de
+# arrancar backend/fakes y se inicializa vacío para que ningún contenido
+# viejo pueda leerse (beta01-fakes.cjs escribe aquí provider/drive counters;
+# el teardown elimina el archivo junto con SMOKE_DIR y nunca lo imprime).
+FAKE_STATE_FILE="$SMOKE_DIR/fake-state.json"
+export BETA01_FAKE_STATE_FILE="$FAKE_STATE_FILE"
+: >"$BETA01_FAKE_STATE_FILE" && chmod 600 "$BETA01_FAKE_STATE_FILE"
 
 BACKEND_PID=""
 FRONTEND_PID=""
