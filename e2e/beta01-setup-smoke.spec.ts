@@ -71,13 +71,21 @@ type AuthAdminClient = {
   deleteUser(id: string): Promise<void>;
 };
 
-// Registered-cleanup API backed by TrackedCleanup (helper): every business
-// resource registers its deleteFn as soon as its ID is known; run() removes
-// them in reverse registration order (children before parents) and reports
-// any failure without skipping the remaining steps.
-type TrackedCleanupApi = {
-  register(label: string, deleteFn: () => Promise<void>): TrackedCleanupApi;
-  size: number;
+// Project-aware cleanup API backed by ProjectCleanup (helper
+// e2e/support/beta01-project-cleanup.cjs): registerProjectMarker() se llama
+// ANTES de disparar la creación UI con el marcador único owner_id +
+// project_name, así un project ID perdido/vencido o un body que no parsea se
+// reconcilian en run() (findProjectByMarker); organization/workspace/matter
+// usan UUID preasignados registrados ANTES de cada POST (ausencia
+// idempotente). run() ejecuta deleteAndVerifyProject PRIMERO (observa
+// documents/versions/storage antes de borrar rows y exige read-back cero +
+// objetos cero en MinIO/R2) y después el cleanup organization/cascade. NO hay
+// callbacks directos de document/version/matter: romperían el descubrimiento
+// de storage.
+type ProjectCleanupApi = {
+  registerProjectMarker(ownerId: string, projectName: string): ProjectCleanupApi;
+  adoptProjectId(projectId: string): ProjectCleanupApi;
+  registerUuid(table: string, id: string): ProjectCleanupApi;
   run(): Promise<void>;
 };
 
@@ -89,7 +97,6 @@ const {
   OWNER_FIXTURE,
   ensureFixtureUser,
   cleanLegacyOwnerUsers,
-  TrackedCleanup,
 } = require("../support/beta01-user-fixture.cjs") as {
   OWNER_FIXTURE: { email: string; password: string };
   ensureFixtureUser(
@@ -103,7 +110,33 @@ const {
     authAdmin: AuthAdminClient,
     fixtureEmail: string,
   ): Promise<number>;
-  TrackedCleanup: new () => TrackedCleanupApi;
+};
+
+const { ProjectCleanup } = require("../support/beta01-project-cleanup.cjs") as {
+  ProjectCleanup: new (clients: ProjectCleanupClients) => ProjectCleanupApi;
+};
+
+// Client surface que ProjectCleanup inyecta. La MISMA interfaz se falsifica
+// en scripts/test-beta01-project-cleanup.sh (cero red); aquí se implementa
+// contra el stack local real: REST de Supabase (read-back/count/delete por
+// UUID preasignado), API del backend (DELETE /projects/:id con el token del
+// owner) y probe directo de objetos en MinIO/R2 (S3-compatible).
+type ProjectCleanupClients = {
+  findProjectByMarker(
+    ownerId: string,
+    projectName: string,
+  ): Promise<string | null>;
+  loadProjectScope(projectId: string): Promise<{
+    documentIds: string[];
+    versionIds: string[];
+    storagePaths: string[];
+    executionIds: string[];
+    reviewIds: string[];
+  }>;
+  deleteProject(projectId: string): Promise<{ status: number; text: string }>;
+  count(table: string, column: string, values: string[]): Promise<number>;
+  deleteUuid(table: string, id: string): Promise<{ status: number; text: string }>;
+  storagePathsExist(paths: string[]): Promise<string[]>;
 };
 
 // Same guard the smoke runner uses as fail-fast; it throws with sanitized
@@ -327,12 +360,17 @@ async function createProjectAndUploadDocx(
   projectName: string,
   config: RuntimeConfig,
   owner: AuthUser,
-  cleanup: TrackedCleanupApi,
+  cleanup: ProjectCleanupApi,
 ): Promise<{
   projectId: string;
   uploadStatus: number;
   uploadBody: Record<string, unknown>;
 }> {
+  // ANTES de disparar la creación UI se registra el marcador único
+  // owner_id + project_name: aunque la respuesta de create/upload se pierda o
+  // su body no parsee, run() reconcilia el project ID por marcador.
+  cleanup.registerProjectMarker(owner.id, projectName);
+
   await page.goto("/projects");
   await expect(page.getByRole("button", { name: "New project" })).toBeVisible({
     timeout: 15_000,
@@ -357,9 +395,12 @@ async function createProjectAndUploadDocx(
   const uploaded = await uploadResponse;
 
   // El POST /projects/<id>/documents es la confirmación SERVER-SIDE de la
-  // creación: los IDs de proyecto/documento/versión se registran aquí mismo
-  // ("conforme se crean"), antes de esperar la navegación UI, para que un
-  // fallo posterior no deje recursos sin limpiar.
+  // creación: el project ID se adopta en cuanto la URL lo revela, antes de
+  // esperar la navegación UI, para que un fallo posterior no deje recursos
+  // sin limpiar. NO se registran callbacks directos de document/version:
+  // deleteAndVerifyProject (run()) borra primero el proyecto para ver
+  // documents/versions/storage y verifica read-back cero + objetos cero en
+  // MinIO/R2.
   const projectId = uploaded
     .url()
     .match(/\/projects\/([0-9a-f-]{36})\/documents$/)?.[1];
@@ -367,26 +408,12 @@ async function createProjectAndUploadDocx(
     throw new Error(
       `Could not read project ID from upload response ${uploaded.url()}`,
     );
+  cleanup.adoptProjectId(projectId);
   const uploadBody = JSON.parse(await uploaded.text()) as Record<
     string,
     unknown
   >;
-  cleanup.register("project", () =>
-    deleteAndVerifyProject(config, owner, projectId),
-  );
   const uploadStatus = uploaded.status();
-  if (uploadStatus >= 200 && uploadStatus < 300) {
-    cleanup.register("document", () =>
-      deleteRowById(config, "documents", String(uploadBody.id)),
-    );
-    cleanup.register("version", () =>
-      deleteRowById(
-        config,
-        "document_versions",
-        String(uploadBody.current_version_id),
-      ),
-    );
-  }
 
   await page.waitForURL(/\/projects\/[0-9a-f-]{36}$/, { timeout: 45_000 });
   return { projectId, uploadStatus, uploadBody };
@@ -396,28 +423,27 @@ async function seedPrivateMatter(
   config: RuntimeConfig,
   projectId: string,
   owner: AuthUser,
-  cleanup: TrackedCleanupApi,
+  cleanup: ProjectCleanupApi,
 ): Promise<{ organizationId: string; matterId: string }> {
   const organizationId = randomUUID();
   const workspaceId = randomUUID();
   const matterId = randomUUID();
   const suffix = organizationId.slice(0, 8);
 
+  // UUIDs preasignados y registrados ANTES de cada POST: si el POST no
+  // ocurrió, la ausencia es idempotente (404/cero filas en el delete).
+  cleanup.registerUuid("organizations", organizationId);
   await restInsert(config, "organizations", {
     id: organizationId,
     name: `Beta 0.1 synthetic org ${suffix}`,
     created_by: owner.id,
   });
-  // Registro inmediato: si cualquier insert posterior falla, el cleanup
-  // final elimina la organización (el DELETE REST cascada sus recursos).
-  cleanup.register("organization", () =>
-    deleteAndVerifyOrganization(config, organizationId),
-  );
   await restInsert(config, "organization_memberships", {
     organization_id: organizationId,
     user_id: owner.id,
     role: "org_owner",
   });
+  cleanup.registerUuid("workspaces", workspaceId);
   await restInsert(config, "workspaces", {
     id: workspaceId,
     organization_id: organizationId,
@@ -429,6 +455,7 @@ async function seedPrivateMatter(
     user_id: owner.id,
     role: "workspace_admin",
   });
+  cleanup.registerUuid("matters", matterId);
   await restInsert(config, "matters", {
     id: matterId,
     workspace_id: workspaceId,
@@ -438,9 +465,6 @@ async function seedPrivateMatter(
     created_by: owner.id,
     drive_folder_id: "beta01-shared-drive-folder",
   });
-  cleanup.register("matter", () =>
-    deleteRowById(config, "matters", matterId),
-  );
   await restInsert(config, "matter_memberships", {
     matter_id: matterId,
     user_id: owner.id,
@@ -449,86 +473,212 @@ async function seedPrivateMatter(
   return { organizationId, matterId };
 }
 
-async function deleteAndVerifyProject(
-  config: RuntimeConfig,
-  owner: AuthUser,
-  projectId: string,
-): Promise<void> {
-  const result = await apiRequest(owner.accessToken, `/projects/${projectId}`, {
-    method: "DELETE",
+// ---------------------------------------------------------------------------
+// Clientes reales para ProjectCleanup (contra el stack local).
+// ---------------------------------------------------------------------------
+
+function readEnvValue(key: string): string | undefined {
+  if (process.env[key]) return process.env[key];
+  const files = [
+    path.join(__dirname, "..", "backend", ".env"),
+    path.join(__dirname, "..", "frontend", ".env.local"),
+  ];
+  let value: string | undefined;
+  for (const file of files) {
+    try {
+      for (const line of fs.readFileSync(file, "utf8").split("\n")) {
+        const match = line.match(new RegExp(`^${key}=(.*)$`));
+        if (match) value = match[1].trim().replace(/^"(.*)"$/, "$1");
+      }
+    } catch {
+      // The local-stack setup may not have created an env file yet.
+    }
+  }
+  return value;
+}
+
+// Probe real de MinIO/R2: HeadObject por path (S3-compatible); NotFound = el
+// objeto ya no existe. Devuelve SOLO los paths que aún existen. Se usa el SDK
+// del backend (el harness ya lo instala para el backend).
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { S3Client, HeadObjectCommand } = require(
+  path.join(
+    __dirname,
+    "..",
+    "backend",
+    "node_modules",
+    "@aws-sdk",
+    "client-s3",
+  ),
+) as {
+  S3Client: new (opts: Record<string, unknown>) => {
+    send(command: unknown): Promise<unknown>;
+  };
+  HeadObjectCommand: new (opts: Record<string, unknown>) => unknown;
+};
+
+async function storagePathsExistImpl(paths: string[]): Promise<string[]> {
+  if (paths.length === 0) return [];
+  const endpoint = readEnvValue("R2_ENDPOINT_URL");
+  const accessKeyId = readEnvValue("R2_ACCESS_KEY_ID");
+  const secretAccessKey = readEnvValue("R2_SECRET_ACCESS_KEY");
+  const bucket = readEnvValue("R2_BUCKET_NAME") ?? "mike";
+  if (!endpoint || !accessKeyId || !secretAccessKey) {
+    throw new Error(
+      "storagePathsExist: R2_ENDPOINT_URL/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY son requeridos (stack local)",
+    );
+  }
+  const client = new S3Client({
+    region: "auto",
+    endpoint,
+    forcePathStyle: true,
+    credentials: { accessKeyId, secretAccessKey },
   });
-  if (result.status !== 204 && result.status !== 404) {
-    throw new Error(`Project cleanup failed: ${result.status} ${result.text}`);
+  const stillThere: string[] = [];
+  for (const key of paths) {
+    try {
+      await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+      stillThere.push(key);
+    } catch (error) {
+      if ((error as { name?: string })?.name === "NotFound") continue;
+      throw error;
+    }
   }
-  const remainingProject = await restRequest(
-    config,
-    "projects",
-    `?select=id&id=eq.${encodeURIComponent(projectId)}`,
-  );
-  if (
-    remainingProject.status < 200 ||
-    remainingProject.status >= 300 ||
-    (Array.isArray(remainingProject.data) &&
-      remainingProject.data.length > 0)
-  ) {
-    throw new Error(
-      `Project cleanup verification failed: ${remainingProject.text}`,
-    );
-  }
+  return stillThere;
 }
 
-async function deleteAndVerifyOrganization(
-  config: RuntimeConfig,
-  organizationId: string,
-): Promise<void> {
-  const result = await restRequest(
-    config,
-    "organizations",
-    `?id=eq.${encodeURIComponent(organizationId)}`,
-    { method: "DELETE", headers: { Prefer: "return=minimal" } },
-  );
-  if (result.status < 200 || result.status >= 300) {
-    throw new Error(
-      `Organization cleanup failed: ${result.status} ${result.text}`,
-    );
-  }
-  const remainingOrganization = await restRequest(
-    config,
-    "organizations",
-    `?select=id&id=eq.${encodeURIComponent(organizationId)}`,
-  );
-  if (
-    remainingOrganization.status < 200 ||
-    remainingOrganization.status >= 300 ||
-    (Array.isArray(remainingOrganization.data) &&
-      remainingOrganization.data.length > 0)
-  ) {
-    throw new Error(
-      `Organization cleanup verification failed: ${remainingOrganization.text}`,
-    );
-  }
-}
-
-// Delete idempotente de una fila por ID: 2xx o 404 = ya no existe; cualquier
-// otro estado es un fallo real de limpieza (lo reporta TrackedCleanup sin
-// detener el resto de los pasos).
-async function deleteRowById(
+async function countRows(
   config: RuntimeConfig,
   table: string,
-  id: string,
-): Promise<void> {
-  const result = await restRequest(
-    config,
-    table,
-    `?id=eq.${encodeURIComponent(id)}`,
-    { method: "DELETE", headers: { Prefer: "return=minimal" } },
-  );
+  column: string,
+  values: string[],
+): Promise<number> {
+  if (values.length === 0) return 0;
+  const encoded = values.map((value) => encodeURIComponent(value)).join(",");
+  const filter =
+    values.length === 1
+      ? `${column}=eq.${encodeURIComponent(values[0])}`
+      : `${column}=in.(${encoded})`;
+  const result = await restRequest(config, table, `?select=id&${filter}`);
   if (result.status < 200 || result.status >= 300) {
-    if (result.status === 404) return;
     throw new Error(
-      `DELETE ${table} ${id} failed: ${result.status} ${result.text}`,
+      `read-back ${table} ${filter} failed: ${result.status} ${result.text}`,
     );
   }
+  return Array.isArray(result.data) ? result.data.length : 0;
+}
+
+// Igual que restRequest pero devolviendo filas tipadas para scope.
+async function restRows(
+  config: RuntimeConfig,
+  table: string,
+  query: string,
+): Promise<Record<string, unknown>[]> {
+  const result = await restRequest(config, table, query);
+  if (result.status < 200 || result.status >= 300) {
+    throw new Error(
+      `read ${table} failed: ${result.status} ${result.text}`,
+    );
+  }
+  return Array.isArray(result.data) ? (result.data as Record<string, unknown>[]) : [];
+}
+
+function createProjectCleanupClients(
+  config: RuntimeConfig,
+  owner: AuthUser,
+): ProjectCleanupClients {
+  return {
+    // Reconciliación por marcador único owner_id + project_name: el project
+    // ID se busca aunque la respuesta de create/upload se haya perdido.
+    async findProjectByMarker(ownerId, projectName) {
+      const rows = await restRows(
+        config,
+        "projects",
+        `?select=id&user_id=eq.${encodeURIComponent(ownerId)}&name=eq.${encodeURIComponent(projectName)}`,
+      );
+      return rows.length > 0 ? String(rows[0].id) : null;
+    },
+
+    // Observa documents/versions/storage ANTES de borrar rows.
+    async loadProjectScope(projectId) {
+      const documentRows = await restRows(
+        config,
+        "documents",
+        `?select=id&project_id=eq.${encodeURIComponent(projectId)}`,
+      );
+      const documentIds = documentRows.map((row) => String(row.id));
+      let versionIds: string[] = [];
+      let storagePaths: string[] = [];
+      if (documentIds.length > 0) {
+        const versionRows = await restRows(
+          config,
+          "document_versions",
+          `?select=id,storage_path,pdf_storage_path&document_id=in.(${documentIds.map(encodeURIComponent).join(",")})`,
+        );
+        for (const version of versionRows) {
+          versionIds.push(String(version.id));
+          if (typeof version.storage_path === "string" && version.storage_path.length > 0) {
+            storagePaths.push(version.storage_path);
+          }
+          if (
+            typeof version.pdf_storage_path === "string" &&
+            version.pdf_storage_path.length > 0
+          ) {
+            storagePaths.push(version.pdf_storage_path);
+          }
+        }
+      }
+      const executionRows = await restRows(
+        config,
+        "ai_executions",
+        `?select=id&project_id=eq.${encodeURIComponent(projectId)}`,
+      );
+      const executionIds = executionRows.map((row) => String(row.id));
+      const reviewRows = await restRows(
+        config,
+        "ai_reviews",
+        `?select=id&project_id=eq.${encodeURIComponent(projectId)}`,
+      );
+      return {
+        documentIds,
+        versionIds,
+        storagePaths,
+        executionIds,
+        reviewIds: reviewRows.map((row) => String(row.id)),
+      };
+    },
+
+    async deleteProject(projectId) {
+      return apiRequest(owner.accessToken, `/projects/${projectId}`, {
+        method: "DELETE",
+      });
+    },
+
+    async count(table, column, values) {
+      return countRows(config, table, column, values);
+    },
+
+    // REST DELETE idempotente por UUID preasignado: 2xx o 404 = ausencia.
+    async deleteUuid(table, id) {
+      const result = await restRequest(
+        config,
+        table,
+        `?id=eq.${encodeURIComponent(id)}`,
+        { method: "DELETE", headers: { Prefer: "return=minimal" } },
+      );
+      if (result.status === 404) return { status: result.status, text: result.text };
+      if (result.status < 200 || result.status >= 300) {
+        throw new Error(
+          `DELETE ${table} ${id} failed: ${result.status} ${result.text}`,
+        );
+      }
+      return { status: result.status, text: result.text };
+    },
+
+    async storagePathsExist(paths) {
+      return storagePathsExistImpl(paths);
+    },
+  };
 }
 
 test.describe("Beta 0.1 setup smoke", () => {
@@ -556,10 +706,15 @@ test.describe("Beta 0.1 setup smoke", () => {
     const ownerSeed = await ensureFixtureUser(authAdmin, OWNER_FIXTURE);
     const owner = await signIn(config, ownerSeed.user);
 
-    // Recursos de negocio: se registran conforme se crean; aunque falle
-    // cualquier step, el finally elimina los IDs ya capturados en orden
-    // seguro (hijos antes que padres).
-    const cleanup = new TrackedCleanup();
+    // Recursos de negocio: cleanup project-aware (Gate 1, fix 2b) — el
+    // marcador único owner_id + project_name se registra ANTES de la creación
+    // UI y los UUID de organization/workspace/matter se registran antes de
+    // cada POST. run() borra primero el proyecto (observando documents/
+    // versions/storage), verifica read-back cero y objetos cero en MinIO/R2,
+    // y después aplica el cleanup organization/cascade.
+    const cleanup = new ProjectCleanup(
+      createProjectCleanupClients(config, owner),
+    );
     try {
       await loginInUi(page, owner);
       const suffix = `${Date.now()}-${randomUUID().slice(0, 8)}`;
@@ -647,10 +802,11 @@ test.describe("Beta 0.1 setup smoke", () => {
       );
       expect(listed).toBeTruthy();
     } finally {
-      // Teardown (criterio Gate 1 fix 2): cero recursos de negocio por
-      // corrida — cada ID se registró conforme se creó y TrackedCleanup
-      // elimina los conocidos en orden seguro (versión/documento/matter/
-      // organización/proyecto) aunque un step haya fallado.
+      // Teardown (criterio Gate 1 fix 2b): cero recursos de negocio y cero
+      // objetos por corrida — deleteAndVerifyProject borra primero el
+      // proyecto (viendo documents/versions/storage) y verifica read-back
+      // cero + objetos cero; después se limpia organization/cascade con los
+      // UUID preasignados. Cualquier residuo hace FAIL (run() lanza).
       // NO se afirma "cero usuarios": la cuenta auth fixture determinista
       // (beta01-owner@local.test) permanece y es EXACTAMENTE una cuenta
       // reutilizable entre corridas; los legacy beta01-owner-* ya se
