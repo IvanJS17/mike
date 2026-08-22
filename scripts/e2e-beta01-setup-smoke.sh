@@ -289,6 +289,8 @@ start_servers() {
 # Teardown + residue verification
 # ---------------------------------------------------------------------------
 cleanup() {
+  local run_rc=$? cleanup_rc=0 minio_cleanup
+  trap - EXIT
   set +e
   log "teardown: stopping own servers"
   if [ -n "$BACKEND_PID" ]; then
@@ -312,14 +314,30 @@ cleanup() {
   fi
 
   log "teardown: MinIO ownership cleanup"
-  node "$MINIO_HELPER" --cleanup --state-file "$MINIO_STATE" 2>>"$MINIO_LOG"
+  minio_cleanup="$(node "$MINIO_HELPER" --cleanup --state-file "$MINIO_STATE" 2>>"$MINIO_LOG")"
   if [ $? -ne 0 ]; then
-    log "teardown FAILED — MinIO ownership cleanup failed (see $MINIO_LOG)"
+    log "teardown FAILED — MinIO ownership cleanup failed: $(jq -r '.reason // .error // "unknown failure"' <<<"${minio_cleanup:-}" 2>/dev/null) (see $MINIO_LOG)"
+    cleanup_rc=1
+  fi
+
+  verify_clean || cleanup_rc=1
+
+  if [ "$cleanup_rc" -ne 0 ]; then
+    if [ "$run_rc" -ne 0 ]; then
+      log "teardown FAILED — run exit code $run_rc and cleanup both failed; preserving $SMOKE_DIR"
+    else
+      log "teardown FAILED — cleanup failed; preserving $SMOKE_DIR"
+    fi
     exit 1
   fi
 
-  verify_clean
   rm -rf "$SMOKE_DIR"
+  if [ "$run_rc" -ne 0 ]; then
+    log "teardown verified after run failure (exit code $run_rc) — result remains FAILED"
+    exit "$run_rc"
+  fi
+  log "teardown OK — zero own processes/containers left"
+  exit 0
 }
 
 verify_clean() {
@@ -349,9 +367,9 @@ verify_clean() {
 
   if [ "$residue" = "1" ]; then
     log "teardown FAILED — residue of the smoke remains"
-    exit 1
+    return 1
   fi
-  log "teardown OK — zero own processes/containers left"
+  return 0
 }
 
 # ---------------------------------------------------------------------------

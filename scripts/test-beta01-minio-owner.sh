@@ -30,10 +30,11 @@
 #       persistido (started=pending + createdId) ANTES del inspect; si el
 #       inspect posterior falla, el cleanup del trap elimina/verifica SÓLO ese
 #       ID;
-#   c8. fallos de SAVE post-run: si falla el save final, pending+createdId
-#       siguen en disco para el trap; si falla el PRIMER save pending, create
-#       compensa inmediatamente por el ID stdout exacto, verifica desaparición
-#       y propaga el error original (o uno compuesto si rm/verificación falla);
+#   c8. fallos de SAVE post-run: antes de `docker run` queda `started=armed`
+#       durable; si falla el save final, pending+createdId siguen en disco para
+#       el trap; si falla el PRIMER save pending, create compensa por el ID
+#       stdout exacto. Sólo una compensación verificada desarma; rm/verificación
+#       fallidos dejan `armed` y un fresh-trap/CLI cleanup debe FALLAR;
 #   c9. drift de HEALTH del preexistente (reuse): verify/cleanup FAIL sin mutar;
 #   c10. drift de LABELS fixture/owner/run del preexistente (reuse):
 #       verify/cleanup FAIL sin mutar.
@@ -409,9 +410,17 @@ async function main() {
   // -------------------------------------------------------------------------
   {
     // c5a: run falla sin crear nada -> nada que eliminar, cero rm.
+    const statePath = path.join(TMP_DIR, "c5a-state.json");
     const fake = fakeDocker();
     fake.set("failRun", true);
-    const ownership = new MinioOwnership({ exec: fake.exec, runId: "run-5a" });
+    let stateAtRun = null;
+    const exec = async (args) => {
+      if (args[0] === "run") {
+        stateAtRun = JSON.parse(fs.readFileSync(statePath, "utf8"));
+      }
+      return fake.exec(args);
+    };
+    const ownership = new MinioOwnership({ exec, runId: "run-5a", statePath });
     await ownership.snapshot(); // absent -> create
     let createError = null;
     try {
@@ -420,13 +429,60 @@ async function main() {
       createError = err;
     }
     check("c5a run failure is reported", createError !== null && /docker run failed/.test(createError.message), createError ? createError.message : "no error");
+    check("c5a durable armed state exists BEFORE docker run",
+      stateAtRun !== null && stateAtRun.started === "armed" && stateAtRun.runId === "run-5a" && stateAtRun.createdId === null,
+      JSON.stringify(stateAtRun));
     check("c5a nothing adopted (started=no)", ownership.state.started === "no", ownership.state.started);
+    const persistedAfterRunFailure = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    check("c5a normal run failure disarms durably",
+      persistedAfterRunFailure.started === "no" && persistedAfterRunFailure.createdId === null,
+      JSON.stringify(persistedAfterRunFailure));
     const cleaned = await ownership.cleanup();
     check("c5a cleanup ok, nothing deleted", cleaned.ok === true, cleaned.note || "");
     check("c5a ZERO rm calls",
       fake.events.filter((e) => e.startsWith("rm ")).length === 0,
       fake.events.filter((e) => e.startsWith("rm ")).join(" | ") || "(none)");
     check("c5a no containers in fake", fake.containers.size === 0);
+
+    // c5a2: si docker run falla y el save que debía desarmar también falla,
+    // el último estado durable sigue armed y un cleanup fresco falla cerrado.
+    const statePathA2 = path.join(TMP_DIR, "c5a2-state.json");
+    const fakeA2 = fakeDocker();
+    fakeA2.set("failRun", true);
+    const ownershipA2 = new MinioOwnership({ exec: fakeA2.exec, runId: "run-5a2", statePath: statePathA2 });
+    await ownershipA2.snapshot();
+    const realSaveA2 = ownershipA2.saveState.bind(ownershipA2);
+    let armedSavedA2 = false;
+    ownershipA2.saveState = function () {
+      if (ownershipA2.state.started === "armed") {
+        realSaveA2();
+        armedSavedA2 = true;
+        return;
+      }
+      if (armedSavedA2 && ownershipA2.state.started === "no") {
+        throw new Error("fake: disarm save denied");
+      }
+      return realSaveA2();
+    };
+    let createErrorA2 = null;
+    try {
+      await ownershipA2.create(IMAGE);
+    } catch (err) {
+      createErrorA2 = err;
+    }
+    check("c5a2 run + disarm-save failure yields compound error",
+      createErrorA2 !== null && /docker run failed/.test(createErrorA2.message) && /desarmar/.test(createErrorA2.message) && /disarm save denied/.test(createErrorA2.message),
+      createErrorA2 ? createErrorA2.message : "no error");
+    const persistedA2 = JSON.parse(fs.readFileSync(statePathA2, "utf8"));
+    check("c5a2 failed disarm leaves durable armed evidence",
+      persistedA2.started === "armed" && persistedA2.runId === "run-5a2",
+      JSON.stringify(persistedA2));
+    const freshCleanupA2 = await runCli(["--cleanup", "--state-file", statePathA2], fakeA2.exec);
+    check("c5a2 fresh cleanup remains FAIL after disarm failure",
+      freshCleanupA2.exitCode === 1 && freshCleanupA2.output.ok === false && /armed/.test(freshCleanupA2.output.reason || ""),
+      JSON.stringify(freshCleanupA2.output));
+    check("c5a2 failed run/disarm never deletes anything",
+      fakeA2.events.filter((e) => e.startsWith("rm ")).length === 0);
 
     // c5b: un AJENO tomó el nombre antes de nuestro run; nuestro run falla
     // (conflicto de nombre) y el ajeno NUNCA se adopta ni se borra.
@@ -660,7 +716,7 @@ async function main() {
       createError === originalSaveError,
       createError ? createError.message : "no error");
     const persisted = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    check("c8b compensation does not depend on pending state-file",
+    check("c8b verified compensation disarms durable armed state",
       persisted.started === "no" && persisted.createdId === null,
       `started=${persisted.started} createdId=${persisted.createdId}`);
     check("c8b zero own residue after immediate compensation", !fake.byId.has("cid-1"));
@@ -706,6 +762,15 @@ async function main() {
     check("c8c failed compensation never claims cleanup OK",
       createError !== null && !/cleanup (ok|OK)/.test(createError.message));
     check("c8c rm failure leaves explicit observable residue", fake.byId.has("cid-1"));
+    const persisted = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    check("c8c failed rm leaves durable armed evidence",
+      persisted.started === "armed" && persisted.createdId === null && persisted.runId === "run-8c",
+      JSON.stringify(persisted));
+    const freshCleanup = await runCli(["--cleanup", "--state-file", statePath], fake.exec);
+    check("c8c CLI fresh-trap cleanup FAILS closed on armed",
+      freshCleanup.exitCode === 1 && freshCleanup.output.ok === false && /armed/.test(freshCleanup.output.reason || ""),
+      JSON.stringify(freshCleanup.output));
+    check("c8c fresh trap keeps exact-ID residue observable", fake.byId.has("cid-1"));
     const rms = fake.events.filter((e) => e.startsWith("rm "));
     check("c8c failed rm still targeted exact stdout ID",
       rms.length === 1 && rms[0] === "rm -f cid-1",
@@ -741,6 +806,15 @@ async function main() {
     check("c8d verification failure never claims cleanup OK",
       createError !== null && !/cleanup (ok|OK)/.test(createError.message));
     check("c8d verification exposes remaining exact-ID residue", fake.byId.has("cid-1"));
+    const persisted = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    check("c8d residue verification leaves durable armed evidence",
+      persisted.started === "armed" && persisted.createdId === null && persisted.runId === "run-8d",
+      JSON.stringify(persisted));
+    const freshCleanup = await runCli(["--cleanup", "--state-file", statePath], fake.exec);
+    check("c8d CLI fresh-trap cleanup FAILS closed on armed",
+      freshCleanup.exitCode === 1 && freshCleanup.output.ok === false && /armed/.test(freshCleanup.output.reason || ""),
+      JSON.stringify(freshCleanup.output));
+    check("c8d fresh trap preserves observable exact-ID residue", fake.byId.has("cid-1"));
     const idInspects = fake.events.filter((e) => e === "container inspect cid-1");
     check("c8d verification is by exact stdout ID", idInspects.length === 1, idInspects.join(" | "));
   }
@@ -859,4 +933,92 @@ main().catch((error) => {
 NODE
 
 node "$TEST_PROGRAM" "$MINIO_HELPER" "$TMP"
+
+# Runner contract: a start failure is the primary outcome. Even when MinIO's
+# trap cleanup succeeds, teardown must not print CLEAN/OK; when cleanup also
+# fails, stdout/stderr must preserve both failures and still omit CLEAN/OK.
+SMOKE_RUNNER="$ROOT/scripts/e2e-beta01-setup-smoke.sh"
+FAKE_BIN="$TMP/fake-bin"
+mkdir -p "$FAKE_BIN"
+cat >"$FAKE_BIN/docker" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "ps" ]; then exit 0; fi
+exit 0
+SH
+cat >"$FAKE_BIN/node" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" --snapshot "*) printf '%s\n' '{"mode":"create"}'; exit 0 ;;
+  *" --start "*) printf '%s\n' '{"error":"pending save failed; compensation failed"}'; exit 1 ;;
+  *" --cleanup "*)
+    if [ "${FAKE_MINIO_CLEANUP_FAIL:-no}" = "yes" ]; then
+      printf '%s\n' '{"ok":false,"reason":"armed: docker run outcome unknown"}'
+      exit 1
+    fi
+    printf '%s\n' '{"ok":true,"note":"compensated and disarmed"}'
+    exit 0
+    ;;
+esac
+exit 1
+SH
+cat >"$FAKE_BIN/npx" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+cat >"$FAKE_BIN/ps" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$FAKE_BIN/docker" "$FAKE_BIN/node" "$FAKE_BIN/npx" "$FAKE_BIN/ps"
+
+run_runner_case() {
+  local cleanup_fail="$1" output_file="$2" rc
+  set +e
+  FAKE_MINIO_CLEANUP_FAIL="$cleanup_fail" PATH="$FAKE_BIN:$PATH" \
+    bash "$SMOKE_RUNNER" >"$output_file" 2>&1
+  rc=$?
+  set -e
+  printf '%s' "$rc"
+}
+
+RUNNER_CLEANED_LOG="$TMP/runner-cleaned.log"
+RUNNER_CLEANED_RC="$(run_runner_case no "$RUNNER_CLEANED_LOG")"
+[ "$RUNNER_CLEANED_RC" = "1" ] || {
+  printf 'FAIL runner preserves start failure after successful compensation — rc=%s\n' "$RUNNER_CLEANED_RC" >&2
+  exit 1
+}
+grep -q 'MinIO container create failed' "$RUNNER_CLEANED_LOG" || {
+  printf 'FAIL runner lost original MinIO start failure\n' >&2
+  exit 1
+}
+if grep -q 'teardown OK' "$RUNNER_CLEANED_LOG"; then
+  printf 'FAIL runner printed teardown OK after MinIO start failure\n' >&2
+  exit 1
+fi
+if grep -q '"ok":true' "$RUNNER_CLEANED_LOG"; then
+  printf 'FAIL runner printed cleanup OK JSON after MinIO start failure\n' >&2
+  exit 1
+fi
+printf 'PASS runner preserves start failure and omits teardown OK after compensated cleanup\n'
+
+RUNNER_DOUBLE_LOG="$TMP/runner-double-failure.log"
+RUNNER_DOUBLE_RC="$(run_runner_case yes "$RUNNER_DOUBLE_LOG")"
+[ "$RUNNER_DOUBLE_RC" = "1" ] || {
+  printf 'FAIL runner double failure must exit 1 — rc=%s\n' "$RUNNER_DOUBLE_RC" >&2
+  exit 1
+}
+grep -q 'MinIO container create failed' "$RUNNER_DOUBLE_LOG" || {
+  printf 'FAIL runner double failure lost original start failure\n' >&2
+  exit 1
+}
+grep -q 'MinIO ownership cleanup failed' "$RUNNER_DOUBLE_LOG" || {
+  printf 'FAIL runner double failure lost fresh-trap cleanup failure\n' >&2
+  exit 1
+}
+if grep -q 'teardown OK' "$RUNNER_DOUBLE_LOG"; then
+  printf 'FAIL runner printed teardown OK after double MinIO failure\n' >&2
+  exit 1
+fi
+printf 'PASS runner combines start + fresh-trap cleanup failures and omits teardown OK\n'
+
 echo "ALL PASS — beta01 MinIO ownership contractual test OK"

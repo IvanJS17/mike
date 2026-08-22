@@ -6,9 +6,10 @@
 // belongs to THIS smoke run:
 //
 //   container absent
-//     -> this run CREATES it with fixture/owner/run labels; the ONLY owned
-//        identity is the container ID `docker run` prints, persisted
-//        (started=pending + createdId + runId) BEFORE any later inspect;
+//     -> this run CREATES it with fixture/owner/run labels; state is armed
+//        durably BEFORE `docker run`, then its stdout container ID becomes the
+//        ONLY owned identity and is persisted as started=pending + createdId +
+//        runId BEFORE any later inspect;
 //        teardown inspects/removes/verifies ONLY that ID — a failed run
 //        adopts or deletes NOTHING, and a substitute that took the name is
 //        never touched;
@@ -87,6 +88,23 @@ class MinioOwnership {
     fs.renameSync(tmp, this.statePath);
   }
 
+  // Keep memory aligned with the last durable state when an atomic save
+  // fails. create() and an in-process cleanup may share this instance, while
+  // the EXIT trap opens a fresh one from the same state file.
+  persistCreationState(started, createdId) {
+    const previousStarted = this.state.started;
+    const previousCreatedId = this.state.createdId;
+    this.state.started = started;
+    this.state.createdId = createdId;
+    try {
+      this.saveState();
+    } catch (err) {
+      this.state.started = previousStarted;
+      this.state.createdId = previousCreatedId;
+      throw err;
+    }
+  }
+
   // Result of `docker container inspect <ref>` (ref = container ID or name).
   // Callers MUST pass the ID recorded in the ownership state: the name is
   // mutable and snapshot() uses it exactly ONCE, to DISCOVER the container;
@@ -162,11 +180,10 @@ class MinioOwnership {
     return problems.length === 0 ? null : `drift del preexistente: ${problems.join("; ")}`;
   }
 
-  // `docker run` already returned an immutable identity, but the first
-  // started=pending save failed. The state file therefore cannot prove
-  // ownership to a later trap: compensate NOW, using only that stdout ID.
-  // A successful compensation rethrows the original save error unchanged;
-  // any rm/verification failure becomes an explicit compound error.
+  // `docker run` returned an immutable identity, but the started=pending save
+  // failed, so the durable file remains armed. Compensate NOW using only that
+  // stdout ID. Verified compensation is disarmed durably and rethrows the
+  // original save error; rm/verification/disarm failure keeps armed evidence.
   async compensatePendingSaveFailure(id, saveError) {
     let cleanupFailure = null;
     try {
@@ -183,9 +200,22 @@ class MinioOwnership {
       cleanupFailure = `cleanup/verificación lanzó error: ${err && err.message ? err.message : String(err)}`;
     }
 
-    if (cleanupFailure === null) throw saveError;
-
     const saveMessage = saveError && saveError.message ? saveError.message : String(saveError);
+    if (cleanupFailure === null) {
+      try {
+        this.persistCreationState("no", null);
+      } catch (disarmError) {
+        const compound = new Error(
+          `saveState(started=pending, createdId=${id}, runId=${this.state.runId}) falló: ${saveMessage}; ` +
+            `cleanup compensatorio por ID ${id} fue verificado, pero desarmar estado durable FALLÓ: ` +
+            `${disarmError && disarmError.message ? disarmError.message : String(disarmError)}`
+        );
+        compound.cause = saveError;
+        throw compound;
+      }
+      throw saveError;
+    }
+
     const compound = new Error(
       `saveState(started=pending, createdId=${id}, runId=${this.state.runId}) falló: ${saveMessage}; ` +
         `cleanup compensatorio por ID ${id} FALLÓ: ${cleanupFailure}`
@@ -270,8 +300,9 @@ class MinioOwnership {
   // Create the container ONLY when the snapshot decided mode=create. Labels
   // fixture/owner/run identify ownership, but the ONLY identity this run
   // owns is the container ID `docker run` PRINTS (never the name, which can
-  // be hijacked between run and inspect). The ID is persisted atomically
-  // (started=pending + createdId + runId) BEFORE any later inspect, so if
+  // be hijacked between run and inspect). State is armed durably before the
+  // mutation; after success the ID is persisted atomically as
+  // started=pending + createdId + runId BEFORE any later inspect, so if
   // the inspect/verify/label/save step afterwards fails, a trap-based
   // --cleanup still removes and verifies EXACTLY that ID. A failed `docker
   // run` adopts NOTHING: containers that appeared during a failed run are
@@ -282,6 +313,11 @@ class MinioOwnership {
     if (!this.state || this.state.mode !== "create") {
       throw new Error("create() requires a snapshot that decided mode=create");
     }
+
+    // Fail closed across the mutation boundary: a fresh trap distinguishes
+    // "run never attempted" from "attempted but no ID became durable".
+    this.persistCreationState("armed", null);
+
     const r = await this.exec([
       "run",
       "-d",
@@ -306,9 +342,20 @@ class MinioOwnership {
     if (r.status !== 0) {
       // Zero adoption: a failed run provides no owned ID, so whatever
       // appeared (even bearing our exact labels) is left untouched — never
-      // adopted, never deleted. State stays started=no -> cleanup removes
-      // nothing.
-      throw new Error(`docker run failed (status ${r.status}): ${firstLine(r.stderr)}`);
+      // adopted, never deleted. Disarm durably; if that save fails, the last
+      // durable state stays armed so every fresh cleanup remains FAIL.
+      const runError = new Error(`docker run failed (status ${r.status}): ${firstLine(r.stderr)}`);
+      try {
+        this.persistCreationState("no", null);
+      } catch (disarmError) {
+        const compound = new Error(
+          `${runError.message}; desarmar estado durable tras docker run fallido FALLÓ: ` +
+            `${disarmError && disarmError.message ? disarmError.message : String(disarmError)}`
+        );
+        compound.cause = runError;
+        throw compound;
+      }
+      throw runError;
     }
     const id = firstLine(r.stdout);
     if (!id || /\s/.test(id)) {
@@ -319,10 +366,8 @@ class MinioOwnership {
     // Persist ownership BEFORE inspecting. If this FIRST pending save fails,
     // a later trap cannot trust the state file, so compensate immediately by
     // the exact stdout ID and verify it disappeared before propagating error.
-    this.state.createdId = id;
-    this.state.started = "pending";
     try {
-      this.saveState();
+      this.persistCreationState("pending", id);
     } catch (saveError) {
       await this.compensatePendingSaveFailure(id, saveError);
     }
@@ -334,8 +379,7 @@ class MinioOwnership {
         `container reported created but docker inspect cannot find it — createdId ${id} persiste para teardown`
       );
     }
-    this.state.started = "yes";
-    this.saveState();
+    this.persistCreationState("yes", id);
     return { id };
   }
 
@@ -376,6 +420,14 @@ class MinioOwnership {
     }
 
     if (this.state.mode === "create") {
+      if (this.state.started === "armed") {
+        return {
+          ok: false,
+          reason:
+            `estado armed (runId=${this.state.runId || "desconocido"}): docker run fue intentado, ` +
+            "pero ningún createdId quedó durable; outcome desconocido — no se elimina por nombre",
+        };
+      }
       if (this.state.started !== "yes" && this.state.started !== "pending") {
         return { ok: true, note: "nunca se creó contenedor — nada que eliminar" };
       }
