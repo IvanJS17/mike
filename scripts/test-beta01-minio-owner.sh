@@ -30,8 +30,10 @@
 #       persistido (started=pending + createdId) ANTES del inspect; si el
 #       inspect posterior falla, el cleanup del trap elimina/verifica SÓLO ese
 #       ID;
-#   c8. fallo de SAVE post-run: started=pending + createdId siguen en disco y
-#       el cleanup del trap elimina y verifica SÓLO ese ID;
+#   c8. fallos de SAVE post-run: si falla el save final, pending+createdId
+#       siguen en disco para el trap; si falla el PRIMER save pending, create
+#       compensa inmediatamente por el ID stdout exacto, verifica desaparición
+#       y propaga el error original (o uno compuesto si rm/verificación falla);
 #   c9. drift de HEALTH del preexistente (reuse): verify/cleanup FAIL sin mutar;
 #   c10. drift de LABELS fixture/owner/run del preexistente (reuse):
 #       verify/cleanup FAIL sin mutar.
@@ -88,7 +90,13 @@ function fakeDocker() {
   const containers = new Map(); // name -> inspect document
   const byId = new Map(); // full container ID -> same documents
   const events = []; // every docker invocation, verbatim
-  const state = { failRun: false, runCreatesThenFails: false, failInspects: 0 };
+  const state = {
+    failRun: false,
+    runCreatesThenFails: false,
+    failInspects: 0,
+    failRm: false,
+    rmLeavesResidue: false,
+  };
   let nextId = 0;
 
   function addContainer(name, props = {}) {
@@ -163,7 +171,10 @@ function fakeDocker() {
       const target = rest[rest[0] === "-f" ? 1 : 0];
       const found = resolve(target);
       if (!found) return { status: 1, stdout: "", stderr: `Error: No such container: ${target}` };
-      dropById(found.doc.Id);
+      if (state.failRm) {
+        return { status: 1, stdout: "", stderr: "fake: permission denied removing container" };
+      }
+      if (!state.rmLeavesResidue) dropById(found.doc.Id);
       return { status: 0, stdout: "", stderr: "" };
     }
     if (cmd === "stop") {
@@ -617,6 +628,121 @@ async function main() {
     check("c8 container gone (verified by ID)", fake.containers.size === 0);
     const rms = fake.events.filter((e) => e.startsWith("rm "));
     check("c8 rm exact created ID only", rms.length === 1 && rms[0] === "rm -f cid-1", rms.join(" | "));
+  }
+
+  // c8b — el PRIMER save post-run (started=pending) falla. El state-file aún
+  // dice started=no, así que la compensación NO puede depender de él ni del
+  // nombre: debe borrar inmediatamente el ID stdout exacto, verificarlo y
+  // volver a lanzar el MISMO error original. Un sustituto y otra corrida
+  // permanecen intactos.
+  {
+    const statePath = path.join(TMP_DIR, "c8b-state.json");
+    const fake = fakeDocker();
+    fake.addContainer("other-run", { id: "cid-99", running: true, labels: { [RUN_LABEL]: "run-other" } });
+    const ownership = new MinioOwnership({ exec: fake.exec, runId: "run-8b", statePath });
+    await ownership.snapshot();
+    const originalSaveError = new Error("fake: disk full (save started=pending)");
+    const realSave = ownership.saveState.bind(ownership);
+    ownership.saveState = function () {
+      if (ownership.state.started === "pending") {
+        fake.hijackName("beta01-minio", { id: "cid-substitute", running: true, labels: {} });
+        throw originalSaveError;
+      }
+      return realSave();
+    };
+    let createError = null;
+    try {
+      await ownership.create(IMAGE);
+    } catch (err) {
+      createError = err;
+    }
+    check("c8b pending-save failure propagates SAME original error",
+      createError === originalSaveError,
+      createError ? createError.message : "no error");
+    const persisted = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    check("c8b compensation does not depend on pending state-file",
+      persisted.started === "no" && persisted.createdId === null,
+      `started=${persisted.started} createdId=${persisted.createdId}`);
+    check("c8b zero own residue after immediate compensation", !fake.byId.has("cid-1"));
+    check("c8b substitute at mutable name remains intact",
+      fake.containers.get("beta01-minio").Id === "cid-substitute");
+    check("c8b other-run remains intact", fake.byId.has("cid-99"));
+    const rms = fake.events.filter((e) => e.startsWith("rm "));
+    check("c8b compensation rm targets ONLY exact stdout ID",
+      rms.length === 1 && rms[0] === "rm -f cid-1",
+      rms.join(" | ") || "(none)");
+    const nameInspects = fake.events.filter((e) => e === "container inspect beta01-minio");
+    check("c8b compensation never inspects mutable name after snapshot",
+      nameInspects.length === 1,
+      nameInspects.join(" | ") || "(none)");
+  }
+
+  // c8c — si el rm compensatorio falla, create propaga un error COMPUESTO:
+  // conserva el save original, nombra el ID exacto y jamás reporta cleanup OK.
+  {
+    const statePath = path.join(TMP_DIR, "c8c-state.json");
+    const fake = fakeDocker();
+    const ownership = new MinioOwnership({ exec: fake.exec, runId: "run-8c", statePath });
+    await ownership.snapshot();
+    fake.set("failRm", true);
+    const realSave = ownership.saveState.bind(ownership);
+    ownership.saveState = function () {
+      if (ownership.state.started === "pending") throw new Error("fake: pending save denied");
+      return realSave();
+    };
+    let createError = null;
+    try {
+      await ownership.create(IMAGE);
+    } catch (err) {
+      createError = err;
+    }
+    check("c8c rm failure yields explicit compound error",
+      createError !== null &&
+        /pending save denied/.test(createError.message) &&
+        /cleanup compensatorio/.test(createError.message) &&
+        /cid-1/.test(createError.message) &&
+        /permission denied/.test(createError.message),
+      createError ? createError.message : "no error");
+    check("c8c failed compensation never claims cleanup OK",
+      createError !== null && !/cleanup (ok|OK)/.test(createError.message));
+    check("c8c rm failure leaves explicit observable residue", fake.byId.has("cid-1"));
+    const rms = fake.events.filter((e) => e.startsWith("rm "));
+    check("c8c failed rm still targeted exact stdout ID",
+      rms.length === 1 && rms[0] === "rm -f cid-1",
+      rms.join(" | ") || "(none)");
+  }
+
+  // c8d — aun con rm status=0, si el ID sigue existiendo la verificación
+  // produce FAIL compuesto y jamás convierte la compensación en éxito.
+  {
+    const statePath = path.join(TMP_DIR, "c8d-state.json");
+    const fake = fakeDocker();
+    const ownership = new MinioOwnership({ exec: fake.exec, runId: "run-8d", statePath });
+    await ownership.snapshot();
+    fake.set("rmLeavesResidue", true);
+    const realSave = ownership.saveState.bind(ownership);
+    ownership.saveState = function () {
+      if (ownership.state.started === "pending") throw new Error("fake: pending save I/O error");
+      return realSave();
+    };
+    let createError = null;
+    try {
+      await ownership.create(IMAGE);
+    } catch (err) {
+      createError = err;
+    }
+    check("c8d verify-residue yields explicit compound error",
+      createError !== null &&
+        /pending save I\/O error/.test(createError.message) &&
+        /cleanup compensatorio/.test(createError.message) &&
+        /cid-1/.test(createError.message) &&
+        /(aún existe|residuo)/.test(createError.message),
+      createError ? createError.message : "no error");
+    check("c8d verification failure never claims cleanup OK",
+      createError !== null && !/cleanup (ok|OK)/.test(createError.message));
+    check("c8d verification exposes remaining exact-ID residue", fake.byId.has("cid-1"));
+    const idInspects = fake.events.filter((e) => e === "container inspect cid-1");
+    check("c8d verification is by exact stdout ID", idInspects.length === 1, idInspects.join(" | "));
   }
 
   // -------------------------------------------------------------------------

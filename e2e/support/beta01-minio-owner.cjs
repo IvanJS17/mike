@@ -162,6 +162,38 @@ class MinioOwnership {
     return problems.length === 0 ? null : `drift del preexistente: ${problems.join("; ")}`;
   }
 
+  // `docker run` already returned an immutable identity, but the first
+  // started=pending save failed. The state file therefore cannot prove
+  // ownership to a later trap: compensate NOW, using only that stdout ID.
+  // A successful compensation rethrows the original save error unchanged;
+  // any rm/verification failure becomes an explicit compound error.
+  async compensatePendingSaveFailure(id, saveError) {
+    let cleanupFailure = null;
+    try {
+      const rm = await this.exec(["rm", "-f", id]);
+      if (rm.status !== 0) {
+        cleanupFailure = `docker rm -f falló (status ${rm.status}): ${firstLine(rm.stderr)}`;
+      } else {
+        const after = await this.inspect(id);
+        if (after !== null) {
+          cleanupFailure = "tras docker rm -f el contenedor aún existe (residuo verificado por ID)";
+        }
+      }
+    } catch (err) {
+      cleanupFailure = `cleanup/verificación lanzó error: ${err && err.message ? err.message : String(err)}`;
+    }
+
+    if (cleanupFailure === null) throw saveError;
+
+    const saveMessage = saveError && saveError.message ? saveError.message : String(saveError);
+    const compound = new Error(
+      `saveState(started=pending, createdId=${id}, runId=${this.state.runId}) falló: ${saveMessage}; ` +
+        `cleanup compensatorio por ID ${id} FALLÓ: ${cleanupFailure}`
+    );
+    compound.cause = saveError;
+    throw compound;
+  }
+
   // Decision BEFORE any mutation. Writes the ownership state file.
   async snapshot() {
     const info = await this.inspect(this.name);
@@ -284,12 +316,16 @@ class MinioOwnership {
         `docker run did not return a container ID: ${JSON.stringify(String(r.stdout || "").slice(0, 80))}`
       );
     }
-    // Persist ownership BEFORE inspecting: even if the next steps fail, the
-    // recorded started=pending + createdId + runId is what teardown removes
-    // and verifies.
+    // Persist ownership BEFORE inspecting. If this FIRST pending save fails,
+    // a later trap cannot trust the state file, so compensate immediately by
+    // the exact stdout ID and verify it disappeared before propagating error.
     this.state.createdId = id;
     this.state.started = "pending";
-    this.saveState();
+    try {
+      this.saveState();
+    } catch (saveError) {
+      await this.compensatePendingSaveFailure(id, saveError);
+    }
 
     // Always by ID, never by name.
     const info = await this.inspect(id);
