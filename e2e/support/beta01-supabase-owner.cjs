@@ -22,6 +22,15 @@
 // `exec(argv) -> { status, stdout, stderr }` so the contractual test
 // (scripts/test-beta01-supabase-disposable.sh) runs this exact module against
 // a fake docker daemon with ZERO network.
+//
+// Gate 2 fix E — IDs canónicos full: `docker ps` expone IDs TRUNCADOS (12
+// chars); NUNCA se persisten ni se comparan contra el Id full (64 chars) de
+// `docker inspect`. Cada candidato del listado se resuelve vía `docker
+// container inspect` y se guarda el ID canónico full 64-char + name/labels/
+// state; un prefix ambiguo (dos contenedores comparten el prefix corto) o un
+// candidato que desaparece entre `ps` e `inspect` es un FAIL fail-closed,
+// nunca una adivinanza. El snapshot es read-only: sólo ps/inspect, cero
+// mutaciones.
 
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
@@ -51,6 +60,21 @@ function isAbsentStderr(stderr, kind) {
     network: /no such network:\s*\S+/i,
   };
   return patterns[kind].test(String(stderr || ""));
+}
+
+// Docker rejects a PREFIX that matches more than one container with
+// "Multiple IDs found with provided prefix: <ref>". That is AMBIGUITY, not
+// absence: the caller must fail closed instead of guessing which full ID the
+// short prefix refers to.
+function isAmbiguousStderr(stderr) {
+  return /multiple ids? found with provided prefix/i.test(String(stderr || ""));
+}
+
+// Canonical Docker container IDs are 64 lowercase hex chars (`docker inspect`
+// `.Id`). A short id from `docker ps` (12 chars) is NEVER a valid identity
+// for compare/remove: it is only ever used as a lookup ref into inspect.
+function isFullId(id) {
+  return /^[0-9a-f]{64}$/i.test(String(id || ""));
 }
 
 class SupabaseDisposableOwnership {
@@ -108,6 +132,37 @@ class SupabaseDisposableOwnership {
       });
   }
 
+  // ---------------------------------------------------------------------------
+  // listContainersCanonical: los IDs de `docker ps` vienen TRUNCADOS (12
+  // chars). Nada de lo que se persiste/compare puede ser ese prefix: cada
+  // candidato se resuelve vía `docker container inspect` y se guarda el ID
+  // canónico full 64-char + name/labels/state. Un prefix ambiguo (dos full
+  // ids comparten el prefix corto) o un candidato que desaparece entre `ps`
+  // e `inspect` falla fail-closed — nunca se persiste un prefix ni se
+  // adivina el full id.
+  // ---------------------------------------------------------------------------
+  async listContainersCanonical(filter) {
+    const listed = await this.listContainers(filter);
+    const canonical = [];
+    for (const c of listed) {
+      const info = await this.inspectContainer(c.id);
+      if (info === null) {
+        throw new Error(
+          `race en listado: ${c.name} (ps ${c.id}) desapareció antes de resolver ` +
+            "el ID canónico via inspect — fail-closed, no se persiste nada"
+        );
+      }
+      if (!isFullId(info.id)) {
+        throw new Error(
+          `docker inspect devolvió ID no canónico para ${c.name}: '${info.id}' ` +
+            "(se espera full 64-hex) — fail-closed"
+        );
+      }
+      canonical.push(info);
+    }
+    return canonical;
+  }
+
   async listVolumes(filter) {
     const r = await this.exec(["volume", "ls", "--filter", filter, "--format", "{{.Name}}"]);
     if (r.status !== 0) {
@@ -144,6 +199,13 @@ class SupabaseDisposableOwnership {
       };
     }
     if (isAbsentStderr(r.stderr, "container")) return null;
+    if (isAmbiguousStderr(r.stderr)) {
+      throw new Error(
+        `docker container inspect ambiguo para '${ref}': el prefix corto coincide ` +
+          `con varios contenedores (${firstLine(r.stderr)}) — FAIL fail-closed, ` +
+          "no se resuelve por adivinanza ni se persiste/compara/elimina nada"
+      );
+    }
     throw new Error(`docker container inspect falló (status ${r.status}): ${firstLine(r.stderr)}`);
   }
 
@@ -203,7 +265,11 @@ class SupabaseDisposableOwnership {
   async snapshot() {
     if (!this.projectId) throw new Error("--snapshot requiere --project-id");
 
-    const ownContainers = await this.listContainers(this.ownLabelFilter());
+    // SIEMPRE IDs canónicos full: `docker ps` da prefixes truncados (12
+    // chars); cada candidato se resuelve vía inspect (read-only) y se guarda
+    // el full 64-hex + name/labels/state. Un prefix ambiguo o un candidato
+    // que desaparece entre ps e inspect falla aquí, antes de persistir nada.
+    const ownContainers = await this.listContainersCanonical(this.ownLabelFilter());
     const ownVolumes = await this.listVolumes(this.ownLabelFilter());
     const ownNetworks = await this.listNetworks(this.ownLabelFilter());
     const owned = ownContainers.length + ownVolumes.length + ownNetworks.length;
@@ -231,7 +297,7 @@ class SupabaseDisposableOwnership {
       projectId: this.projectId,
       started: false,
       pre: {
-        containers: await this.listContainers(this.anyLabelFilter()),
+        containers: await this.listContainersCanonical(this.anyLabelFilter()),
         volumes: await this.listVolumes(this.anyLabelFilter()),
         networks: await this.listNetworks(this.anyLabelFilter()),
       },
@@ -256,7 +322,9 @@ class SupabaseDisposableOwnership {
     // El CLI de record/cleanup no recibe --project-id: la identidad SIEMPRE
     // sale del estado durable (única fuente de verdad del ownership).
     this.projectId = this.state.projectId || this.projectId;
-    const containers = await this.listContainers(this.ownLabelFilter());
+    // IDs canónicos full (ps truncado -> inspect full); un prefix ambiguo
+    // entre los containers del stack aborta el record fail-closed.
+    const containers = await this.listContainersCanonical(this.ownLabelFilter());
     if (containers.length === 0) {
       throw new Error(
         `supabase start no creó contenedores con ${this.ownLabelFilter()} — ` +
@@ -308,6 +376,12 @@ class SupabaseDisposableOwnership {
       const owned = this.state.owned || { containers: [], volumes: [], networks: [] };
       const problems = [];
       for (const c of owned.containers) {
+        // Estado viejo podría persistir prefixes truncados: nunca se comparan
+        // ni se usan como identidad (12 vs 64 sería siempre distinto).
+        if (!isFullId(c.id)) {
+          problems.push(`contenedor ${c.name} con ID no canónico persistido (${c.id}) — no se compara ni elimina`);
+          continue;
+        }
         const info = await this.inspectContainer(c.id);
         if (info === null || info.id !== c.id || info.name !== c.name) {
           problems.push(`contenedor ${c.name} (esperado ${c.id}) no está igual`);
@@ -353,9 +427,17 @@ class SupabaseDisposableOwnership {
       return { ok: false, reason: `preexistente alterado: ${problems.join("; ")} — no se borra nada propio` };
     }
 
-    // 2) Recorded containers: verify, then remove BY RECORDED ID only.
+    // 2) Recorded containers: verify, then remove BY RECORDED FULL ID only.
     const recordedIds = new Set(recorded.containers.map((c) => c.id));
     for (const rec of recorded.containers) {
+      // Sólo full 64-hex es una identidad válida para comparar/eliminar; un
+      // prefix truncado en el estado (versión vieja) aborta fail-closed.
+      if (!isFullId(rec.id)) {
+        return {
+          ok: false,
+          reason: `ID no canónico en estado registrado: ${rec.id} para ${rec.name} (se espera full 64-hex) — fail-closed, no se borra nada`,
+        };
+      }
       const info = await this.inspectContainer(rec.id);
       if (info === null) {
         const byName = await this.inspectContainer(rec.name);
@@ -385,23 +467,23 @@ class SupabaseDisposableOwnership {
 
     // 3) Unrecorded sweep (partial start / record never ran): only resources
     //    that match the CLI naming pattern AND our label are ours to destroy.
+    //    Listado canónico: full IDs (ps truncado -> inspect), nunca prefixes.
     const expectedName = (name) => name.startsWith("supabase_") && name.endsWith(`_${projectId}`);
-    for (const c of await this.listContainers(this.ownLabelFilter())) {
+    for (const c of await this.listContainersCanonical(this.ownLabelFilter())) {
       if (recordedIds.has(c.id)) continue;
-      const info = await this.inspectContainer(c.id);
-      if (info === null || info.labels[LABEL] !== projectId) {
+      if (c.labels[LABEL] !== projectId) {
         return {
           ok: false,
           reason: `sweep fail-closed: contenedor ${c.name} (${c.id}) no verifica label ${LABEL}=${projectId} — no se borra`,
         };
       }
-      if (!expectedName(info.name)) {
+      if (!expectedName(c.name)) {
         return {
           ok: false,
-          reason: `sweep fail-closed: contenedor ${info.name} lleva el label del proyecto pero no el patrón supabase_*_${projectId} — no se borra`,
+          reason: `sweep fail-closed: contenedor ${c.name} lleva el label del proyecto pero no el patrón supabase_*_${projectId} — no se borra`,
         };
       }
-      await this.removeContainer(info.id);
+      await this.removeContainer(c.id);
     }
 
     // 4) Volumes (recorded + unrecorded sweep).

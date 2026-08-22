@@ -27,7 +27,17 @@
 #       status/stop SIN --workdir, sin helper de ownership) y el teardown
 #       sigue siendo limpio;
 #   c7. inmutabilidad: el runner jamás ejecuta DELETE vía psql (las tablas
-#       terminales ai_executions/receipts/audit no se tocan).
+#       terminales ai_executions/receipts/audit no se tocan);
+#   cE. Gate 2 fix E — IDs canónicos full 64-char: `docker ps` expone IDs
+#       TRUNCADOS (12 chars) y el mundo fake lo modela tal cual: cada
+#       candidato se resuelve vía `docker inspect` (full 64-hex) antes de
+#       persistirse (pre/owned/recorded guardan id canónico + name/labels/
+#       state); un prefix corto que coincide con DOS full ids distintos
+#       (ambiguo) o duplicado falla fail-closed sin persistir ni borrar nada;
+#       un preexistente cuyo full ID driftó del snapshot falla el cleanup sin
+#       eliminar nada propio; el cleanup elimina SÓLO full IDs owned (docker
+#       rm -f recibe el full 64-hex, nunca un prefix); el snapshot es
+#       read-only (cero mutaciones).
 #
 # El stack se simula con un "docker world" (world-ctl) + stubs de
 # npx/node/curl/psql/setsid en un PATH prefijado; el helper real
@@ -61,6 +71,10 @@ FAILS=0
 
 ok()  { CHECKS=$((CHECKS + 1)); printf '  ok   %s\n' "$1"; }
 bad() { CHECKS=$((CHECKS + 1)); FAILS=$((FAILS + 1)); printf '  FAIL %s\n' "$1"; }
+
+# ID canónico docker: 64 hex chars deterministas por token (como en docker
+# real, el full id del inspect; `docker ps` expone sólo los primeros 12).
+sid() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
 
 # ---------------------------------------------------------------------------
 # Sandbox repo: copia el runner y el helper REAL (bajo test); el resto son
@@ -101,23 +115,36 @@ case "$cmd" in
     ;;
   rm-container)
     ref="$1"
-    jq --arg r "$ref" '.containers |= map(select(.id != $r and .name != $r))' "$WORLD" >"$WORLD.tmp" && mv "$WORLD.tmp" "$WORLD"
+    # Como docker real: un prefix ambiguo es un error, no una adivinanza.
+    n="$(jq --arg r "$ref" '[.containers[] | select(.id == $r or .name == $r or (.id | startswith($r)))] | length' "$WORLD")"
+    if [ "$n" -gt "1" ]; then printf 'Error response from daemon: Multiple IDs found with provided prefix: %s\n' "$ref" >&2; exit 1; fi
+    jq --arg r "$ref" '.containers |= map(select(.id != $r and .name != $r and ((.id | startswith($r)) | not)))' "$WORLD" >"$WORLD.tmp" && mv "$WORLD.tmp" "$WORLD"
     ;;
   ls-con)
     key="${1:-}"; val="${2:-}"
+    # Igual que docker: `.id[0:12]` — `docker ps` sólo expone el prefix
+    # corto; el full 64-hex sólo sale por `docker inspect`.
     jq -r --arg k "$key" --arg v "$val" '
       [.containers[] | select(
         (($k == "") or (.labels | has($k))) and
         (($v == "") or (.labels[$k] == $v))
-      )] | .[] | "\(.name)\t\(.id)\t\(if .running then "Up 2 minutes" else "Exited (1)" end)"' "$WORLD"
+      )] | .[] | "\(.name)\t\(.id[0:12])\t\(if .running then "Up 2 minutes" else "Exited (1)" end)"' "$WORLD"
     ;;
   ls-running-names)
     jq -r '.containers[] | select(.running) | .name' "$WORLD"
     ;;
   inspect-con)
     ref="$1"
+    # Como docker real: primero match EXACTO por full id o nombre; si no,
+    # resolución por prefix UNICAMENTE cuando coincide con UN full id. Dos
+    # full ids con el mismo prefix corto = error de ambigüedad, nunca [0].
     out="$(jq -c --arg r "$ref" '[.containers[] | select(.id == $r or .name == $r)][0] // empty' "$WORLD")"
-    if [ -z "$out" ]; then printf 'Error response from daemon: No such container: %s\n' "$ref" >&2; exit 1; fi
+    if [ -z "$out" ]; then
+      n="$(jq --arg r "$ref" '[.containers[] | select(.id | startswith($r))] | length' "$WORLD")"
+      if [ "$n" = "0" ]; then printf 'Error response from daemon: No such container: %s\n' "$ref" >&2; exit 1; fi
+      if [ "$n" -gt "1" ]; then printf 'Error response from daemon: Multiple IDs found with provided prefix: %s\n' "$ref" >&2; exit 1; fi
+      out="$(jq -c --arg r "$ref" '[.containers[] | select(.id | startswith($r))][0]' "$WORLD")"
+    fi
     jq -c --argjson o "$out" '[{"Id":$o.id,"Name":("/" + $o.name),"Config":{"Labels":$o.labels},"State":{"Running":$o.running}}]' <<<"$out"
     ;;
   create-volume|create-network)
@@ -252,14 +279,15 @@ case "$*" in
     printf '%s\n' "$db" >"$DB_PORT"
     if [ "${FAKE_START_FAIL:-0}" = "1" ]; then
       # Fallo parcial: sólo el container db+volumen+network alcanzan a crearse.
-      "$WORLD_CTL" create-container "supabase_db_$pid" "id-$pid-db" true "com.supabase.cli.project=$pid"
+      "$WORLD_CTL" create-container "supabase_db_$pid" "$(printf '%s' "db-$pid-fail" | sha256sum | cut -d' ' -f1)" true "com.supabase.cli.project=$pid"
       "$WORLD_CTL" create-volume "supabase_db_$pid" "com.supabase.cli.project=$pid"
       "$WORLD_CTL" create-network "supabase_network_$pid" "com.supabase.cli.project=$pid"
       exit 1
     fi
-    "$WORLD_CTL" create-container "supabase_db_$pid" "id-$pid-db" true "com.supabase.cli.project=$pid"
-    "$WORLD_CTL" create-container "supabase_api_$pid" "id-$pid-api" true "com.supabase.cli.project=$pid"
-    "$WORLD_CTL" create-container "supabase_auth_$pid" "id-$pid-auth" true "com.supabase.cli.project=$pid"
+    # Full IDs 64-hex como en docker real; `docker ps` los mostrará truncados.
+    "$WORLD_CTL" create-container "supabase_db_$pid" "$(printf '%s' "db-$pid" | sha256sum | cut -d' ' -f1)" true "com.supabase.cli.project=$pid"
+    "$WORLD_CTL" create-container "supabase_api_$pid" "$(printf '%s' "api-$pid" | sha256sum | cut -d' ' -f1)" true "com.supabase.cli.project=$pid"
+    "$WORLD_CTL" create-container "supabase_auth_$pid" "$(printf '%s' "auth-$pid" | sha256sum | cut -d' ' -f1)" true "com.supabase.cli.project=$pid"
     "$WORLD_CTL" create-volume "supabase_db_$pid" "com.supabase.cli.project=$pid"
     "$WORLD_CTL" create-network "supabase_network_$pid" "com.supabase.cli.project=$pid"
     ;;
@@ -282,9 +310,9 @@ case "$*" in
       cfg="$wd/supabase/config.toml"
       if [ -f "$cfg" ]; then pid="$(sed -n 's/^project_id = "\(.*\)"/\1/p' "$cfg" | head -1)"; else exit 0; fi
       for c in $("$WORLD_CTL" ls-con "com.supabase.cli.project" "$pid"); do :; done
-      "$WORLD_CTL" rm-container "id-$pid-db" 2>/dev/null || true
-      "$WORLD_CTL" rm-container "id-$pid-api" 2>/dev/null || true
-      "$WORLD_CTL" rm-container "id-$pid-auth" 2>/dev/null || true
+      "$WORLD_CTL" rm-container "supabase_db_$pid" 2>/dev/null || true
+      "$WORLD_CTL" rm-container "supabase_api_$pid" 2>/dev/null || true
+      "$WORLD_CTL" rm-container "supabase_auth_$pid" 2>/dev/null || true
       "$WORLD_CTL" rm-volume "supabase_db_$pid" 2>/dev/null || true
       "$WORLD_CTL" rm-network "supabase_network_$pid" 2>/dev/null || true
     else
@@ -301,8 +329,8 @@ case "$*" in
     # Race injection: un proceso ajeno reemplaza el container db registrado.
     if [ "${FAKE_RACE:-}" = "substitute" ] && [ -s "$PID_FILE" ]; then
       pid="$(cat "$PID_FILE")"
-      "$WORLD_CTL" rm-container "id-$pid-db"
-      "$WORLD_CTL" create-container "supabase_db_$pid" "id-SUB-$pid-db" true "com.supabase.cli.project=$pid"
+      "$WORLD_CTL" rm-container "supabase_db_$pid"
+      "$WORLD_CTL" create-container "supabase_db_$pid" "$(printf '%s' "SUB-db-$pid" | sha256sum | cut -d' ' -f1)" true "com.supabase.cli.project=$pid"
     fi
     ;;
 esac
@@ -363,8 +391,8 @@ reset_world() {
 }
 
 seed_backend_stack() {
-  "$WORLD_CTL" create-container "supabase_db_backend" "id-backend-db" true "com.supabase.cli.project=backend"
-  "$WORLD_CTL" create-container "supabase_auth_backend" "id-backend-auth" true "com.supabase.cli.project=backend"
+  "$WORLD_CTL" create-container "supabase_db_backend" "$(sid backend-db)" true "com.supabase.cli.project=backend"
+  "$WORLD_CTL" create-container "supabase_auth_backend" "$(sid backend-auth)" true "com.supabase.cli.project=backend"
   "$WORLD_CTL" create-volume "supabase_db_backend" "com.supabase.cli.project=backend"
   "$WORLD_CTL" create-network "supabase_network_backend" "com.supabase.cli.project=backend"
 }
@@ -412,7 +440,10 @@ zero_own() {
   [ "$c" = "0" ] && [ "$v" = "0" ] && [ "$n" = "0" ]
 }
 
-world_has_con() { "$WORLD_CTL" ls-con "com.supabase.cli.project" "$1" | grep -q "$2"; }
+# Full ID de un contenedor por nombre (inspección read-only del mundo fake),
+# y helper de presencia: compara el FULL id, nunca prefixes truncados.
+con_full_id() { "$WORLD_CTL" inspect-con "$1" 2>/dev/null | jq -r '.[0].Id // empty'; }
+world_has_con() { [ "$(con_full_id "$1")" = "$2" ]; }
 
 # ---------------------------------------------------------------------------
 # Casos (contrato)
@@ -501,16 +532,18 @@ else
 fi
 
 # --- c2: preexisting preserved ---
-printf '[c2] stack preexistente backend preservado (mismos IDs/estado)\n'
+printf '[c2] stack preexistente backend preservado (mismos FULL IDs/estado)\n'
 run_ai with-backend
 if [ "$RUNRC" -eq 0 ]; then ok "c2: exit 0 con stack preexistente"; else bad "c2: exit 0 esperado, rc=$RUNRC"; fi
-if "$WORLD_CTL" ls-con "com.supabase.cli.project" "backend" | grep -q "supabase_db_backend.id-backend-db.Up"; then
-  ok "c2: container preexistente supabase_db_backend conserva mismo ID y estado"
+if [ "$(con_full_id supabase_db_backend)" = "$(sid backend-db)" ] \
+  && [ "$("$WORLD_CTL" inspect-con supabase_db_backend 2>/dev/null | jq -r '.[0].State.Running')" = "true" ]; then
+  ok "c2: preexistente supabase_db_backend conserva mismo FULL ID (64-hex) y estado"
 else
-  bad "c2: preexistente supabase_db_backend alterado: $("$WORLD_CTL" ls-con "com.supabase.cli.project" "backend" | tr '\n' ' ')"
+  bad "c2: preexistente supabase_db_backend alterado: id_actual=$(con_full_id supabase_db_backend)"
 fi
-if "$WORLD_CTL" ls-con "com.supabase.cli.project" "backend" | grep -q "supabase_auth_backend.id-backend-auth.Up"; then
-  ok "c2: container preexistente supabase_auth_backend conserva mismo ID y estado"
+if [ "$(con_full_id supabase_auth_backend)" = "$(sid backend-auth)" ] \
+  && [ "$("$WORLD_CTL" inspect-con supabase_auth_backend 2>/dev/null | jq -r '.[0].State.Running')" = "true" ]; then
+  ok "c2: preexistente supabase_auth_backend conserva mismo FULL ID y estado"
 else
   bad "c2: preexistente supabase_auth_backend alterado"
 fi
@@ -524,10 +557,11 @@ if "$WORLD_CTL" ls-net "com.supabase.cli.project" "backend" | grep -q "^supabase
 else
   bad "c2: network preexistente alterada"
 fi
-if ! grep -qE 'rm .*(backend|id-backend)' "$CALLS"; then
-  ok "c2: cero MUTACIONES docker hacia el stack preexistente (sólo inspección read-only por ID)"
+mut_lines="$(grep -E '^(docker rm -f|docker (volume|network) rm )' "$CALLS" | grep backend | head -2 || true)"
+if [ -z "$mut_lines" ]; then
+  ok "c2: cero MUTACIONES docker hacia el stack preexistente (sólo inspección read-only)"
 else
-  bad "c2: docker mutó el stack preexistente: $(grep -E 'rm .*(backend|id-backend)' "$CALLS" | head -2)"
+  bad "c2: docker mutó el stack preexistente: $mut_lines"
 fi
 if ! grep -q '^npx supabase stop' "$CALLS"; then
   ok "c2: el runner AI nunca invoca supabase stop (no detiene nada)"
@@ -550,10 +584,10 @@ if zero_own "$PID"; then
 else
   bad "c3: quedó el partial stack: $("$WORLD_CTL" ls-con "com.supabase.cli.project" "$PID" | cut -f1 | tr '\n' ' ')"
 fi
-if "$WORLD_CTL" ls-con "com.supabase.cli.project" "backend" | grep -q "supabase_db_backend.id-backend-db.Up"; then
+if [ "$(con_full_id supabase_db_backend)" = "$(sid backend-db)" ]; then
   ok "c3: preexistente intacto tras el cleanup parcial"
 else
-  bad "c3: preexistente alterado en fallo parcial"
+  bad "c3: preexistente alterado en fallo parcial (id_actual=$(con_full_id supabase_db_backend))"
 fi
 if grep -q 'teardown verified after run failure' "$RUN_OUT"; then
   ok "c3: teardown verificado tras fallo (exit code del run preservado)"
@@ -570,12 +604,12 @@ if grep -q 'ID race' "$RUN_OUT"; then
 else
   bad "c4: falta diagnóstico de ID race: $(grep -i 'teardown FAILED' "$RUN_OUT" | head -2)"
 fi
-if world_has_con "$PID" "id-SUB-$PID-db"; then
+if world_has_con "supabase_db_$PID" "$(sid SUB-db-$PID)"; then
   ok "c4: el sustituto NO fue borrado (fail-closed)"
 else
   bad "c4: el sustituto fue eliminado — viola fail-closed"
 fi
-if world_has_con "$PID" "id-$PID-api" && world_has_con "$PID" "id-$PID-auth"; then
+if world_has_con "supabase_api_$PID" "$(sid api-$PID)" && world_has_con "supabase_auth_$PID" "$(sid auth-$PID)"; then
   ok "c4: resto del stack registrado NO fue borrado (abort ante race)"
 else
   bad "c4: se borraron containers no implicados en la race"
@@ -609,6 +643,192 @@ if zero_own "backend" || [ "$("$WORLD_CTL" ls-con | wc -l)" = "0" ]; then
   ok "c6: cero containers tras el teardown setup"
 else
   bad "c6: quedaron containers tras setup: $("$WORLD_CTL" ls-con | cut -f1 | tr '\n' ' ')"
+fi
+
+# --- cE: Gate 2 fix E — IDs canónicos full 64-char ---
+printf '[cE] IDs canónicos: docker ps truncado -> docker inspect full 64-hex\n'
+HELPER="$REPO/e2e/support/beta01-supabase-owner.cjs"
+E_PID="beta01aie1test"
+
+# cE-1: short list -> full inspect same accepted; snapshot read-only; estado
+#       con full IDs + name/labels/state; cleanup elimina SÓLO full IDs.
+printf '[cE-1] happy path: ps corto -> inspect full; snapshot read-only; rm por full ID\n'
+reset_world
+seed_backend_stack
+SNAP_E1="$TMP/state-e1.json"
+: >"$CALLS"
+if PATH="$BIN:$PATH" node "$HELPER" --snapshot --project-id "$E_PID" --state-file "$SNAP_E1" >"$TMP/e1-snap.out" 2>&1; then
+  ok "cE-1: snapshot exit 0 con stack preexistente"
+else
+  bad "cE-1: snapshot falló: $(cat "$TMP/e1-snap.out")"
+fi
+if ! grep -Eq '^(docker rm -f|docker (volume|network) rm )' "$CALLS"; then
+  ok "cE-1: snapshot read-only — cero mutaciones docker"
+else
+  bad "cE-1: snapshot mutó docker: $(grep -E '^(docker rm -f|docker (volume|network) rm )' "$CALLS" | head -2)"
+fi
+if [ "$(jq '[.pre.containers[] | select((.id | test("^[0-9a-f]{64}$")) | not)] | length' "$SNAP_E1")" = "0" ] \
+  && [ "$(jq -r --arg n "supabase_db_backend" '.pre.containers[] | select(.name == $n) | .id' "$SNAP_E1")" = "$(sid backend-db)" ]; then
+  ok "cE-1: pre.containers persiste FULL IDs 64-hex (no prefixes de ps)"
+else
+  bad "cE-1: pre.containers sin full IDs: $(jq -c '.pre.containers' "$SNAP_E1")"
+fi
+if [ "$(jq -r --arg n "supabase_db_backend" '.pre.containers[] | select(.name == $n) | .labels["com.supabase.cli.project"]' "$SNAP_E1")" = "backend" ] \
+  && [ "$(jq -r --arg n "supabase_db_backend" '.pre.containers[] | select(.name == $n) | .running' "$SNAP_E1")" = "true" ]; then
+  ok "cE-1: pre.containers guarda name/labels/state junto al full ID"
+else
+  bad "cE-1: faltan name/labels/state en pre: $(jq -c '.pre.containers[0]' "$SNAP_E1")"
+fi
+# Stack propio (como haría `supabase start` disposable)
+"$WORLD_CTL" create-container "supabase_db_$E_PID" "$(sid db-$E_PID)" true "com.supabase.cli.project=$E_PID"
+"$WORLD_CTL" create-container "supabase_api_$E_PID" "$(sid api-$E_PID)" true "com.supabase.cli.project=$E_PID"
+"$WORLD_CTL" create-container "supabase_auth_$E_PID" "$(sid auth-$E_PID)" true "com.supabase.cli.project=$E_PID"
+"$WORLD_CTL" create-volume "supabase_db_$E_PID" "com.supabase.cli.project=$E_PID"
+"$WORLD_CTL" create-network "supabase_network_$E_PID" "com.supabase.cli.project=$E_PID"
+ps_line="$(PATH="$BIN:$PATH" docker ps -a --filter "label=com.supabase.cli.project=$E_PID" --format '{{.Names}}\t{{.ID}}\t{{.Status}}' 2>/dev/null | grep "^supabase_db_$E_PID" | head -1)"
+ps_id="$(printf '%s\n' "$ps_line" | cut -f2)"
+ps_name="$(printf '%s\n' "$ps_line" | cut -f1)"
+if [ "$ps_name" = "supabase_db_$E_PID" ] && [[ "$ps_id" =~ ^[0-9a-f]{12}$ ]]; then
+  ok "cE-1: docker ps expone SÓLO el prefix truncado (12 chars)"
+else
+  bad "cE-1: docker ps no truncó el ID: $ps_line"
+fi
+: >"$CALLS"
+if PATH="$BIN:$PATH" node "$HELPER" --record --state-file "$SNAP_E1" >"$TMP/e1-rec.out" 2>&1; then
+  ok "cE-1: record exit 0 (short list -> full inspect same accepted)"
+else
+  bad "cE-1: record falló: $(cat "$TMP/e1-rec.out")"
+fi
+if [ "$(jq '[.recorded.containers[] | select((.id | test("^[0-9a-f]{64}$")) | not)] | length' "$SNAP_E1")" = "0" ] \
+  && [ "$(jq -r --arg n "supabase_db_$E_PID" '.recorded.containers[] | select(.name == $n) | .id' "$SNAP_E1")" = "$(sid db-$E_PID)" ] \
+  && [ "$(jq -r --arg n "supabase_db_$E_PID" '.recorded.containers[] | select(.name == $n) | .labels["com.supabase.cli.project"]' "$SNAP_E1")" = "$E_PID" ] \
+  && [ "$(jq -r --arg n "supabase_db_$E_PID" '.recorded.containers[] | select(.name == $n) | .running' "$SNAP_E1")" = "true" ]; then
+  ok "cE-1: recorded persiste FULL IDs (64-hex) + name/labels/state, iguales al inspect"
+else
+  bad "cE-1: recorded sin full IDs: $(jq -c '.recorded' "$SNAP_E1" | head -c 300)"
+fi
+: >"$CALLS"
+set +e
+cleanup_e1="$(PATH="$BIN:$PATH" node "$HELPER" --cleanup --state-file "$SNAP_E1" 2>&1)"
+set -e
+if [ "$(jq -r '.ok // "false"' <<<"$cleanup_e1")" = "true" ]; then
+  ok "cE-1: cleanup exit ok — preexistente verificado por full ID, own eliminado"
+else
+  bad "cE-1: cleanup falló: $cleanup_e1"
+fi
+if zero_own "$E_PID"; then ok "cE-1: zero own resources tras cleanup"; else bad "cE-1: residuo propio tras cleanup"; fi
+if [ "$(con_full_id supabase_db_backend)" = "$(sid backend-db)" ] && [ "$(con_full_id supabase_auth_backend)" = "$(sid backend-auth)" ]; then
+  ok "cE-1: preexistente intacto tras cleanup (mismos full IDs)"
+else
+  bad "cE-1: preexistente alterado tras cleanup"
+fi
+rm_args="$(grep '^docker rm -f ' "$CALLS" | awk '{print $4}' | sort -u)"
+rm_expected="$(printf '%s\n' "$(sid db-$E_PID)" "$(sid api-$E_PID)" "$(sid auth-$E_PID)" | sort -u)"
+if [ "$rm_args" = "$rm_expected" ] && printf '%s\n' "$rm_args" | grep -qE '^[0-9a-f]{64}$'; then
+  ok "cE-1: cleanup eliminó SÓLO los full IDs owned (rm -f con 64-hex exactos)"
+else
+  bad "cE-1: rm -f no usó full IDs exactos: $rm_args"
+fi
+
+# cE-2: dos full ids DISTINTOS que comparten el mismo prefix corto -> el
+#       snapshot falla fail-closed sin persistir ni mutar nada.
+printf '[cE-2] distinto full con mismo prefix -> snapshot FALLA fail-closed\n'
+reset_world
+AID="$(sid ambig-a)"
+BID="${AID%?}$([ "${AID: -1}" = "0" ] && printf 1 || printf 0)"
+"$WORLD_CTL" create-container "supabase_ambig_1" "$AID" true "com.supabase.cli.project=backend"
+"$WORLD_CTL" create-container "supabase_ambig_2" "$BID" true "com.supabase.cli.project=backend"
+SNAP_E2="$TMP/state-e2.json"
+rm -f "$SNAP_E2"
+if ! PATH="$BIN:$PATH" node "$HELPER" --snapshot --project-id "$E_PID" --state-file "$SNAP_E2" >"$TMP/e2.out" 2>&1; then
+  ok "cE-2: snapshot falla con prefix ambiguo (rc≠0)"
+else
+  bad "cE-2: snapshot debió fallar ante prefix ambiguo: $(cat "$TMP/e2.out")"
+fi
+if grep -qiE 'ambiguo|multiple id' "$TMP/e2.out"; then
+  ok "cE-2: diagnóstico de ambigüedad reportado"
+else
+  bad "cE-2: falta diagnóstico de ambigüedad: $(cat "$TMP/e2.out")"
+fi
+if [ ! -f "$SNAP_E2" ]; then
+  ok "cE-2: nada se persiste ante el fallo (sin estado)"
+else
+  bad "cE-2: se persistió estado pese a la ambigüedad"
+fi
+if [ "$(con_full_id supabase_ambig_1)" = "$AID" ] && [ "$(con_full_id supabase_ambig_2)" = "$BID" ]; then
+  ok "cE-2: cero mutaciones — ambos contenedores intactos"
+else
+  bad "cE-2: los contenedores fueron alterados"
+fi
+
+# cE-3: prefix duplicado entre recursos PROPIOS -> record falla fail-closed
+#       sin registrar ni borrar nada.
+printf '[cE-3] prefix duplicado en recursos del proyecto -> record FALLA\n'
+reset_world
+SNAP_E3="$TMP/state-e3.json"
+PATH="$BIN:$PATH" node "$HELPER" --snapshot --project-id "$E_PID" --state-file "$SNAP_E3" >/dev/null 2>&1 \
+  || bad "cE-3: snapshot previo falló"
+CID="$(sid dup-c1)"
+DID="${CID%?}$([ "${CID: -1}" = "0" ] && printf 1 || printf 0)"
+"$WORLD_CTL" create-container "supabase_db_$E_PID" "$CID" true "com.supabase.cli.project=$E_PID"
+"$WORLD_CTL" create-container "supabase_api_$E_PID" "$DID" true "com.supabase.cli.project=$E_PID"
+if ! PATH="$BIN:$PATH" node "$HELPER" --record --state-file "$SNAP_E3" >"$TMP/e3.out" 2>&1; then
+  ok "cE-3: record falla con prefix duplicado (rc≠0)"
+else
+  bad "cE-3: record debió fallar ante prefix duplicado: $(cat "$TMP/e3.out")"
+fi
+if grep -qiE 'ambiguo|multiple id' "$TMP/e3.out"; then
+  ok "cE-3: diagnóstico de prefix duplicado reportado"
+else
+  bad "cE-3: falta diagnóstico de prefix duplicado: $(cat "$TMP/e3.out")"
+fi
+if [ "$(con_full_id "supabase_db_$E_PID")" = "$CID" ] && [ "$(con_full_id "supabase_api_$E_PID")" = "$DID" ]; then
+  ok "cE-3: cero mutaciones — recursos propios intactos tras record fallido"
+else
+  bad "cE-3: se alteraron recursos pese al fallo"
+fi
+if [ "$(jq -r '.recorded // "null"' "$SNAP_E3")" = "null" ]; then
+  ok "cE-3: recorded sigue vacío (nada registrado)"
+else
+  bad "cE-3: recorded se llenó pese al fallo"
+fi
+
+# cE-4: drift REAL del preexistente (mismo nombre, full ID distinto) ->
+#       cleanup falla fail-closed sin borrar NADA propio.
+printf '[cE-4] preexistente con full ID driftado -> cleanup FALLA sin borrar nada\n'
+reset_world
+seed_backend_stack
+SNAP_E4="$TMP/state-e4.json"
+PATH="$BIN:$PATH" node "$HELPER" --snapshot --project-id "$E_PID" --state-file "$SNAP_E4" >/dev/null 2>&1 \
+  || bad "cE-4: snapshot previo falló"
+"$WORLD_CTL" create-container "supabase_db_$E_PID" "$(sid db-$E_PID)" true "com.supabase.cli.project=$E_PID"
+"$WORLD_CTL" create-container "supabase_api_$E_PID" "$(sid api-$E_PID)" true "com.supabase.cli.project=$E_PID"
+PATH="$BIN:$PATH" node "$HELPER" --record --state-file "$SNAP_E4" >/dev/null 2>&1 \
+  || bad "cE-4: record falló"
+"$WORLD_CTL" rm-container "supabase_db_backend"
+"$WORLD_CTL" create-container "supabase_db_backend" "$(sid backend-db-drifted)" true "com.supabase.cli.project=backend"
+set +e
+cE4_out="$(PATH="$BIN:$PATH" node "$HELPER" --cleanup --state-file "$SNAP_E4" 2>&1)"
+set -e
+if [ "$(jq -r '.ok // "false"' <<<"$cE4_out")" = "false" ]; then
+  ok "cE-4: cleanup falla ante drift real del preexistente"
+else
+  bad "cE-4: cleanup debió fallar ante drift: $cE4_out"
+fi
+if grep -q 'preexistente' <<<"$cE4_out"; then
+  ok "cE-4: diagnóstico apunta al preexistente alterado"
+else
+  bad "cE-4: diagnóstico inesperado: $cE4_out"
+fi
+if [ "$(con_full_id "supabase_db_$E_PID")" = "$(sid db-$E_PID)" ] && [ "$(con_full_id "supabase_api_$E_PID")" = "$(sid api-$E_PID)" ]; then
+  ok "cE-4: nada propio eliminado (fail-closed ante drift)"
+else
+  bad "cE-4: se borró algo propio pese al drift"
+fi
+if [ "$(con_full_id supabase_db_backend)" = "$(sid backend-db-drifted)" ]; then
+  ok "cE-4: el container ajeno reemplazado queda intacto (no se toca)"
+else
+  bad "cE-4: el container ajeno fue alterado"
 fi
 
 printf '== resultado: %d checks, %d fallas ==\n' "$CHECKS" "$FAILS"
