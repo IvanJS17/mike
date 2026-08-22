@@ -97,7 +97,7 @@ const {
   OWNER_FIXTURE,
   ensureFixtureUser,
   cleanLegacyOwnerUsers,
-} = require("../support/beta01-user-fixture.cjs") as {
+} = require("./support/beta01-user-fixture.cjs") as {
   OWNER_FIXTURE: { email: string; password: string };
   ensureFixtureUser(
     authAdmin: AuthAdminClient,
@@ -112,7 +112,7 @@ const {
   ): Promise<number>;
 };
 
-const { ProjectCleanup } = require("../support/beta01-project-cleanup.cjs") as {
+const { ProjectCleanup } = require("./support/beta01-project-cleanup.cjs") as {
   ProjectCleanup: new (clients: ProjectCleanupClients) => ProjectCleanupApi;
 };
 
@@ -142,7 +142,7 @@ type ProjectCleanupClients = {
 // Same guard the smoke runner uses as fail-fast; it throws with sanitized
 // errors (never key values) when a target is not local or conflicts with the
 // wired .env. Must run BEFORE any auth/REST call in this spec.
-const { assertLocalTargets } = require("../support/beta01-target-guard.cjs") as {
+const { assertLocalTargets } = require("./support/beta01-target-guard.cjs") as {
   assertLocalTargets(env?: NodeJS.ProcessEnv): {
     supabaseUrl: string;
     serviceKey: string;
