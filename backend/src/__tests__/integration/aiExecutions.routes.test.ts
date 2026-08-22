@@ -36,6 +36,26 @@ const rows = {
       content_sha256: "a".repeat(64),
       deleted_at: null,
     },
+    {
+      id: "version-docx-1",
+      document_id: "document-1",
+      version_number: 2,
+      page_count: null,
+      content_sha256: "a".repeat(64),
+      deleted_at: null,
+      file_type: "docx",
+      storage_path: "storage/document-1/version-2.docx",
+    },
+    {
+      id: "version-docx-2",
+      document_id: "document-1",
+      version_number: 3,
+      page_count: 1,
+      content_sha256: "a".repeat(64),
+      deleted_at: null,
+      file_type: "docx",
+      storage_path: "storage/document-1/version-3.docx",
+    },
   ],
   organizations: [
     {
@@ -145,8 +165,10 @@ vi.mock("../../lib/aiAccess", () => ({
   checkMatterAccess: (...args: unknown[]) => checkMatterAccess(...args),
 }));
 
-vi.mock("../../lib/aiDocumentPages", () => ({
-  loadAiDocumentVersionPages: (...args: unknown[]) => loadAiDocumentVersionPages(...args),
+vi.mock("../../lib/aiDocumentPages", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/aiDocumentPages")>()),
+  loadAiDocumentVersionPages: (...args: unknown[]) =>
+    loadAiDocumentVersionPages(...args),
 }));
 
 vi.mock("../../lib/llm/governedRoutes", () => ({
@@ -321,6 +343,105 @@ describe("AI execution routes", () => {
     ]);
     expect(JSON.stringify(writes)).not.toContain("server-only-secret");
     expect(JSON.stringify(writes)).not.toContain(pageText);
+  });
+
+  it("accepts a DOCX version with a null page count as one logical page and backfills page_count", async () => {
+    completeText.mockResolvedValue(
+      `La parte compradora puede terminar el contrato.\n<CITATIONS>${JSON.stringify([
+        {
+          citation_id: "c1",
+          document_id: "document-1",
+          document_version_id: "version-docx-1",
+          page: 1,
+          span: { start_char: 0, end_char: quote.length },
+          quote,
+          quote_sha256: sha256Hex(quote),
+          finding_text: "La parte compradora puede terminar el contrato.",
+        },
+      ])}</CITATIONS>`,
+    );
+    const res = await request(app)
+      .post("/projects/project-1/ai-executions")
+      .set("Authorization", "Bearer test")
+      .send({
+        matter_id: "matter-1",
+        document_version_id: "version-docx-1",
+        route: {
+          provider: "deepseek",
+          model: "deepseek-chat",
+          credential_ref: "deepseek:v1",
+        },
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      id: "execution-1",
+      status: "succeeded",
+      output_id: "output-1",
+      receipt_id: "receipt-1",
+    });
+    // Conditional/idempotent metadata backfill: document_versions null→1.
+    const backfill = writes.find(
+      (write) =>
+        write.table === "document_versions" && write.operation === "update",
+    );
+    expect(backfill?.payload).toEqual({ page_count: 1 });
+    const outputInsert = writes.find(
+      (write) =>
+        write.table === "ai_output_versions" && write.operation === "insert",
+    );
+    const citationRefs = outputInsert?.payload?.citation_refs as
+      | Record<string, unknown>[]
+      | undefined;
+    expect(citationRefs).toHaveLength(1);
+    expect(citationRefs?.[0]).toMatchObject({
+      page: 1,
+      verified: true,
+    });
+    const receiptInsert = writes.find(
+      (write) => write.table === "ai_receipts" && write.operation === "insert",
+    );
+    expect(receiptInsert?.payload?.canonical_json).toMatchObject({
+      citations: [{ page: 1, verified: true }],
+    });
+  });
+
+  it("does not backfill page_count when the DOCX version already declares one", async () => {
+    completeText.mockResolvedValue(
+      `La parte compradora puede terminar el contrato.\n<CITATIONS>${JSON.stringify([
+        {
+          citation_id: "c1",
+          document_id: "document-1",
+          document_version_id: "version-docx-2",
+          page: 1,
+          span: { start_char: 0, end_char: quote.length },
+          quote,
+          quote_sha256: sha256Hex(quote),
+          finding_text: "La parte compradora puede terminar el contrato.",
+        },
+      ])}</CITATIONS>`,
+    );
+    const res = await request(app)
+      .post("/projects/project-1/ai-executions")
+      .set("Authorization", "Bearer test")
+      .send({
+        matter_id: "matter-1",
+        document_version_id: "version-docx-2",
+        route: {
+          provider: "deepseek",
+          model: "deepseek-chat",
+          credential_ref: "deepseek:v1",
+        },
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.status).toBe("succeeded");
+    expect(
+      writes.filter(
+        (write) =>
+          write.table === "document_versions" && write.operation === "update",
+      ),
+    ).toHaveLength(0);
   });
 
   it("uses a custom workflow without mixing in the default playbook", async () => {

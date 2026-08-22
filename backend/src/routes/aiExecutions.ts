@@ -3,7 +3,10 @@ import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
 import { checkProjectAccess } from "../lib/access";
 import { checkMatterAccess } from "../lib/aiAccess";
-import { loadAiDocumentVersionPages } from "../lib/aiDocumentPages";
+import {
+  isDocxFileType,
+  loadAiDocumentVersionPages,
+} from "../lib/aiDocumentPages";
 import { completeText } from "../lib/llm";
 import {
   parseModelRoute,
@@ -459,7 +462,9 @@ async function createExecution(req: Request, res: import("express").Response) {
   }
   if (
     loadedPages.pages.length === 0
-    || versionRow.page_count == null
+    // Per-type page_count enforcement lives in loadAiDocumentVersionPages:
+    // DOCX tolerates a null declared count (one logical page), every other
+    // type fails closed on null/mismatch.
     || loadedPages.sourceContentSha256 !== versionRow.content_sha256
   ) {
     const failed = await failExecution({
@@ -472,6 +477,26 @@ async function createExecution(req: Request, res: import("express").Response) {
     return void res.status(422).json(failed);
   }
   const pages = loadedPages.pages;
+  // DOCX uploads record page_count=null; a valid, hash-verified extraction
+  // defines exactly one logical page, so the effective page count always
+  // comes from the persisted pages themselves.
+  const effectivePageCount = pages.length;
+
+  if (isDocxFileType(versionRow.file_type) && versionRow.page_count == null) {
+    const { error: pageCountSyncError } = await db
+      .from("document_versions")
+      .update({ page_count: effectivePageCount })
+      .eq("id", versionRow.id)
+      .is("page_count", null);
+    // Optional metadata backfill (null→1): conditional and idempotent, never
+    // overwrites an existing count, and never blocks the AI execution.
+    if (pageCountSyncError) {
+      console.error(
+        "[ai-executions] page_count backfill failed",
+        pageCountSyncError,
+      );
+    }
+  }
 
   const startedAt = new Date().toISOString();
   await updateExecution(db, row.id, { status: "running", started_at: startedAt });
@@ -515,7 +540,7 @@ async function createExecution(req: Request, res: import("express").Response) {
     documentVersionId: versionRow.id,
     documentContentSha256: versionRow.content_sha256,
     sourceContentSha256: loadedPages.sourceContentSha256,
-    pageCount: versionRow.page_count,
+    pageCount: effectivePageCount,
     pages,
   };
   const resolved = resolveCitations(parsedCitations.citations, citationContext);
