@@ -48,6 +48,33 @@ log()  { printf '[beta01-smoke] %s\n' "$*"; }
 fail() { printf '[beta01-smoke] ERROR: %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
+# Target isolation: inherited environment variables must NEVER redirect the
+# smoke to a remote Supabase/API/R2. We drop every target variable the caller
+# might have exported, and wire_env() below exports the LOCAL harness values
+# explicitly so child processes see only the local stack.
+# ---------------------------------------------------------------------------
+TARGET_VARS=(
+  SUPABASE_URL
+  SUPABASE_SECRET_KEY
+  SUPABASE_ANON_KEY
+  NEXT_PUBLIC_SUPABASE_URL
+  NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY
+  NEXT_PUBLIC_API_BASE_URL
+  MIKE_API_BASE_URL
+  R2_ENDPOINT_URL
+  R2_ACCESS_KEY_ID
+  R2_SECRET_ACCESS_KEY
+  R2_BUCKET_NAME
+)
+clear_inherited_targets() {
+  local v
+  for v in "${TARGET_VARS[@]}"; do
+    unset "$v"
+  done
+  log "inherited target variables cleared"
+}
+
+# ---------------------------------------------------------------------------
 # Pre-boot snapshot: remember what already existed so teardown only removes
 # what THIS smoke created.
 # ---------------------------------------------------------------------------
@@ -181,6 +208,22 @@ wire_env() {
   set_kv "$FRONTEND/.env.local" NEXT_PUBLIC_SUPABASE_URL "$API_URL"
   set_kv "$FRONTEND/.env.local" NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY "$ANON_KEY"
   set_kv "$FRONTEND/.env.local" NEXT_PUBLIC_API_BASE_URL "http://localhost:3001"
+
+  # Export the LOCAL harness values explicitly so every child process
+  # (backend, frontend, Playwright) sees exactly the local stack, never an
+  # inherited remote target. The spec's target guard enforce the same bounds.
+  export SUPABASE_URL="$API_URL"
+  export SUPABASE_SECRET_KEY="$SERVICE_KEY"
+  export SUPABASE_ANON_KEY="$ANON_KEY"
+  export NEXT_PUBLIC_SUPABASE_URL="$API_URL"
+  export NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY="$ANON_KEY"
+  export NEXT_PUBLIC_API_BASE_URL="http://localhost:3001"
+  export MIKE_API_BASE_URL="http://localhost:3001"
+  export R2_ENDPOINT_URL="http://localhost:9000"
+  export R2_ACCESS_KEY_ID="minioadmin"
+  export R2_SECRET_ACCESS_KEY="minioadmin"
+  export R2_BUCKET_NAME="mike"
+  log "local target variables exported (supabase/api/r2 -> local harness)"
 }
 
 # ---------------------------------------------------------------------------
@@ -278,10 +321,17 @@ $(docker ps --format '{{.Names}}' | grep -E '^supabase_' || true)"
 # Main
 # ---------------------------------------------------------------------------
 trap cleanup EXIT
+clear_inherited_targets
 snapshot
 ensure_minio
 ensure_supabase
 wire_env
+
+# Fail-fast: reject any non-local target BEFORE building/running anything.
+# This is the same guard the spec enforces before mutating Supabase.
+GUARD_OUT="$(node "$ROOT/e2e/support/beta01-target-guard.cjs" 2>&1)" \
+  || fail "target guard rejected the effective configuration: $GUARD_OUT"
+
 build_frontend
 start_servers
 

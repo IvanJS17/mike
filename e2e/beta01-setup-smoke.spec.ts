@@ -15,10 +15,18 @@ import { test, expect, type Page } from "@playwright/test";
  *   4. confirmar HTTP 201 y la metadata de la versión: version_number=1,
  *      content hash del fixture, size_bytes y metadata de página;
  *   5. limpiar los datos sintéticos (proyecto, organización, usuario).
+ *
+ * Target isolation: before ANY mutation (auth, REST seeds, uploads) the
+ * local-only guard (e2e/support/beta01-target-guard.cjs) validates that
+ * MIKE_API_BASE_URL, SUPABASE_URL and R2 endpoints are loopback and that the
+ * keys belong to the local Supabase demo stack. Hostile/remote targets or an
+ * inherited env var that conflicts with the wired .env reject the run here.
  */
 
 const DOCX_FIXTURE = path.join(__dirname, "fixtures", "beta01-contract.docx");
-const API_BASE = process.env.MIKE_API_BASE_URL ?? "http://localhost:3001";
+// The guard resolves API_BASE below from env/.env; it stays a module-level
+// default so apiRequest() reads the same validated value.
+let API_BASE = "http://localhost:3001";
 const OWNER_PASSWORD = "Beta01OwnerPass-2026!";
 
 type RuntimeConfig = {
@@ -40,38 +48,26 @@ type ApiResult = {
   text: string;
 };
 
-function readEnvValue(key: string): string | undefined {
-  if (process.env[key]) return process.env[key];
-  const files = [
-    path.join(__dirname, "..", "backend", ".env"),
-    path.join(__dirname, "..", "frontend", ".env.local"),
-  ];
-  let value: string | undefined;
-  for (const file of files) {
-    try {
-      for (const line of fs.readFileSync(file, "utf8").split("\n")) {
-        const match = line.match(new RegExp(`^${key}=(.*)$`));
-        if (match) value = match[1].trim().replace(/^"(.*)"$/, "$1");
-      }
-    } catch {
-      // The smoke script wires the env files before the servers start.
-    }
-  }
-  return value;
-}
+// Same guard the smoke runner uses as fail-fast; it throws with sanitized
+// errors (never key values) when a target is not local or conflicts with the
+// wired .env. Must run BEFORE any auth/REST call in this spec.
+const { assertLocalTargets } = require("../support/beta01-target-guard.cjs") as {
+  assertLocalTargets(env?: NodeJS.ProcessEnv): {
+    supabaseUrl: string;
+    serviceKey: string;
+    anonKey: string;
+    apiBase: string;
+  };
+};
 
 function runtimeConfig(): RuntimeConfig {
-  const supabaseUrl = readEnvValue("SUPABASE_URL");
-  const serviceKey = readEnvValue("SUPABASE_SECRET_KEY");
-  const anonKey =
-    readEnvValue("SUPABASE_ANON_KEY") ??
-    readEnvValue("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY");
-  if (!supabaseUrl || !serviceKey || !anonKey) {
-    throw new Error(
-      "Beta 0.1 setup smoke requires SUPABASE_URL, SUPABASE_SECRET_KEY and the local anon key",
-    );
-  }
-  return { supabaseUrl, serviceKey, anonKey };
+  const config = assertLocalTargets(process.env);
+  API_BASE = config.apiBase;
+  return {
+    supabaseUrl: config.supabaseUrl,
+    serviceKey: config.serviceKey,
+    anonKey: config.anonKey,
+  };
 }
 
 function sha256Hex(bytes: Buffer): string {
