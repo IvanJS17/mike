@@ -17,7 +17,12 @@
 #
 # Teardown is unconditional (trap EXIT): every process and container this
 # script started is stopped/removed, and it fails if any of its own
-# processes/containers remain.
+# processes/containers remain. Container ownership is SAFE: MinIO is created
+# (labelled fixture/owner/run, exact container ID recorded) only when
+# `beta01-minio` did not exist before, and teardown removes ONLY that ID and
+# verifies it disappeared; a preexisting container is reused only when it is
+# running/healthy with the fixture label and is never stopped/removed by this
+# script (see e2e/support/beta01-minio-owner.cjs).
 #
 # Usage, from the repo root:  bash scripts/e2e-beta01-setup-smoke.sh
 set -euo pipefail
@@ -28,6 +33,7 @@ FRONTEND="$ROOT/frontend"
 
 MINIO_IMAGE="minio/minio:RELEASE.2025-09-07T16-13-09Z"
 MINIO_CONTAINER="beta01-minio"
+MINIO_HELPER="$ROOT/e2e/support/beta01-minio-owner.cjs"
 SPEC="e2e/beta01-setup-smoke.spec.ts"
 FAKE_FILE="$ROOT/e2e/support/beta01-fakes.cjs"
 
@@ -37,10 +43,15 @@ FRONTEND_LOG="$SMOKE_DIR/frontend.log"
 MINIO_LOG="$SMOKE_DIR/minio.log"
 SUPABASE_LOG="$SMOKE_DIR/supabase.log"
 BUILD_LOG="$SMOKE_DIR/frontend-build.log"
+# Unique per run: identifies this smoke's MinIO container (label
+# com.mike.beta01.run) and scopes the ownership state file.
+RUN_ID="$(basename "$SMOKE_DIR")"
+MINIO_STATE="$SMOKE_DIR/minio-owner.json"
 
 BACKEND_PID=""
 FRONTEND_PID=""
 SUPABASE_STARTED="no"
+MINIO_STARTED="no"
 PRE_CONTAINERS=""
 PRE_WATCHERS=""
 
@@ -104,15 +115,37 @@ wait_http() { # url name tries
 }
 
 ensure_minio() {
-  if docker ps --format '{{.Names}}' | grep -qx "$MINIO_CONTAINER"; then
-    log "MinIO container '$MINIO_CONTAINER' already running"
-    return 0
-  fi
-  log "starting MinIO ($MINIO_IMAGE)"
-  docker run -d --name "$MINIO_CONTAINER" -p 9000:9000 \
-    -e MINIO_ROOT_USER=minioadmin \
-    -e MINIO_ROOT_PASSWORD=minioadmin \
-    "$MINIO_IMAGE" server /data >"$MINIO_LOG" 2>&1
+  local snap mode reason start verify
+  # Ownership decision BEFORE any mutation. The helper records in the state
+  # file whether THIS run created the container (exact ID, MINIO_STARTED=yes)
+  # or will reuse a preexisting labelled one (MINIO_STARTED=no); teardown
+  # (`--cleanup` from the trap) deletes ONLY the recorded ID or verifies the
+  # preexisting one kept the same ID/state — never a stranger's container.
+  snap="$(node "$MINIO_HELPER" --snapshot --state-file "$MINIO_STATE" --run-id "$RUN_ID" 2>>"$MINIO_LOG")" \
+    || fail "MinIO ownership snapshot failed (see $MINIO_LOG)"
+  mode="$(jq -r '.mode // "unknown"' <<<"$snap")"
+  case "$mode" in
+    create)
+      log "starting MinIO ($MINIO_IMAGE) as owned fixture (run $RUN_ID)"
+      start="$(node "$MINIO_HELPER" --start "$MINIO_IMAGE" --state-file "$MINIO_STATE" 2>>"$MINIO_LOG")" \
+        || fail "MinIO container create failed: $(jq -r '.error // "(see $MINIO_LOG)"' <<<"${start:-}" 2>/dev/null)"
+      MINIO_STARTED=yes
+      log "MinIO started (MINIO_STARTED=yes) — container id $(jq -r '.id' <<<"$start")"
+      ;;
+    reuse)
+      MINIO_STARTED=no
+      log "MinIO container '$MINIO_CONTAINER' preexists with fixture label — reusing (MINIO_STARTED=no, never stopped/removed)"
+      verify="$(node "$MINIO_HELPER" --verify --state-file "$MINIO_STATE" 2>>"$MINIO_LOG")" \
+        || fail "MinIO preexisting container no longer reusable: $(jq -r '.reason // "(see $MINIO_LOG)"' <<<"${verify:-}" 2>/dev/null)"
+      ;;
+    fail)
+      reason="$(jq -r '.reason // "no cumple el criterio de ownership"' <<<"$snap")"
+      fail "MinIO container '$MINIO_CONTAINER': $reason — FAIL antes de usar/limpiar, no se toca"
+      ;;
+    *)
+      fail "MinIO ownership snapshot returned unknown mode: $mode"
+      ;;
+  esac
   wait_http "http://localhost:9000/minio/health/ready" "MinIO" 60 \
     || fail "MinIO did not become ready (see $MINIO_LOG)"
   # Create the bucket with the backend's own S3 client (no aws CLI needed).
@@ -278,9 +311,11 @@ cleanup() {
     (cd "$BACKEND" && npx supabase stop) >"$SUPABASE_LOG" 2>&1
   fi
 
-  log "teardown: removing own MinIO container"
-  if docker ps -a --format '{{.Names}}' | grep -qx "$MINIO_CONTAINER"; then
-    docker rm -f "$MINIO_CONTAINER" >/dev/null 2>&1
+  log "teardown: MinIO ownership cleanup"
+  node "$MINIO_HELPER" --cleanup --state-file "$MINIO_STATE" 2>>"$MINIO_LOG"
+  if [ $? -ne 0 ]; then
+    log "teardown FAILED — MinIO ownership cleanup failed (see $MINIO_LOG)"
+    exit 1
   fi
 
   verify_clean
@@ -290,17 +325,19 @@ cleanup() {
 verify_clean() {
   local residue=0 own_containers now_watchers
 
-  # The MinIO container is always ours (unique smoke name). The Supabase
-  # stack is ours ONLY when this run started it (SUPABASE_STARTED=yes); when
-  # it was already running we reuse it and the residue check must not flag it.
-  own_containers="$(docker ps --format '{{.Names}}' | grep -E "^${MINIO_CONTAINER}$" || true)"
+  # The MinIO container is NOT checked here: its lifecycle is owned by the
+  # beta01-minio-owner helper, whose --cleanup already removed OUR created
+  # container (and verified it disappeared) or verified a preexisting one kept
+  # the same ID/state, failing the teardown otherwise. The Supabase stack is
+  # ours ONLY when this run started it (SUPABASE_STARTED=yes); when it was
+  # already running we reuse it and the residue check must not flag it.
   if [ "$SUPABASE_STARTED" = "yes" ]; then
-    own_containers="$own_containers
-$(docker ps --format '{{.Names}}' | grep -E '^supabase_' || true)"
-  fi
-  if [ -n "$own_containers" ]; then
-    log "RESIDUE: own containers still running: $own_containers"
-    residue=1
+    own_containers="$(docker ps --format '{{.Names}}' | grep -E '^supabase_' || true)"
+    if [ -n "$own_containers" ]; then
+      log "RESIDUE: own supabase containers still running:"
+      log "$own_containers"
+      residue=1
+    fi
   fi
 
   now_watchers="$(ps -eo args | grep -E 'watch src/index\.ts|next-server' | grep -v grep || true)"
