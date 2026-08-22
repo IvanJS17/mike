@@ -6,12 +6,17 @@
 // belongs to THIS smoke run:
 //
 //   container absent
-//     -> this run CREATES it with fixture/owner/run labels, records the exact
-//        container ID and MINIO_STARTED=yes; teardown removes ONLY that ID and
-//        verifies it disappeared;
+//     -> this run CREATES it with fixture/owner/run labels; the ONLY owned
+//        identity is the container ID `docker run` prints, persisted
+//        (started=pending + createdId + runId) BEFORE any later inspect;
+//        teardown inspects/removes/verifies ONLY that ID — a failed run
+//        adopts or deletes NOTHING, and a substitute that took the name is
+//        never touched;
 //   container present, running, healthy, label com.mike.beta01.fixture=true
 //     -> this run REUSES it (MINIO_STARTED=no) and never stops/removes/alters
-//        its lifecycle; teardown verifies the SAME ID and running state;
+//        its lifecycle; teardown compares ID, running, health and labels
+//        fixture/owner/run BYTE-BY-BYTE against the snapshot and FAILS
+//        without mutating on any drift;
 //   container present but unlabeled, stopped/unhealthy, or the ID changed
 //   while this run was active
 //     -> FAIL before using/cleaning; never touched.
@@ -82,13 +87,16 @@ class MinioOwnership {
     fs.renameSync(tmp, this.statePath);
   }
 
-  // Result of `docker container inspect <name>`:
+  // Result of `docker container inspect <ref>` (ref = container ID or name).
+  // Callers MUST pass the ID recorded in the ownership state: the name is
+  // mutable and snapshot() uses it exactly ONCE, to DISCOVER the container;
+  // every later inspect/verify/cleanup goes by the recorded ID.
   //   null            -> the container does not exist
   //   { id, running, health, labels }
   // health is null when the image has no HEALTHCHECK (MinIO image does not);
   // in that case "healthy" means simply "running".
-  async inspect(name) {
-    const r = await this.exec(["container", "inspect", name]);
+  async inspect(ref) {
+    const r = await this.exec(["container", "inspect", ref]);
     if (r.status === 0) {
       let parsed;
       try {
@@ -124,6 +132,36 @@ class MinioOwnership {
     return this.isLabeled(info) && info.running && this.isHealthy(info);
   }
 
+  labelValue(labels, key) {
+    return labels[key] === undefined ? null : labels[key];
+  }
+
+  // Byte-by-byte comparison of EVERYTHING the snapshot recorded about a
+  // PREEXISTING container: ID, running, health and labels fixture/owner/run.
+  // Any drift -> a human-readable reason; none -> null. verify()/cleanup()
+  // FAIL without mutating on any drift.
+  driftReason(info, state) {
+    const problems = [];
+    if (info.id !== state.preexistingId) {
+      problems.push(`ID cambió (snapshot=${state.preexistingId}, actual=${info.id})`);
+    }
+    if (info.running !== state.preexistingRunning) {
+      problems.push(`running cambió (snapshot=${state.preexistingRunning}, actual=${info.running})`);
+    }
+    if (info.health !== state.preexistingHealthy) {
+      problems.push(`health cambió (snapshot=${state.preexistingHealthy}, actual=${info.health})`);
+    }
+    const beforeLabels = state.preexistingLabels || {};
+    for (const key of [FIXTURE_LABEL, OWNER_LABEL, RUN_LABEL]) {
+      const before = this.labelValue(beforeLabels, key);
+      const now = this.labelValue(info.labels, key);
+      if (now !== before) {
+        problems.push(`label ${key} cambió (snapshot=${before}, actual=${now})`);
+      }
+    }
+    return problems.length === 0 ? null : `drift del preexistente: ${problems.join("; ")}`;
+  }
+
   // Decision BEFORE any mutation. Writes the ownership state file.
   async snapshot() {
     const info = await this.inspect(this.name);
@@ -137,6 +175,7 @@ class MinioOwnership {
         preexistingRunning: null,
         preexistingHealthy: null,
         preexistingLabeled: null,
+        preexistingLabels: null,
         owner: this.owner,
         runId: this.runId,
         reason: null,
@@ -159,8 +198,13 @@ class MinioOwnership {
         createdId: null,
         preexistingId: info.id,
         preexistingRunning: info.running,
-        preexistingHealthy: healthy,
+        preexistingHealthy: info.health,
         preexistingLabeled: labeled,
+        preexistingLabels: {
+          [FIXTURE_LABEL]: this.labelValue(info.labels, FIXTURE_LABEL),
+          [OWNER_LABEL]: this.labelValue(info.labels, OWNER_LABEL),
+          [RUN_LABEL]: this.labelValue(info.labels, RUN_LABEL),
+        },
         owner: this.owner,
         runId: this.runId,
         reason: `preexistente ${problems.join(", ")}`,
@@ -176,8 +220,13 @@ class MinioOwnership {
       createdId: null,
       preexistingId: info.id,
       preexistingRunning: info.running,
-      preexistingHealthy: healthy,
+      preexistingHealthy: info.health,
       preexistingLabeled: true,
+      preexistingLabels: {
+        [FIXTURE_LABEL]: this.labelValue(info.labels, FIXTURE_LABEL),
+        [OWNER_LABEL]: this.labelValue(info.labels, OWNER_LABEL),
+        [RUN_LABEL]: this.labelValue(info.labels, RUN_LABEL),
+      },
       owner: this.owner,
       runId: this.runId,
       reason: null,
@@ -187,8 +236,15 @@ class MinioOwnership {
   }
 
   // Create the container ONLY when the snapshot decided mode=create. Labels
-  // fixture/owner/run identify ownership; the exact ID is captured afterwards
-  // (never the name, which can be hijacked between run and inspect).
+  // fixture/owner/run identify ownership, but the ONLY identity this run
+  // owns is the container ID `docker run` PRINTS (never the name, which can
+  // be hijacked between run and inspect). The ID is persisted atomically
+  // (started=pending + createdId + runId) BEFORE any later inspect, so if
+  // the inspect/verify/label/save step afterwards fails, a trap-based
+  // --cleanup still removes and verifies EXACTLY that ID. A failed `docker
+  // run` adopts NOTHING: containers that appeared during a failed run are
+  // neither adopted nor deleted by this run (KISS: ownership only exists
+  // through a returned ID).
   async create(image) {
     this.ensureState();
     if (!this.state || this.state.mode !== "create") {
@@ -216,60 +272,65 @@ class MinioOwnership {
       "/data",
     ]);
     if (r.status !== 0) {
-      // docker run failed (e.g. name raced in by someone else or a partial
-      // create left a container behind). Adopt ONLY what provably carries our
-      // fixture+owner labels — a stranger's container is never deleted.
-      const after = await this.inspect(this.name);
-      if (
-        after !== null &&
-        after.labels[FIXTURE_LABEL] === FIXTURE_LABEL_VALUE &&
-        after.labels[OWNER_LABEL] === this.owner
-      ) {
-        this.state.createdId = after.id;
-        this.state.started = "yes";
-        this.saveState();
-      }
+      // Zero adoption: a failed run provides no owned ID, so whatever
+      // appeared (even bearing our exact labels) is left untouched — never
+      // adopted, never deleted. State stays started=no -> cleanup removes
+      // nothing.
       throw new Error(`docker run failed (status ${r.status}): ${firstLine(r.stderr)}`);
     }
-    const info = await this.inspect(this.name);
-    if (info === null) {
-      throw new Error("container reported created but docker inspect cannot find it");
+    const id = firstLine(r.stdout);
+    if (!id || /\s/.test(id)) {
+      throw new Error(
+        `docker run did not return a container ID: ${JSON.stringify(String(r.stdout || "").slice(0, 80))}`
+      );
     }
-    this.state.createdId = info.id;
+    // Persist ownership BEFORE inspecting: even if the next steps fail, the
+    // recorded started=pending + createdId + runId is what teardown removes
+    // and verifies.
+    this.state.createdId = id;
+    this.state.started = "pending";
+    this.saveState();
+
+    // Always by ID, never by name.
+    const info = await this.inspect(id);
+    if (info === null) {
+      throw new Error(
+        `container reported created but docker inspect cannot find it — createdId ${id} persiste para teardown`
+      );
+    }
     this.state.started = "yes";
     this.saveState();
-    return { id: info.id };
+    return { id };
   }
 
-  // Reuse path: re-validates BEFORE use that the preexisting container is
-  // still the same object (same ID), running and healthy. Any drift -> fail
-  // without touching anything.
+  // Reuse path: re-validates BEFORE use, by the SNAPSHOT ID (never the
+  // mutable name), that the preexisting container is still the same object
+  // with the same running/health/labels. Any drift -> fail without touching.
   async verify() {
     this.ensureState();
     if (!this.state || this.state.mode !== "reuse") {
       throw new Error("verify() requires a snapshot that decided mode=reuse");
     }
-    const info = await this.inspect(this.name);
+    const info = await this.inspect(this.state.preexistingId);
     if (info === null) {
-      return { ok: false, reason: "preexistente desapareció antes de usarse" };
-    }
-    if (info.id !== this.state.preexistingId) {
       return {
         ok: false,
-        reason: `ID del preexistente cambió (snapshot=${this.state.preexistingId}, actual=${info.id})`,
+        reason: `preexistente desapareció antes de usarse (ID ${this.state.preexistingId} ya no existe; nunca se toca un sustituto)`,
       };
     }
-    if (!this.isReusable(info)) {
-      return { ok: false, reason: "preexistente dejó de estar running/healthy con label de fixture" };
-    }
+    const drift = this.driftReason(info, this.state);
+    if (drift) return { ok: false, reason: drift };
     return { ok: true, id: info.id };
   }
 
   // Teardown contract:
-  //   - created container  -> removed ONLY when its current ID is still the
-  //     recorded one; then verified gone. ID race -> FAIL without deleting.
-  //   - preexisting        -> verified same ID and still running; never
-  //     stopped/removed. Drift -> FAIL without touching.
+  //   - created container  -> verified/removed by the RECORDED ID only
+  //     (started=pending or yes); a container that took the name in the
+  //     meantime is never inspected, adopted or deleted; rename does not
+  //     hide residue (the ID is still ours and still verified/removed).
+  //   - preexisting        -> re-verified BY THE SNAPSHOT ID: ID, running,
+  //     health and labels fixture/owner/run compared byte-by-byte; any
+  //     drift -> FAIL without touching.
   //   - failed decision    -> never touched (verified intact).
   //   - no state           -> nothing owned by this run; nothing deleted.
   async cleanup() {
@@ -279,58 +340,66 @@ class MinioOwnership {
     }
 
     if (this.state.mode === "create") {
-      if (this.state.started !== "yes") {
+      if (this.state.started !== "yes" && this.state.started !== "pending") {
         return { ok: true, note: "nunca se creó contenedor — nada que eliminar" };
       }
-      const info = await this.inspect(this.name);
+      const createdId = this.state.createdId;
+      if (!createdId) {
+        return { ok: true, note: "sin createdId registrado — nada que eliminar" };
+      }
+      // Verify and remove BY THE RECORDED ID only; whatever now holds the
+      // name (substitute, renamed stranger) is never inspected or deleted.
+      const info = await this.inspect(createdId);
       if (info === null) {
         return {
           ok: true,
-          note: `contenedor creado (${this.state.createdId}) ya no existe — verificado`,
+          note: `contenedor creado (${createdId}) ya no existe — verificado por ID`,
         };
       }
-      if (info.id !== this.state.createdId) {
+      if (info.id !== createdId) {
         return {
           ok: false,
-          reason: `ID race: el contenedor actual (${info.id}) NO es el creado por esta corrida (${this.state.createdId}) — no se borra`,
+          reason: `ID race: el contenedor con ID ${info.id} NO es el creado por esta corrida (${createdId}) — no se borra`,
         };
       }
-      const rm = await this.exec(["rm", "-f", info.id]);
+      const rm = await this.exec(["rm", "-f", createdId]);
       if (rm.status !== 0) {
         return {
           ok: false,
           reason: `docker rm -f falló (status ${rm.status}): ${firstLine(rm.stderr)}`,
         };
       }
-      const after = await this.inspect(this.name);
+      const after = await this.inspect(createdId);
       if (after !== null) {
-        return { ok: false, reason: "tras docker rm -f el contenedor aún existe" };
+        return { ok: false, reason: "tras docker rm -f el contenedor aún existe (verificado por ID)" };
       }
-      return { ok: true, note: `contenedor creado eliminado (${info.id}) y verificado` };
+      return { ok: true, note: `contenedor creado eliminado (${createdId}) y verificado por ID` };
     }
 
     if (this.state.mode === "reuse") {
-      const info = await this.inspect(this.name);
+      const info = await this.inspect(this.state.preexistingId);
       if (info === null) {
-        return { ok: false, reason: "preexistente desapareció durante la corrida" };
-      }
-      if (info.id !== this.state.preexistingId) {
         return {
           ok: false,
-          reason: `ID del preexistente cambió durante la corrida (snapshot=${this.state.preexistingId}, actual=${info.id}) — sin tocar`,
+          reason: `preexistente desapareció durante la corrida (ID ${this.state.preexistingId} ya no existe; nunca se toca un sustituto)`,
         };
       }
-      if (!info.running) {
-        return { ok: false, reason: "preexistente ya no está running durante la corrida" };
-      }
+      const drift = this.driftReason(info, this.state);
+      if (drift) return { ok: false, reason: drift };
       return {
         ok: true,
-        note: `preexistente preservado (${info.id}, running, nunca detenido/eliminado)`,
+        note: `preexistente preservado (${info.id}, running, healthy, labels fixture/owner/run intactas)`,
       };
     }
 
     if (this.state.mode === "fail") {
-      const info = await this.inspect(this.name);
+      // Fail-mode never touches anything. Verification goes by the recorded
+      // ID only — the name is never inspected after snapshot (snapshot always
+      // records preexistingId before a fail decision).
+      if (!this.state.preexistingId) {
+        return { ok: true, note: "fail-mode: sin preexistingId registrado — no se tocó nada" };
+      }
+      const info = await this.inspect(this.state.preexistingId);
       if (info === null) {
         return { ok: true, note: "fail-mode: no se tocó nada (contenedor no presente)" };
       }
