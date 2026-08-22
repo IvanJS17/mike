@@ -72,6 +72,16 @@ globalThis.fetch = async function spyFetch() {
 
 const IMAGE = "minio/minio:RELEASE.2025-09-07T16-13-09Z";
 
+// Docker spells the inspect-404 in two ways ("No such object: <ref>" and
+// "No such container: <ref>"); the fake alternates them deterministically so
+// both code paths of the helper are exercised without extra cases.
+let absentCallCount = 0;
+function absentInspectStderr(ref) {
+  absentCallCount += 1;
+  const phrase = absentCallCount % 2 === 1 ? "No such object" : "No such container";
+  return `Error: ${phrase}: ${ref}`;
+}
+
 let failures = 0;
 function check(name, condition, detail = "") {
   if (condition) {
@@ -142,7 +152,13 @@ function fakeDocker() {
         return { status: 1, stdout: "", stderr: "fake: docker daemon error (inspect unavailable)" };
       }
       const found = resolve(rest[1]);
-      if (!found) return { status: 1, stdout: "", stderr: `Error: No such object: ${rest[1]}` };
+      if (!found) {
+        return {
+          status: 1,
+          stdout: "",
+          stderr: absentInspectStderr(rest[1]),
+        };
+      }
       return { status: 0, stdout: JSON.stringify([found.doc]), stderr: "" };
     }
     if (cmd === "run") {
@@ -216,6 +232,7 @@ function fakeDocker() {
     failInspect(n) {
       state.failInspects = n;
     },
+    absentInspectStderr,
   };
 }
 
@@ -915,6 +932,110 @@ async function main() {
     check("c10b ZERO mutating docker calls",
       mutatingEvents(fakeB.events).length === 0,
       mutatingEvents(fakeB.events).join(" | ") || "(none)");
+  }
+
+  // -------------------------------------------------------------------------
+  // c11 — AUSENCIA de Docker: ambos stderr EXACTOS del daemon ("No such
+  // object: <name>" y "No such container: <name>", case/whitespace
+  // razonables) con exit nonzero se interpretan como ausencia (null ->
+  // mode=create), sin crear ni eliminar nada; los errores GENUINOS de
+  // daemon/permisos/conexión siguen siendo FAIL (throw), nunca ausencia.
+  // -------------------------------------------------------------------------
+  {
+    const ABSENTS = [
+      "Error: No such object: beta01-minio",
+      "Error: No such container: beta01-minio",
+      "error: no such container:   beta01-minio", // case + whitespace razonable
+      "Error: No Such Object:\tbeta01-minio",
+    ];
+    const GENUINE = [
+      "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+      "permission denied while trying to connect to the Docker daemon socket",
+      "fake: docker daemon error (inspect unavailable)",
+    ];
+    for (const [i, stderr] of ABSENTS.entries()) {
+      const fake = fakeDocker();
+      const ownership = new MinioOwnership({ exec: fake.exec, runId: `run-11-${i}` });
+      const rawExec = fake.exec;
+      const exec = async (args) => {
+        const r = await rawExec(args);
+        if (args[0] === "container") {
+          expectInspectStatus(r.status);
+          return { ...r, stdout: "", stderr };
+        }
+        return r;
+      };
+      function expectInspectStatus(status) {
+        if (status !== 1) throw new Error(`fake c11: inspect status inesperado ${status}`);
+      }
+      const snap = await ownership.snapshot();
+      check(`c11[${i}] absent stderr -> mode=create (${stderr})`,
+        snap.mode === "create" && ownership.state.started === "no" && ownership.state.createdId === null,
+        JSON.stringify(snap));
+      check(`c11[${i}] snapshot NO muta el mundo docker`,
+        fake.containers.size === 0 && !fake.events.some((e) => /^(run|rm|stop) /.test(e)),
+        fake.events.join(" | ") || "(no events)");
+      const cleaned = await ownership.cleanup();
+      check(`c11[${i}] cleanup tras ausencia no elimina nada`,
+        cleaned.ok === true && /nunca se creó/.test(cleaned.note || ""),
+        JSON.stringify(cleaned));
+    }
+    for (const [j, stderr] of GENUINE.entries()) {
+      const fake = fakeDocker();
+      const ownership = new MinioOwnership({ exec: fake.exec, runId: `run-11g-${j}` });
+      const exec = async (args) => {
+        if (args[0] === "container") {
+          return { status: 1, stdout: "", stderr };
+        }
+        return fake.exec(args);
+      };
+      ownership.exec = exec;
+      let threw = null;
+      try {
+        await ownership.snapshot();
+      } catch (err) {
+        threw = err;
+      }
+      check(`c11g[${j}] genuine error keeps THROWING (${stderr.slice(0, 44)}...)`,
+        threw !== null && /docker inspect failed \(status 1\)/.test(threw.message),
+        threw ? threw.message : "no error");
+      check(`c11g[${j}] genuine error ZERO mutating calls`,
+        fake.events.every((e) => !/^(run|rm|stop) /.test(e)),
+        fake.events.join(" | ") || "(no events)");
+    }
+
+    // Ambos mensajes EXACTOS también en el camino post-run por ID: la
+    // verificación tras `docker rm -f` debe aceptar cualquiera de las dos
+    // grafías como "verificado desaparecido".
+    for (const [k, stderr] of ["Error: No such object: cid-1", "Error: No such container: cid-1"].entries()) {
+      const statePath = path.join(TMP_DIR, `c11-id-${k}-state.json`);
+      const fake = fakeDocker();
+      const ownership = new MinioOwnership({ exec: fake.exec, runId: `run-11id-${k}`, statePath });
+      await ownership.snapshot(); // absent -> create
+      await ownership.create(IMAGE); // cid-1 creado y verificado
+      const rawExec = fake.exec;
+      // La grafía EXACTA sólo en la verificación POST-rm: el primer inspect de
+      // cleanup (pre-rm) debe ver el contenedor vivo; tras `docker rm -f`, el
+      // segundo inspect devuelve el 404 de Docker en la grafía k.
+      let cleanupInspects = 0;
+      ownership.exec = async (args) => {
+        const r = await rawExec(args);
+        if (args[0] === "container" && args[1] === "inspect" && args[2] === "cid-1") {
+          cleanupInspects += 1;
+          if (cleanupInspects >= 2) {
+            return { status: 1, stdout: "", stderr };
+          }
+        }
+        return r;
+      };
+      const cleaned = await ownership.cleanup(); // rm ok; verify-inspect devuelve la grafía k
+      check(`c11id[${k}] post-rm absence by ID via "${stderr}" -> cleanup OK`,
+        cleaned.ok === true && /verificado por ID/.test(cleaned.note || ""),
+        JSON.stringify(cleaned));
+      check(`c11id[${k}] exactly one rm of our created ID`,
+        fake.events.filter((e) => e.startsWith("rm ")).length === 1,
+        fake.events.filter((e) => e.startsWith("rm ")).join(" | "));
+    }
   }
 
   check("final: zero failures", failures === 0, `${failures} failures`);

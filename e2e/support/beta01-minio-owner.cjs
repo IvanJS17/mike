@@ -56,6 +56,16 @@ function firstLine(text) {
   return String(text || "").trim().split("\n")[0] || "";
 }
 
+// Docker spells the "inspect target does not exist" 404 in two ways,
+// depending on CLI version/code path: `No such object: <ref>` and
+// `No such container: <ref>`. BOTH mean absence and map to null; this is
+// only consulted on the nonzero-exit branch, so it can never mask a healthy
+// response. Daemon/permission/connection errors contain neither phrase and
+// keep throwing — absence is never inferred from a broken daemon.
+function isDockerAbsentStderr(stderr) {
+  return /no such (?:object|container):\s*\S+/i.test(String(stderr || ""));
+}
+
 class MinioOwnership {
   constructor(options = {}) {
     this.exec = options.exec || realDocker;
@@ -109,7 +119,8 @@ class MinioOwnership {
   // Callers MUST pass the ID recorded in the ownership state: the name is
   // mutable and snapshot() uses it exactly ONCE, to DISCOVER the container;
   // every later inspect/verify/cleanup goes by the recorded ID.
-  //   null            -> the container does not exist
+  //   null            -> the container does not exist (both Docker 404
+  //                      spellings: "No such object" / "No such container")
   //   { id, running, health, labels }
   // health is null when the image has no HEALTHCHECK (MinIO image does not);
   // in that case "healthy" means simply "running".
@@ -134,7 +145,7 @@ class MinioOwnership {
         labels: obj.Config && obj.Config.Labels ? obj.Config.Labels : {},
       };
     }
-    if (/No such object/.test(r.stderr || "")) return null;
+    if (isDockerAbsentStderr(r.stderr)) return null;
     throw new Error(`docker inspect failed (status ${r.status}): ${firstLine(r.stderr)}`);
   }
 
