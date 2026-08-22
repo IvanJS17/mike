@@ -120,6 +120,19 @@ const { assertLocalTargets } = require("./support/beta01-target-guard.cjs") as {
   };
 };
 
+// Gate 2 fix B: composición pura de errores cuerpo/teardown (sin stack, sin
+// red). El teardown (fixture/auth/state-file) SIEMPRE corre y sus errores
+// nunca reemplazan el error primario: si ambos lados fallan, el compuesto
+// identifica PRIMARY primero y CLEANUP después conservando mensajes y stacks.
+const { combineCleanupErrors } = require(
+  "./support/beta01-cleanup-errors.cjs",
+) as {
+  combineCleanupErrors(
+    primaryError: unknown,
+    cleanupErrors: unknown[],
+  ): unknown;
+};
+
 function runtimeConfig(): RuntimeConfig {
   const config = assertLocalTargets(process.env);
   API_BASE = config.apiBase;
@@ -657,6 +670,13 @@ test.describe("Beta 0.1 AI smoke (Gate 2)", () => {
       createProjectCleanupClients(config, owner),
     );
     let projectId: string | null = null;
+    // Gate 2 fix B: el error del CUERPO se captura explícitamente y el
+    // teardown SIEMPRE corre en el finally, capturando sus propios errores.
+    // Si ambos lados fallan, combineCleanupErrors() lanza el compuesto con
+    // PRIMARY primero y CLEANUP después; el finally jamás reemplaza el error
+    // primario.
+    let bodyError: unknown = null;
+    const cleanupErrors: unknown[] = [];
     try {
       await loginInUi(page, owner);
       projectId = await createProjectAndUploadDocx(
@@ -779,18 +799,42 @@ test.describe("Beta 0.1 AI smoke (Gate 2)", () => {
       };
       expect(fakeState.provider_calls).toBe(1);
       expect(fakeState.drive_upload_calls).toBe(0);
+    } catch (error) {
+      bodyError = error;
     } finally {
       // Teardown (criterio Gate 1 fix 2b): cero recursos de negocio y cero
       // objetos por corrida — deleteAndVerifyProject borra primero el
       // proyecto (viendo documents/versions/storage) y verifica read-back
       // cero + objetos cero; después se limpia organization/cascade con los
       // UUID preasignados. Cualquier residuo hace FAIL (run() lanza).
-      await cleanup.run();
-      await Promise.all(
-        [owner.id, reviewer.id].map((userId) => deleteUser(config, userId)),
-      );
-      fs.rmSync(FAKE_STATE_FILE, { force: true });
-      expect(fs.existsSync(FAKE_STATE_FILE)).toBe(false);
+      // Gate 2 fix B: cada paso del teardown captura su propio error; nada
+      // se silencia y el error del cuerpo jamás se reemplaza por un error
+      // de cleanup.
+      try {
+        await cleanup.run();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      try {
+        await Promise.all(
+          [owner.id, reviewer.id].map((userId) => deleteUser(config, userId)),
+        );
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      try {
+        fs.rmSync(FAKE_STATE_FILE, { force: true });
+        expect(fs.existsSync(FAKE_STATE_FILE)).toBe(false);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
     }
+    // Gate 2 fix B: decisión de propagación pura — NULL si todo pasó; el
+    // error del cuerpo tal cual si sólo el cuerpo falló; el error de cleanup
+    // tal cual si sólo el cleanup falló; y el compuesto PRIMARY primero /
+    // CLEANUP después si ambos fallaron (mensajes y stacks de todos
+    // preservados; el primario nunca se reemplaza).
+    const outcome = combineCleanupErrors(bodyError, cleanupErrors);
+    if (outcome) throw outcome;
   });
 });
