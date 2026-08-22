@@ -26,6 +26,19 @@
 #     persiste ahí provider/drive counters y el spec AI afirma provider=1/
 #     drive=0 leyendo ese mismo path; el teardown lo elimina junto con
 #     SMOKE_DIR y nunca imprime su contenido.
+#   - BETA01_SMOKE_SPEC=e2e/beta01-ai-smoke.spec.ts (Gate 2 fix C) NUNCA
+#     reutiliza/resetea/detiene un stack Supabase preexistente: el runner
+#     levanta un stack DISPOSABLE exclusivo de la corrida bajo SMOKE_DIR
+#     (supabase-project/) con project_id y ports ÚNICOS derivados de RUN_ID
+#     sobre la config canónica backend/supabase/config.toml (workdir propio),
+#     lo arranca/consulta con `npx supabase start|status --workdir`, y
+#     backend/frontend reciben SÓLO las URLs/keys de ese stack; el ownership
+#     exacto (containers por ID/label com.supabase.cli.project, volumes,
+#     network) lo registra e2e/support/beta01-supabase-owner.cjs y el teardown
+#     destruye ÚNICAMENTE esos recursos (incluso ante fallo parcial del start),
+#     verificando que todo stack preexistente conserva mismo IDs/estado y que
+#     quedan CERO recursos propios; la limpieza NUNCA borra filas (las tablas
+#     terminales ai_executions/receipts/audit quedan intactas por diseño).
 #
 # Teardown is unconditional (trap EXIT): every process and container this
 # script started is stopped/removed, and it fails if any of its own
@@ -67,6 +80,20 @@ esac
   exit 1
 }
 FAKE_FILE="$ROOT/e2e/support/beta01-fakes.cjs"
+
+# Gate 2 fix C: el spec IA usa un stack Supabase DISPOSABLE exclusivo de la
+# corrida (project_id/ports/workdir únicos bajo SMOKE_DIR); el spec setup
+# (default) conserva EXACTAMENTE el comportamiento Gate 1 (stack canónico,
+# reuso seguro vía snapshot si ya estaba corriendo).
+SPEC_IS_AI=0
+if [ "$SPEC" = "e2e/beta01-ai-smoke.spec.ts" ]; then
+  SPEC_IS_AI=1
+fi
+SUPABASE_OWNER_HELPER="$ROOT/e2e/support/beta01-supabase-owner.cjs"
+SBDISPOSABLE_ACTIVE="no"
+SBDISPOSABLE_PROJECT=""
+SBDISPOSABLE_WORKDIR=""
+SBDISPOSABLE_STATE=""
 
 SMOKE_DIR="$(mktemp -d /tmp/beta01-smoke.XXXXXX)"
 BACKEND_LOG="$SMOKE_DIR/backend.log"
@@ -131,9 +158,13 @@ clear_inherited_targets() {
 # ---------------------------------------------------------------------------
 snapshot() {
   PRE_CONTAINERS="$(docker ps --format '{{.Names}}' | sort)"
-  if [ -n "$PRE_CONTAINERS" ] && grep -qE '^supabase_' <<<"$PRE_CONTAINERS"; then
+  # Gate 2 fix C: en modo AI el stack Supabase SIEMPRE es disposable propio;
+  # la presencia de un stack preexistente no cambia nada aquí (el helper
+  # beta01-supabase-owner.cjs registra y verifica los preexistentes por label).
+  # El chequeo de reuso aplica sólo al spec setup (comportamiento Gate 1).
+  if [ "$SPEC_IS_AI" != "1" ] && [ -n "$PRE_CONTAINERS" ] && grep -qE '^supabase_' <<<"$PRE_CONTAINERS"; then
     log "a Supabase stack was already running — teardown will not stop it"
-  else
+  elif [ "$SPEC_IS_AI" != "1" ]; then
     SUPABASE_STARTED="yes"
   fi
   PRE_WATCHERS="$(ps -eo args | grep -E 'watch src/index\.ts|next-server' | grep -v grep || true)"
@@ -215,22 +246,7 @@ ensure_minio() {
 # ---------------------------------------------------------------------------
 # Supabase CLI stack + schema/migrations/grants (same recipe as e2e-local-stack.sh)
 # ---------------------------------------------------------------------------
-ensure_supabase() {
-  if [ "$SUPABASE_STARTED" = "yes" ]; then
-    log "starting local Supabase stack"
-    (cd "$BACKEND" && npx supabase start) >"$SUPABASE_LOG" 2>&1 \
-      || fail "supabase start failed (see $SUPABASE_LOG)"
-  else
-    log "Supabase stack already running — reusing it"
-  fi
-  local status
-  status="$(cd "$BACKEND" && npx supabase status -o json)" \
-    || fail "supabase status failed"
-  DB_URL="$(jq -r '.DB_URL' <<<"$status")"
-  API_URL="$(jq -r '.API_URL' <<<"$status")"
-  ANON_KEY="$(jq -r '.ANON_KEY' <<<"$status")"
-  SERVICE_KEY="$(jq -r '.SERVICE_ROLE_KEY' <<<"$status")"
-
+apply_schema() {
   if [ "$(psql "$DB_URL" -tAc "SELECT to_regclass('public.user_profiles') IS NULL")" = "t" ]; then
     log "loading schema.sql into fresh database"
     psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "$BACKEND/schema.sql"
@@ -245,6 +261,96 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO service_r
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO service_role;
 NOTIFY pgrst, 'reload schema';
 SQL
+}
+
+ensure_supabase() {
+  if [ "$SPEC_IS_AI" = "1" ]; then
+    ensure_supabase_disposable
+    return
+  fi
+  if [ "$SUPABASE_STARTED" = "yes" ]; then
+    log "starting local Supabase stack"
+    (cd "$BACKEND" && npx supabase start) >"$SUPABASE_LOG" 2>&1 \
+      || fail "supabase start failed (see $SUPABASE_LOG)"
+  else
+    log "Supabase stack already running — reusing it"
+  fi
+  local status
+  status="$(cd "$BACKEND" && npx supabase status -o json)" \
+    || fail "supabase status failed"
+  DB_URL="$(jq -r '.DB_URL' <<<"$status")"
+  API_URL="$(jq -r '.API_URL' <<<"$status")"
+  ANON_KEY="$(jq -r '.ANON_KEY' <<<"$status")"
+  SERVICE_KEY="$(jq -r '.SERVICE_ROLE_KEY' <<<"$status")"
+  apply_schema
+}
+
+# Gate 2 fix C — DISPOSABLE Supabase stack, exclusive property of THIS run.
+# Unique project_id/ports/workdir under SMOKE_DIR derived from RUN_ID over the
+# canonical config; backend/frontend receive ONLY this stack's URLs/keys; a
+# preexisting stack is never reused, reset, stopped nor mutated (ownership
+# helper snapshots it and the teardown verifies same IDs/state byte-by-byte).
+ensure_supabase_disposable() {
+  local seed base api_port db_port shadow_port pooler_port studio_port smtp_port inspector_port analytics_port snap mode status
+  SBDISPOSABLE_PROJECT="beta01ai$(printf '%s' "$RUN_ID" | tr -cd 'a-z0-9' | tail -c 10)"
+  seed="$(printf '%s' "$RUN_ID" | cksum | awk '{print $1}')"
+  base=$(( 56000 + (seed % 1500) ))
+  api_port=$base
+  db_port=$((base + 1))
+  shadow_port=$((base - 1))
+  pooler_port=$((base + 8))
+  studio_port=$((base + 2))
+  smtp_port=$((base + 3))
+  inspector_port=$((base + 9))
+  analytics_port=$((base + 6))
+
+  # Unique config derived from the canonical one (project_id + every port the
+  # CLI binds), never touching backend/supabase/config.toml itself.
+  SBDISPOSABLE_WORKDIR="$SMOKE_DIR/supabase-project"
+  mkdir -p "$SBDISPOSABLE_WORKDIR/supabase"
+  sed \
+    -e "s/^project_id = .*/project_id = \"$SBDISPOSABLE_PROJECT\"/" \
+    -e "s/^port = 54321/port = $api_port/" \
+    -e "s/^port = 54322/port = $db_port/" \
+    -e "s/^shadow_port = 54320/shadow_port = $shadow_port/" \
+    -e "s/^port = 54329/port = $pooler_port/" \
+    -e "s/^port = 54323/port = $studio_port/" \
+    -e "s/^port = 54324/port = $smtp_port/" \
+    -e "s/^inspector_port = 8083/inspector_port = $inspector_port/" \
+    -e "s/^port = 54327/port = $analytics_port/" \
+    "$BACKEND/supabase/config.toml" >"$SBDISPOSABLE_WORKDIR/supabase/config.toml"
+  log "disposable Supabase config written (project $SBDISPOSABLE_PROJECT, api :$api_port, db :$db_port)"
+
+  # Ownership decision BEFORE any mutation: resources that already carry OUR
+  # project label fail closed (stale/racing stack) — never reused nor touched.
+  SBDISPOSABLE_STATE="$SMOKE_DIR/supabase-owner.json"
+  snap="$(node "$SUPABASE_OWNER_HELPER" --snapshot --project-id "$SBDISPOSABLE_PROJECT" --state-file "$SBDISPOSABLE_STATE")" \
+    || fail "supabase disposable ownership snapshot failed (see $SUPABASE_LOG)"
+  mode="$(jq -r '.mode // "unknown"' <<<"$snap")"
+  if [ "$mode" != "create" ]; then
+    fail "supabase disposable: $(jq -r '.reason // "unknown"' <<<"$snap" 2>/dev/null) — FAIL antes de mutar, no se toca nada"
+  fi
+  SBDISPOSABLE_ACTIVE="yes"
+
+  log "starting DISPOSABLE Supabase stack (--workdir $SBDISPOSABLE_WORKDIR)"
+  (cd "$BACKEND" && npx supabase start --workdir "$SBDISPOSABLE_WORKDIR") >"$SUPABASE_LOG" 2>&1 \
+    || fail "supabase start (disposable) failed (see $SUPABASE_LOG)"
+  SUPABASE_STARTED="yes"
+
+  # URLs/keys from THIS stack only.
+  status="$(cd "$BACKEND" && npx supabase status -o json --workdir "$SBDISPOSABLE_WORKDIR")" \
+    || fail "supabase status (disposable) failed (see $SUPABASE_LOG)"
+  DB_URL="$(jq -r '.DB_URL' <<<"$status")"
+  API_URL="$(jq -r '.API_URL' <<<"$status")"
+  ANON_KEY="$(jq -r '.ANON_KEY' <<<"$status")"
+  SERVICE_KEY="$(jq -r '.SERVICE_ROLE_KEY' <<<"$status")"
+
+  # Record EXACT ownership (containers by ID, volumes, network — label
+  # com.supabase.cli.project=<pid>) BEFORE the stack is used.
+  node "$SUPABASE_OWNER_HELPER" --record --state-file "$SBDISPOSABLE_STATE" >/dev/null \
+    || fail "supabase disposable ownership record failed (see $SUPABASE_LOG)"
+  log "disposable Supabase ready: $API_URL (db: ${DB_URL%%\?*})"
+  apply_schema
 }
 
 # ---------------------------------------------------------------------------
@@ -348,7 +454,18 @@ cleanup() {
     done
   done
 
-  if [ "$SUPABASE_STARTED" = "yes" ]; then
+  if [ "$SBDISPOSABLE_ACTIVE" = "yes" ]; then
+    # Gate 2 fix C: destroy ONLY the disposable stack (recorded containers by
+    # ID, volumes, network). A preexisting stack is never stopped; the helper
+    # verifies it kept same IDs/state and that zero own resources remain.
+    log "teardown: destroying DISPOSABLE Supabase stack (project $SBDISPOSABLE_PROJECT)"
+    sb_cleanup="$(node "$SUPABASE_OWNER_HELPER" --cleanup --state-file "$SBDISPOSABLE_STATE" 2>>"$SUPABASE_LOG")"
+    sb_rc=$?
+    if [ "$sb_rc" -ne 0 ] || [ "$(jq -r '.ok // "false"' <<<"${sb_cleanup:-}" 2>/dev/null)" != "true" ]; then
+      log "teardown FAILED — disposable Supabase cleanup: $(jq -r '.reason // .note // "unknown failure"' <<<"${sb_cleanup:-}" 2>/dev/null) (see $SUPABASE_LOG)"
+      cleanup_rc=1
+    fi
+  elif [ "$SUPABASE_STARTED" = "yes" ]; then
     log "teardown: stopping local Supabase stack (containers removed, data volume kept)"
     (cd "$BACKEND" && npx supabase stop) >"$SUPABASE_LOG" 2>&1
   fi
@@ -389,7 +506,17 @@ verify_clean() {
   # the same ID/state, failing the teardown otherwise. The Supabase stack is
   # ours ONLY when this run started it (SUPABASE_STARTED=yes); when it was
   # already running we reuse it and the residue check must not flag it.
-  if [ "$SUPABASE_STARTED" = "yes" ]; then
+  if [ "$SBDISPOSABLE_ACTIVE" = "yes" ]; then
+    # Gate 2 fix C: the disposable stack must be at ZERO own resources; a
+    # preexisting stack (other project ids) is verified by the ownership
+    # helper and must NOT be flagged here.
+    own_containers="$(docker ps -a --filter "label=com.supabase.cli.project=$SBDISPOSABLE_PROJECT" --format '{{.Names}}' | grep -E "^supabase_.*_${SBDISPOSABLE_PROJECT}$" || true)"
+    if [ -n "$own_containers" ]; then
+      log "RESIDUE: own disposable supabase containers still running:"
+      log "$own_containers"
+      residue=1
+    fi
+  elif [ "$SUPABASE_STARTED" = "yes" ]; then
     own_containers="$(docker ps --format '{{.Names}}' | grep -E '^supabase_' || true)"
     if [ -n "$own_containers" ]; then
       log "RESIDUE: own supabase containers still running:"

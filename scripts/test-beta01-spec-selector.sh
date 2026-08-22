@@ -21,7 +21,11 @@
 #       con SMOKE_DIR sin imprimir jamás su contenido;
 #   c6. (Gate 2 fix A) un BETA01_FAKE_STATE_FILE heredado arbitrario queda
 #       reemplazado por el path del runner antes de mutar nada: ningún hijo
-#       ve el path heredado y el archivo arbitrario externo no se toca.
+#       ve el path heredado y el archivo arbitrario externo no se toca;
+#   c7. (Gate 2 fix C) en modo AI el stack Supabase es DISPOSABLE: start con
+#       --workdir único bajo SMOKE_DIR, ownership snapshot/record/cleanup,
+#       NUNCA supabase stop y cero DELETE (tablas terminales intactas); el
+#       spec setup conserva start/stop canónicos SIN --workdir y sin helper.
 #
 # El stack completo se simula con stubs en un PATH prefijado; cada stub
 # registra su invocación en CALLS, así "cero mutaciones" es una aserción
@@ -57,13 +61,16 @@ bad() { CHECKS=$((CHECKS + 1)); FAILS=$((FAILS + 1)); printf '  FAIL %s\n' "$1";
 # boot toca). El runner deriva ROOT de su propia ubicación, así que la copia
 # hace que TODO el boot ocurra dentro de $TMP y el worktree real quede a salvo.
 # ---------------------------------------------------------------------------
-mkdir -p "$REPO/scripts" "$REPO/e2e/support" "$REPO/backend" "$REPO/frontend"
+mkdir -p "$REPO/scripts" "$REPO/e2e/support" "$REPO/backend/supabase" "$REPO/frontend"
 cp "$HERE/e2e-beta01-setup-smoke.sh" "$REPO/scripts/"
+# Config canónica REAL: el runner deriva la config disposable con sed (fix C).
+cp "$HERE/../backend/supabase/config.toml" "$REPO/backend/supabase/"
 : >"$REPO/e2e/beta01-setup-smoke.spec.ts"
 : >"$REPO/e2e/beta01-ai-smoke.spec.ts"
 : >"$REPO/e2e/support/beta01-minio-owner.cjs"
 : >"$REPO/e2e/support/beta01-target-guard.cjs"
 : >"$REPO/e2e/support/beta01-fakes.cjs"
+: >"$REPO/e2e/support/beta01-supabase-owner.cjs"
 : >"$REPO/backend/.env.example"
 touch "$REPO/frontend/.keep"
 
@@ -85,6 +92,9 @@ case "$*" in
   *"beta01-minio-owner.cjs --snapshot"*) printf '%s\n' '{"mode":"create"}' ;;
   *"beta01-minio-owner.cjs --start"*)   printf '%s\n' '{"id":"stub-minio","mode":"create"}' ;;
   *"beta01-minio-owner.cjs --cleanup"*) printf '%s\n' '{"ok":true}' ;;
+  *"beta01-supabase-owner.cjs --snapshot"*) printf '%s\n' '{"mode":"create","projectId":"stub"}' ;;
+  *"beta01-supabase-owner.cjs --record"*)   printf '%s\n' '{"recorded":true}' ;;
+  *"beta01-supabase-owner.cjs --cleanup"*)  printf '%s\n' '{"ok":true}' ;;
   *"beta01-target-guard.cjs"*)          printf '%s\n' 'guard-ok' ;;
   *" -e "*)                             printf '%s\n' 'bucket mike ready' ;;
 esac
@@ -227,6 +237,46 @@ run_ok() {
     bad "$label: fixA — el runner imprimió contenido del fake state"
   else
     ok "$label: fixA — el runner nunca imprime el contenido del fake state"
+  fi
+
+  # Gate 2 fix C: en modo AI el stack Supabase es DISPOSABLE (start con
+  # --workdir único bajo SMOKE_DIR, ownership snapshot/record/cleanup, NUNCA
+  # `supabase stop`, cero DELETE vía psql); el spec setup conserva el flujo
+  # canónico (start/stop SIN --workdir, sin helper de ownership).
+  if [ "$expected" = "e2e/beta01-ai-smoke.spec.ts" ]; then
+    if grep -qE '^npx supabase start --workdir /tmp/beta01-smoke\.' "$CALLS"; then
+      ok "$label: fixC — start usa --workdir del stack disposable bajo SMOKE_DIR"
+    else
+      bad "$label: fixC — start sin --workdir disposable: $(grep 'npx supabase start' "$CALLS" | head -1)"
+    fi
+    if grep -q 'beta01-supabase-owner.cjs --snapshot' "$CALLS" \
+      && grep -q 'beta01-supabase-owner.cjs --record' "$CALLS" \
+      && grep -q 'beta01-supabase-owner.cjs --cleanup' "$CALLS"; then
+      ok "$label: fixC — ownership snapshot/record/cleanup del stack disposable"
+    else
+      bad "$label: fixC — faltan invocaciones del owner helper"
+    fi
+    if ! grep -q '^npx supabase stop' "$CALLS"; then
+      ok "$label: fixC — nunca se invoca supabase stop en modo AI"
+    else
+      bad "$label: fixC — se invocó supabase stop (prohibido en modo AI)"
+    fi
+  else
+    if grep -q '^npx supabase start$' "$CALLS" && ! grep -q -- '--workdir' "$CALLS"; then
+      ok "$label: fixC — setup usa start canónico SIN --workdir (Gate 1 intacto)"
+    else
+      bad "$label: fixC — start canónico alterado: $(grep 'npx supabase start' "$CALLS" | head -1)"
+    fi
+    if ! grep -q 'beta01-supabase-owner.cjs' "$CALLS"; then
+      ok "$label: fixC — helper de ownership NO se usa en setup"
+    else
+      bad "$label: fixC — helper de ownership invocado en setup"
+    fi
+  fi
+  if ! grep -qi 'delete' "$CALLS"; then
+    ok "$label: fixC — cero DELETE (tablas terminales IA intactas)"
+  else
+    bad "$label: fixC — se detectó DELETE: $(grep -i delete "$CALLS" | head -2)"
   fi
 }
 
