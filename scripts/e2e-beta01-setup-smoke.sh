@@ -10,10 +10,16 @@
 #     (e2e/support/beta01-fakes.cjs via NODE_OPTIONS);
 #   - frontend built for production and served with `next start`
 #     (CI pattern: no dev server, no hydration overlay);
-# and then runs EXACTLY ONCE the targeted Playwright spec
-# e2e/beta01-setup-smoke.spec.ts: owner autenticado -> proyecto + matter
-# privado -> upload de e2e/fixtures/beta01-contract.docx con HTTP 201,
-# versión, content hash y metadata de página.
+# and then runs EXACTLY ONCE the targeted Playwright spec selected by
+# BETA01_SMOKE_SPEC (Gate 2 selector, allowlist cerrada):
+#   - default (unset/vacía): e2e/beta01-setup-smoke.spec.ts — owner
+#     autenticado -> proyecto + matter privado -> upload de
+#     e2e/fixtures/beta01-contract.docx con HTTP 201, versión, content hash
+#     y metadata de página;
+#   - única otra opción: e2e/beta01-ai-smoke.spec.ts (Gate 2 IA, receipts y
+#     citations sintéticos);
+#   - cualquier otro valor (path, flags, whitespace) falla ANTES de cualquier
+#     acción de stack o mutación del repositorio.
 #
 # Teardown is unconditional (trap EXIT): every process and container this
 # script started is stopped/removed, and it fails if any of its own
@@ -24,7 +30,9 @@
 # running/healthy with the fixture label and is never stopped/removed by this
 # script (see e2e/support/beta01-minio-owner.cjs).
 #
-# Usage, from the repo root:  bash scripts/e2e-beta01-setup-smoke.sh
+# Usage, from the repo root:
+#   bash scripts/e2e-beta01-setup-smoke.sh                            # Gate 1 (setup smoke)
+#   BETA01_SMOKE_SPEC=e2e/beta01-ai-smoke.spec.ts bash scripts/e2e-beta01-setup-smoke.sh  # Gate 2 (IA)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -34,7 +42,24 @@ FRONTEND="$ROOT/frontend"
 MINIO_IMAGE="minio/minio:RELEASE.2025-09-07T16-13-09Z"
 MINIO_CONTAINER="beta01-minio"
 MINIO_HELPER="$ROOT/e2e/support/beta01-minio-owner.cjs"
-SPEC="e2e/beta01-setup-smoke.spec.ts"
+# Gate 2 spec selector: BETA01_SMOKE_SPEC with a CLOSED allowlist. The
+# default preserves Gate 1 behavior EXACTLY (setup smoke); the only other
+# accepted value is the Gate 2 AI smoke. Any other value — another path,
+# shell flags, whitespace around or inside the value — fails HERE, before
+# any stack action, temp dir, or repository mutation.
+SPEC="${BETA01_SMOKE_SPEC:-e2e/beta01-setup-smoke.spec.ts}"
+case "$SPEC" in
+  "e2e/beta01-setup-smoke.spec.ts" | "e2e/beta01-ai-smoke.spec.ts") ;;
+  *)
+    printf '[beta01-smoke] ERROR: BETA01_SMOKE_SPEC rechazado: %s\n' "$SPEC" >&2
+    printf '[beta01-smoke] ERROR: allowlist cerrada: e2e/beta01-setup-smoke.spec.ts, e2e/beta01-ai-smoke.spec.ts\n' >&2
+    exit 1
+    ;;
+esac
+[ -f "$ROOT/$SPEC" ] || {
+  printf '[beta01-smoke] ERROR: spec permitida pero no existe en el repo: %s\n' "$SPEC" >&2
+  exit 1
+}
 FAKE_FILE="$ROOT/e2e/support/beta01-fakes.cjs"
 
 SMOKE_DIR="$(mktemp -d /tmp/beta01-smoke.XXXXXX)"
