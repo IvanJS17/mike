@@ -143,13 +143,30 @@ async function main() {
       String(cleanupError.message).includes("boom"),
   );
 
-  // Case 4: legacy cleanup — sólo `beta01-owner-*`, nunca ajenos ni el
-  // fixture; repetido no crece el conteo.
+  // Case 4: legacy cleanup — sólo el formato histórico EXACTO del harness
+  // (`beta01-owner-<timestamp>-<uuid>@mike.local`), nunca ajenos ni el
+  // fixture; cada borde (dominio distinto, formato parcial, timestamp/UUID
+  // inválidos, mayúsculas, sufijo adicional) debe sobrevivir; repetido no
+  // crece el conteo.
   const client2 = fakeAuthAdmin([
+    // Formato legacy histórico exacto del harness: ESTOS SÍ se borran.
     { id: "legacy-1", email: "beta01-owner-1712345678901-a1b2c3d4@mike.local" },
     { id: "legacy-2", email: "beta01-owner-1712345678999-e5f6a7b8@mike.local" },
+    // Cuentas ajenas que deben sobrevivir.
     { id: "foreign-1", email: "someone@example.com" },
     { id: "foreign-2", email: "e2e@mike.local" },
+    // Borde: mismo prefijo, dominio distinto.
+    { id: "foreign-prefix", email: "beta01-owner-foreign@example.com" },
+    // Borde: formato parcial (timestamp sin UUID).
+    { id: "foreign-partial", email: "beta01-owner-1712345678901@mike.local" },
+    // Borde: timestamp inválido (12 dígitos, no 13).
+    { id: "foreign-ts", email: "beta01-owner-17123456789-a1b2c3d4@mike.local" },
+    // Borde: UUID inválido (no hexadecimal).
+    { id: "foreign-uuid", email: "beta01-owner-1712345678901-zzzzzzzz@mike.local" },
+    // Borde: mayúsculas en prefijo y dominio.
+    { id: "foreign-upper", email: "BETA01-OWNER-1712345678901-A1B2C3D4@MIKE.LOCAL" },
+    // Borde: sufijo adicional tras el UUID.
+    { id: "foreign-suffix", email: "beta01-owner-1712345678901-a1b2c3d4-extra@mike.local" },
   ]);
   await ensureFixtureUser(client2, OWNER_FIXTURE);
   const removedLegacy = await cleanLegacyOwnerUsers(
@@ -162,7 +179,31 @@ async function main() {
     `removed=${removedLegacy}`,
   );
   check(
-    "c4 legacy cleanup never touches foreign users",
+    "c4 foreign prefix (same prefix, other domain) survives",
+    client2.users.has("beta01-owner-foreign@example.com"),
+  );
+  check(
+    "c4 partial format (no uuid) survives",
+    client2.users.has("beta01-owner-1712345678901@mike.local"),
+  );
+  check(
+    "c4 invalid timestamp survives",
+    client2.users.has("beta01-owner-17123456789-a1b2c3d4@mike.local"),
+  );
+  check(
+    "c4 invalid uuid survives",
+    client2.users.has("beta01-owner-1712345678901-zzzzzzzz@mike.local"),
+  );
+  check(
+    "c4 uppercase variant survives",
+    client2.users.has("BETA01-OWNER-1712345678901-A1B2C3D4@MIKE.LOCAL"),
+  );
+  check(
+    "c4 extra suffix survives",
+    client2.users.has("beta01-owner-1712345678901-a1b2c3d4-extra@mike.local"),
+  );
+  check(
+    "c4 any other ordinary foreign user survives",
     client2.users.has("someone@example.com") &&
       client2.users.has("e2e@mike.local"),
   );
@@ -176,11 +217,11 @@ async function main() {
   );
   check(
     "c4 legacy cleanup is idempotent (no growth on repeat)",
-    removedAgain === 0 && client2.users.size === 3,
+    removedAgain === 0 && client2.users.size === 9,
     `store size=${client2.users.size}`,
   );
   await ensureFixtureUser(client2, OWNER_FIXTURE);
-  check("c4 fixture count never grows after use", client2.users.size === 3);
+  check("c4 fixture count never grows after use", client2.users.size === 9);
 
   process.exit(failures === 0 ? 0 : 1);
 }
