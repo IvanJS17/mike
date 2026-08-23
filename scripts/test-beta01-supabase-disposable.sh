@@ -38,6 +38,14 @@
 #       eliminar nada propio; el cleanup elimina SÓLO full IDs owned (docker
 #       rm -f recibe el full 64-hex, nunca un prefix); el snapshot es
 #       read-only (cero mutaciones).
+#   cF. Gate 2 fix F — volumen ausente en DOS formatos: el daemon docker real
+#       emite "No such volume: <name>" (CLI clásico) y "get <name>: no such
+#       volume" (API real, case/whitespace razonables); el helper los
+#       interpreta como ABSENCIA y sólo cuando el inspect devolvió status≠0;
+#       un error genuino de daemon/permisos sigue siendo FAIL; el cleanup
+#       continúa eliminando/verificando owned (containers/network; volumen ya
+#       ausente verificado como tal) sin tocar preexisting; el probe contra un
+#       nombre de volumen UUID inexistente es read-only (cero mutaciones).
 #
 # El stack se simula con un "docker world" (world-ctl) + stubs de
 # npx/node/curl/psql/setsid en un PATH prefijado; el helper real
@@ -170,7 +178,24 @@ case "$cmd" in
     kind="${cmd#inspect-}"; name="$1"
     case "$kind" in vol) s="volumes"; what="volume" ;; net) s="networks"; what="network" ;; esac
     out="$(jq -c --arg n "$name" --arg s "$s" '[.[$s][] | select(.name == $n)][0] // empty' "$WORLD")"
-    if [ -z "$out" ]; then printf 'Error response from daemon: No such %s: %s\n' "$what" "$name" >&2; exit 1; fi
+    if [ -z "$out" ]; then
+      if [ "$kind" = "vol" ]; then
+        # Gate 2 fix F: docker real emite el volumen ausente en DOS formatos
+        # (CLI clásico "No such volume: <name>" y API "get <name>: no such
+        # volume"). VOL_ABSENT_STYLE=classic|daemon los selecciona y
+        # VOL_ABSENT_STYLE=genuine inyecta un error REAL de daemon/permisos
+        # que el helper NUNCA debe interpretar como absent. El estilo daemon
+        # varía case/whitespace a propósito ("GET  <name> : No Such Volume").
+        case "${VOL_ABSENT_STYLE:-classic}" in
+          daemon)  printf 'Error response from daemon: GET  %s : No Such Volume\n' "$name" >&2 ;;
+          genuine) printf 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n' >&2 ;;
+          *)       printf 'Error: No such volume: %s\n' "$name" >&2 ;;
+        esac
+      else
+        printf 'Error response from daemon: No such %s: %s\n' "$what" "$name" >&2
+      fi
+      exit 1
+    fi
     jq -c --argjson o "$out" '[{"Name":$o.name}]' <<<"$out"
     ;;
   *)
@@ -830,6 +855,141 @@ if [ "$(con_full_id supabase_db_backend)" = "$(sid backend-db-drifted)" ]; then
 else
   bad "cE-4: el container ajeno fue alterado"
 fi
+
+# --- cF: Gate 2 fix F — volumen ausente (ambos formatos docker; daemon FAIL) ---
+printf '[cF] volumen ausente: CLI clásico + API daemon real => absent; daemon/permisos FAIL; cleanup continúa\n'
+VOL_UUID="0f2e7c9a-4d9a-4b6e-9c8a-1234567890ab"
+
+# Probe read-only: invoca volumeExists() del helper REAL (módulo, sin CLI)
+# contra el docker fake vía PATH con un nombre de volumen UUID inexistente.
+cat >"$TMP/probe-vol.cjs" <<'PROBE'
+"use strict";
+const { SupabaseDisposableOwnership } = require(process.argv[2]);
+const owner = new SupabaseDisposableOwnership({});
+owner
+  .volumeExists(process.argv[3])
+  .then((exists) => console.log(JSON.stringify({ absent: exists === false, exists })))
+  .catch((err) => {
+    console.log(JSON.stringify({ failed: true, message: err.message }));
+    process.exit(1);
+  });
+PROBE
+
+vol_probe() { # $1 = estilo del mensaje (classic|daemon|genuine)
+  local style="$1" out
+  set +e
+  out="$(VOL_ABSENT_STYLE="$style" PATH="$BIN:$PATH" "$REAL_NODE" "$TMP/probe-vol.cjs" "$HELPER" "$VOL_UUID" 2>&1)"
+  set -e
+  printf '%s' "$out"
+}
+
+# cF-1: formato CLI clásico "No such volume: <name>" -> absent; read-only.
+printf '[cF-1] formato clásico "No such volume: <uuid>" -> absent; probe read-only\n'
+reset_world
+: >"$CALLS"
+cF1="$(vol_probe classic)"
+if [ "$(jq -r '.absent // "false"' <<<"$cF1")" = "true" ]; then
+  ok "cF-1: volumen UUID inexistente (clásico) -> volumeExists=false (absent)"
+else
+  bad "cF-1: absent esperado, got: $cF1"
+fi
+if ! grep -Eq '^(docker rm -f|docker (volume|network) rm )' "$CALLS"; then
+  ok "cF-1: probe read-only — cero mutaciones docker"
+else
+  bad "cF-1: probe mutó docker: $(grep -E '^(docker rm -f|docker (volume|network) rm )' "$CALLS" | head -2)"
+fi
+
+# cF-2: formato API daemon real "get <uuid>: no such volume" con variación de
+#       case/whitespace -> absent; read-only.
+printf '[cF-2] formato daemon real "get <uuid>: no such volume" (case/whitespace) -> absent\n'
+reset_world
+: >"$CALLS"
+cF2="$(vol_probe daemon)"
+if [ "$(jq -r '.absent // "false"' <<<"$cF2")" = "true" ]; then
+  ok "cF-2: volumen UUID inexistente (daemon real) -> volumeExists=false (absent)"
+else
+  bad "cF-2: absent esperado, got: $cF2"
+fi
+if ! grep -Eq '^(docker rm -f|docker (volume|network) rm )' "$CALLS"; then
+  ok "cF-2: probe read-only — cero mutaciones docker"
+else
+  bad "cF-2: probe mutó docker: $(grep -E '^(docker rm -f|docker (volume|network) rm )' "$CALLS" | head -2)"
+fi
+
+# cF-3: error genuino de daemon/permisos en volume inspect -> FAIL (throw),
+#       NUNCA absent; cero mutaciones.
+printf '[cF-3] error genuino de daemon en volume inspect -> FAIL (no absent)\n'
+reset_world
+: >"$CALLS"
+cF3="$(vol_probe genuine)"
+if [ "$(jq -r '.failed // "false"' <<<"$cF3")" = "true" ] && ! grep -q '"absent":true' <<<"$cF3"; then
+  ok "cF-3: daemon caído/permisos -> volumeExists THROW (FAIL, no absent)"
+else
+  bad "cF-3: FAIL esperado ante error genuino: $cF3"
+fi
+if ! grep -Eq '^(docker rm -f|docker (volume|network) rm )' "$CALLS"; then
+  ok "cF-3: cero mutaciones ante error de daemon"
+else
+  bad "cF-3: se mutó docker ante error de daemon"
+fi
+
+# cF-4: cleanup con el volumen registrado YA ausente (ambos formatos):
+#       continúa removiendo/verificando owned (containers + network), el
+#       volumen ausente se verifica como tal sin error y el stack preexistente
+#       queda intacto (mismos full IDs; volumen/network preexistentes).
+printf '[cF-4] cleanup continúa con volumen propio ausente (clásico + daemon), preexistente intacto\n'
+for style in classic daemon; do
+  reset_world
+  seed_backend_stack
+  SNAP_F4="$TMP/state-f4-$style.json"
+  PATH="$BIN:$PATH" "$REAL_NODE" "$HELPER" --snapshot --project-id "$E_PID" --state-file "$SNAP_F4" >/dev/null 2>&1 \
+    || bad "cF-4/$style: snapshot previo falló"
+  "$WORLD_CTL" create-container "supabase_db_$E_PID" "$(sid db-$E_PID)" true "com.supabase.cli.project=$E_PID"
+  "$WORLD_CTL" create-container "supabase_api_$E_PID" "$(sid api-$E_PID)" true "com.supabase.cli.project=$E_PID"
+  "$WORLD_CTL" create-container "supabase_auth_$E_PID" "$(sid auth-$E_PID)" true "com.supabase.cli.project=$E_PID"
+  "$WORLD_CTL" create-volume "supabase_db_$E_PID" "com.supabase.cli.project=$E_PID"
+  "$WORLD_CTL" create-network "supabase_network_$E_PID" "com.supabase.cli.project=$E_PID"
+  PATH="$BIN:$PATH" "$REAL_NODE" "$HELPER" --record --state-file "$SNAP_F4" >/dev/null 2>&1 \
+    || bad "cF-4/$style: record falló"
+  # El volumen propio desaparece entre record y cleanup (estado docker real):
+  # `docker volume ls` ya no lo lista y el inspect devuelve el mensaje de
+  # volumen ausente del estilo en prueba.
+  "$WORLD_CTL" rm-volume "supabase_db_$E_PID"
+  : >"$CALLS"
+  set +e
+  cF4="$(VOL_ABSENT_STYLE="$style" PATH="$BIN:$PATH" "$REAL_NODE" "$HELPER" --cleanup --state-file "$SNAP_F4" 2>&1)"
+  set -e
+  if [ "$(jq -r '.ok // "false"' <<<"$cF4")" = "true" ]; then
+    ok "cF-4/$style: cleanup OK — volumen ausente verificado, cleanup continúa"
+  else
+    bad "cF-4/$style: cleanup debió continuar: $cF4"
+  fi
+  if zero_own "$E_PID"; then
+    ok "cF-4/$style: zero own tras cleanup (containers/volumes/network propios en cero)"
+  else
+    bad "cF-4/$style: residuo propio tras cleanup"
+  fi
+  if [ "$(con_full_id supabase_db_backend)" = "$(sid backend-db)" ] \
+    && [ "$(con_full_id supabase_auth_backend)" = "$(sid backend-auth)" ] \
+    && "$WORLD_CTL" ls-vol "com.supabase.cli.project" "backend" | grep -q "^supabase_db_backend$" \
+    && "$WORLD_CTL" ls-net "com.supabase.cli.project" "backend" | grep -q "^supabase_network_backend$"; then
+    ok "cF-4/$style: preexistente intacto (mismos full IDs; volumen/network preexistentes)"
+  else
+    bad "cF-4/$style: preexistente alterado tras cleanup con volumen ausente"
+  fi
+  if [ "$(con_full_id "supabase_db_$E_PID" 2>/dev/null || true)" = "" ] \
+    && [ "$(con_full_id "supabase_api_$E_PID" 2>/dev/null || true)" = "" ] \
+    && [ "$(con_full_id "supabase_auth_$E_PID" 2>/dev/null || true)" = "" ]; then
+    ok "cF-4/$style: containers propios eliminados pese al volumen ausente"
+  else
+    bad "cF-4/$style: containers propios no eliminados"
+  fi
+  if ! "$WORLD_CTL" ls-net "com.supabase.cli.project" "$E_PID" | grep -q .; then
+    ok "cF-4/$style: network propia eliminada pese al volumen ausente"
+  else
+    bad "cF-4/$style: network propia no eliminada"
+  fi
+done
 
 printf '== resultado: %d checks, %d fallas ==\n' "$CHECKS" "$FAILS"
 [ "$FAILS" -eq 0 ]

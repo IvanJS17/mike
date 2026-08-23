@@ -31,6 +31,11 @@
 // candidato que desaparece entre `ps` e `inspect` es un FAIL fail-closed,
 // nunca una adivinanza. El snapshot es read-only: sólo ps/inspect, cero
 // mutaciones.
+//
+// Gate 2 fix F — volumen ausente en DOS formatos: el CLI clásico emite
+// "No such volume: <name>" y el daemon API real "get <name>: no such volume";
+// ambos (case/whitespace razonables) se interpretan como ABSENCIA y sólo
+// cuando el inspect devolvió status≠0; daemon caído/permisos siguen FAIL.
 
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
@@ -53,10 +58,17 @@ function firstLine(text) {
 // Docker spells "inspect target does not exist" per resource type; those
 // spellings mean ABSENCE and map to null/false. Daemon/permission/connection
 // errors contain none of them and keep throwing.
+//
+// Gate 2 fix F — volumen ausente: el daemon docker real emite DOS textos
+// distintos: el CLI clásico "No such volume: <name>" y el de la API real
+// "get <name>: no such volume" (case/whitespace razonables). Ambos se
+// interpretan como ABSENCIA, y sólo cuando el inspect devolvió status≠0 (el
+// llamador únicamente consulta este matcher en ese caso). Errores de
+// daemon/permisos/conexión no contienen esos textos y siguen siendo FAIL.
 function isAbsentStderr(stderr, kind) {
   const patterns = {
     container: /no such (?:container|object):\s*\S+/i,
-    volume: /no such volume:\s*\S+/i,
+    volume: /(?:no such volume\s*:\s*\S+|get\s+\S+\s*:\s*no such volume)/i,
     network: /no such network:\s*\S+/i,
   };
   return patterns[kind].test(String(stderr || ""));
