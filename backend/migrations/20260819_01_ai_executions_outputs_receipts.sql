@@ -6,6 +6,11 @@
 -- roles receive no grants on these tables; the triggers below remain active
 -- for service_role so append-only and identity invariants cannot be bypassed.
 
+-- This migration uses digest() in page hashes and integrity triggers. Fresh
+-- databases applying incremental migrations do not necessarily run the full
+-- backend/schema.sql bootstrap first, so make the dependency explicit here.
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
 -- A matter may optionally be the private domain scope for a legacy project.
 ALTER TABLE public.matters
   ADD COLUMN IF NOT EXISTS project_id uuid
