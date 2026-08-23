@@ -26,6 +26,13 @@
 #     persiste ahí provider/drive counters y el spec AI afirma provider=1/
 #     drive=0 leyendo ese mismo path; el teardown lo elimina junto con
 #     SMOKE_DIR y nunca imprime su contenido.
+#   - Gate 2 probe (spec AI): si el POST /ai-executions responde 422, el spec
+#     escribe ANTES del teardown, dentro de SMOKE_DIR, gate2-ai-failure-probe.json
+#     con modo 0600 y contenido SANEADO (status/code de la respuesta,
+#     id/status/error_class de la ejecución, error_class del receipt y
+#     contadores provider/drive; NUNCA tokens/keys/texto/PII). En fallo el
+#     runner PRESERVA SMOKE_DIR como evidencia; sólo una corrida exitosa lo
+#     elimina normalmente.
 #   - BETA01_SMOKE_SPEC=e2e/beta01-ai-smoke.spec.ts (Gate 2 fix C) NUNCA
 #     reutiliza/resetea/detiene un stack Supabase preexistente: el runner
 #     levanta un stack DISPOSABLE exclusivo de la corrida bajo SMOKE_DIR
@@ -488,11 +495,17 @@ cleanup() {
     exit 1
   fi
 
-  rm -rf "$SMOKE_DIR"
   if [ "$run_rc" -ne 0 ]; then
-    log "teardown verified after run failure (exit code $run_rc) — result remains FAILED"
+    # Gate 2 probe: la evidencia de un fallo LIVE se conserva. El spec escribe
+    # gate2-ai-failure-probe.json (0600) dentro de SMOKE_DIR ANTES del
+    # teardown; con el stack ya destruido y el runner limpiando normalmente,
+    # este directorio se preserva para diagnóstico (logs + probe + fake
+    # state). Sólo una corrida EXITOSA elimina SMOKE_DIR normalmente.
+    log "run FAILED (exit code $run_rc) — teardown OK; preserving evidence $SMOKE_DIR (gate2-ai-failure-probe.json si el POST ai-executions respondió 422)"
     exit "$run_rc"
   fi
+
+  rm -rf "$SMOKE_DIR"
   log "teardown OK — zero own processes/containers left"
   exit 0
 }

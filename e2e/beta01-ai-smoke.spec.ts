@@ -66,6 +66,15 @@ type ApiResult = {
   text: string;
 };
 
+// Estructural: tanto las respuestas del fetch del runtime (DOM Response,
+// status como propiedad) como las de Playwright (waitForResponse, status
+// como método) exponen text()/status; el spec parsea ambas (Gate 2 probe
+// captura el POST ai-executions con la segunda).
+type FetchLikeResponse = {
+  status: number | (() => number);
+  text(): Promise<string>;
+};
+
 // Project-aware cleanup API backed by ProjectCleanup (helper
 // e2e/support/beta01-project-cleanup.cjs): registerProjectMarker() se llama
 // ANTES de disparar la creación UI con el marcador único owner_id +
@@ -133,6 +142,30 @@ const { combineCleanupErrors } = require(
   ): unknown;
 };
 
+// Gate 2 probe: ante un POST /ai-executions con 422, el spec captura la
+// evidencia ANTES del finally/teardown y la persiste SANEADA (modo 0600) como
+// gate2-ai-failure-probe.json dentro de SMOKE_DIR (el mismo directorio del
+// fake state owned por el runner): status/code de la respuesta,
+// id/status/error_class de la ejecución, error_class del receipt y los
+// contadores provider/drive. Nunca tokens, keys, texto/quotes ni PII.
+const {
+  buildFailureProbe,
+  probePath,
+  writeFailureProbeSync,
+} = require("./support/beta01-failure-probe.cjs") as {
+  buildFailureProbe(inputs: {
+    postStatus?: number | null;
+    postBody?: unknown;
+    receipt?: unknown;
+    fakeState?: unknown;
+  }): Record<string, unknown>;
+  probePath(smokeDir: string): string;
+  writeFailureProbeSync(
+    smokeDir: string,
+    probe: Record<string, unknown>,
+  ): string;
+};
+
 function runtimeConfig(): RuntimeConfig {
   const config = assertLocalTargets(process.env);
   API_BASE = config.apiBase;
@@ -147,7 +180,7 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-async function parseResponse(response: Response): Promise<ApiResult> {
+async function parseResponse(response: FetchLikeResponse): Promise<ApiResult> {
   const text = await response.text();
   let data: unknown = null;
   try {
@@ -155,7 +188,9 @@ async function parseResponse(response: Response): Promise<ApiResult> {
   } catch {
     data = null;
   }
-  return { status: response.status, data, text };
+  const status =
+    typeof response.status === "function" ? response.status() : response.status;
+  return { status, data, text };
 }
 
 async function apiRequest(
@@ -707,7 +742,62 @@ test.describe("Beta 0.1 AI smoke (Gate 2)", () => {
       await expect(
         page.getByRole("button", { name: "Iniciar revisión" }),
       ).toBeEnabled({ timeout: 15_000 });
+      // Gate 2 probe: se captura la respuesta del POST ai-executions (el
+      // click del botón dispara el fetch desde el frontend). La promesa se
+      // registra ANTES del click; resuelve cuando el backend termina de
+      // procesar (la ejecución es síncrona). Si responde 422, la evidencia
+      // saneada se escribe ANTES del finally/teardown y el test falla rápido.
+      const postExecutionResponse = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname.endsWith("/ai-executions"),
+      );
       await page.getByRole("button", { name: "Iniciar revisión" }).click();
+      const postResult = await parseResponse(await postExecutionResponse);
+      if (postResult.status === 422) {
+        // Fallo live de la ejecución IA: sin corregir la causa, se preserva
+        // la evidencia ANTES de que el finally destruya el stack. El receipt
+        // se lee localmente SÓLO si el body expone el id de la ejecución; la
+        // ausencia de receipt/state se registra explícitamente en el probe.
+        let receiptProbe: unknown = null;
+        const postData =
+          postResult.data && typeof postResult.data === "object"
+            ? (postResult.data as { id?: unknown })
+            : null;
+        const executionId = postData?.id;
+        if (typeof executionId === "string" && /^[0-9a-f-]{36}$/.test(executionId)) {
+          try {
+            const receiptResponse = await apiRequest(
+              owner.accessToken,
+              `/projects/${projectId}/ai-executions/${executionId}/receipt`,
+            );
+            if (receiptResponse.status === 200) {
+              receiptProbe = receiptResponse.data;
+            }
+          } catch {
+            // Un fallo de lectura del receipt NO reemplaza la evidencia del
+            // POST: el probe se escribe igual con receipt ausente.
+          }
+        }
+        let fakeStateProbe: unknown = null;
+        try {
+          fakeStateProbe = JSON.parse(fs.readFileSync(FAKE_STATE_FILE, "utf8"));
+        } catch {
+          // State file ausente/ilegible: el probe registra counters ausentes
+          // en lugar de perder la corrida.
+        }
+        const smokeDir = path.dirname(FAKE_STATE_FILE);
+        const probe = buildFailureProbe({
+          postStatus: postResult.status,
+          postBody: postResult.data,
+          receipt: receiptProbe,
+          fakeState: fakeStateProbe,
+        });
+        const probeFile = writeFailureProbeSync(smokeDir, probe);
+        throw new Error(
+          `POST /ai-executions respondió 422 (discrimination=${String(probe.discrimination)}): evidencia escrita en ${probeFile}`,
+        );
+      }
       await expect(page.getByTestId("ai-execution-result")).toContainText(
         "succeeded",
         { timeout: 75_000 },
