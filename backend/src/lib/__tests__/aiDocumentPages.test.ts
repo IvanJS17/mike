@@ -138,6 +138,7 @@ describe("loadAiDocumentVersionPages", () => {
     });
 
     expect(result.sourceContentSha256).toBe(sha256Hex(bytes));
+    expect(result.failureReason).toBeNull();
     expect(result.pages).toEqual([
       { page: 1, text: DOCX_TEXT, textSha256: sha256Hex(DOCX_TEXT) },
     ]);
@@ -212,6 +213,7 @@ describe("loadAiDocumentVersionPages", () => {
     expect(result).toEqual({
       pages: [],
       sourceContentSha256: sha256Hex(bytes),
+      failureReason: "stored-page-mismatch",
     });
   });
 
@@ -273,6 +275,7 @@ describe("loadAiDocumentVersionPages", () => {
     expect(result).toEqual({
       pages: [],
       sourceContentSha256: sha256Hex(corrupt),
+      failureReason: "extraction-empty",
     });
   });
 
@@ -291,6 +294,7 @@ describe("loadAiDocumentVersionPages", () => {
     expect(result).toEqual({
       pages: [],
       sourceContentSha256: sha256Hex(bytes),
+      failureReason: "page-count-mismatch",
     });
     expect(rows.ai_document_version_pages).toHaveLength(0);
   });
@@ -310,6 +314,7 @@ describe("loadAiDocumentVersionPages", () => {
     expect(result).toEqual({
       pages: [],
       sourceContentSha256: sha256Hex(bytes),
+      failureReason: "page-count-mismatch",
     });
     expect(rows.ai_document_version_pages).toHaveLength(0);
   });
@@ -350,6 +355,7 @@ describe("loadAiDocumentVersionPages", () => {
     expect(result).toEqual({
       pages: [],
       sourceContentSha256: sha256Hex(stored),
+      failureReason: "source-hash-mismatch",
     });
     expect(rows.ai_document_version_pages).toHaveLength(0);
   });
@@ -365,6 +371,59 @@ describe("loadAiDocumentVersionPages", () => {
       page_count: null,
     });
 
-    expect(result).toEqual({ pages: [], sourceContentSha256: null });
+    expect(result).toEqual({
+      pages: [],
+      sourceContentSha256: null,
+      failureReason: "missing-source-metadata",
+    });
+  });
+
+  it("fails closed with download-missing when storage has no bytes for the path", async () => {
+    downloadFile.mockResolvedValue(null);
+    const { db, rows } = makeDb();
+
+    const result = await loadAiDocumentVersionPages(db, {
+      ...BASE_SOURCE,
+      content_sha256: sha256Hex(await makeDocx()),
+      file_type: "docx",
+      page_count: null,
+    });
+
+    expect(result).toEqual({
+      pages: [],
+      sourceContentSha256: null,
+      failureReason: "download-missing",
+    });
+    expect(rows.ai_document_version_pages).toHaveLength(0);
+  });
+
+  it("propagates database errors instead of failing closed (route catch path)", async () => {
+    const bytes = await makeDocx();
+    downloadFile.mockResolvedValue(toArrayBuffer(bytes));
+    const selectError = new Error("select failed");
+    const query: Record<string, any> = {};
+    query.select = vi.fn(() => query);
+    query.eq = vi.fn(() => query);
+    query.is = vi.fn(() => query);
+    query.order = vi.fn(() => query);
+    query.limit = vi.fn(() => query);
+    query.insert = vi.fn(() => query);
+    query.single = vi.fn(async () => ({ data: null, error: null }));
+    query.maybeSingle = query.single;
+    query.then = (
+      resolve: (value: unknown) => unknown,
+      reject?: (error: unknown) => unknown,
+    ) =>
+      Promise.resolve({ data: null, error: selectError }).then(resolve, reject);
+    const db = { from: vi.fn(() => query) } as unknown as Db;
+
+    await expect(
+      loadAiDocumentVersionPages(db, {
+        ...BASE_SOURCE,
+        content_sha256: sha256Hex(bytes),
+        file_type: "docx",
+        page_count: null,
+      }),
+    ).rejects.toThrow("select failed");
   });
 });

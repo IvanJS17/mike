@@ -37,6 +37,7 @@ import {
   CIVIL_MERCANTIL_MX_PLAYBOOK_PROMPT,
   CIVIL_MERCANTIL_MX_PLAYBOOK_VERSION,
 } from "../lib/civilMercantilePlaybook";
+import { ALLOWED_DOCUMENT_TYPES } from "../lib/documentTypes";
 import type { AiExecutionStatus } from "../lib/aiExecutions";
 
 export const aiExecutionsRouter = Router({ mergeParams: true });
@@ -95,6 +96,76 @@ function bodyOf(req: Request): Record<string, unknown> {
   return req.body && typeof req.body === "object" && !Array.isArray(req.body)
     ? (req.body as Record<string, unknown>)
     : {};
+}
+
+/**
+ * Production-observability sanitizers (Gate 2 probe G): every field emitted
+ * into the pre-provider failure logs is drawn from a strict allowlist so the
+ * log can never carry storage paths, hashes, bytes, text, full IDs or
+ * token/PII material.
+ */
+
+const MAX_LOG_PAGE_COUNT = 10_000;
+
+/** Only the canonical upload suffixes are ever emitted; anything else → null. */
+function allowlistedFileType(fileType: string | null | undefined): string | null {
+  const type = (fileType ?? "").toLowerCase();
+  return ALLOWED_DOCUMENT_TYPES.has(type) ? type : null;
+}
+
+/** Declared page counts are emitted only when present and within bounds. */
+function boundedPageCount(pageCount: number | null | undefined): number | null {
+  return typeof pageCount === "number"
+    && Number.isInteger(pageCount)
+    && pageCount > 0
+    && pageCount <= MAX_LOG_PAGE_COUNT
+    ? pageCount
+    : null;
+}
+
+const ALLOWLISTED_ERROR_NAMES = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "AggregateError",
+  "PostgrestError",
+]);
+
+/**
+ * Postgres SQLSTATE codes ("23505"), Postgrest codes ("PGRST116") and fetch
+ * codes ("ECONNREFUSED") are short alphanumeric tokens; anything else (paths
+ * with "/" or ".", free text) is rejected. The raw message is NEVER logged
+ * because it can embed storage paths or keys.
+ */
+const ALLOWLISTED_ERROR_CODE_PATTERN = /^[A-Za-z0-9_]{1,24}$/;
+
+function sanitizedLoaderError(
+  error: unknown,
+): { name: string | null; code: string | null } {
+  const name = error instanceof Error ? error.name : null;
+  const rawCode =
+    typeof error === "object" && error !== null && "code" in error
+      ? (error as { code?: unknown }).code
+      : null;
+  return {
+    name: name && ALLOWLISTED_ERROR_NAMES.has(name) ? name : null,
+    code:
+      typeof rawCode === "string" && ALLOWLISTED_ERROR_CODE_PATTERN.test(rawCode)
+        ? rawCode
+        : null,
+  };
+}
+
+function loaderFailureContext(version: VersionRow): {
+  hasStoragePath: boolean;
+  fileType: string | null;
+  pageCount: number | null;
+} {
+  return {
+    hasStoragePath: Boolean(version.storage_path),
+    fileType: allowlistedFileType(version.file_type),
+    pageCount: boundedPageCount(version.page_count),
+  };
 }
 
 function requiredString(value: unknown, field: string):
@@ -447,7 +518,9 @@ async function createExecution(req: Request, res: import("express").Response) {
   let loadedPages: Awaited<ReturnType<typeof loadAiDocumentVersionPages>> = {
     pages: [],
     sourceContentSha256: null,
+    failureReason: null,
   };
+  let loaderThrew = false;
   try {
     loadedPages = await loadAiDocumentVersionPages(db, {
       document_id: versionRow.document_id,
@@ -457,8 +530,22 @@ async function createExecution(req: Request, res: import("express").Response) {
       file_type: versionRow.file_type,
       page_count: versionRow.page_count,
     });
-  } catch {
-    loadedPages = { pages: [], sourceContentSha256: null };
+  } catch (error) {
+    // Thrown loader errors (DB failures) become the single `loader-error`
+    // log: only allowlisted error name/code and sanitized context fields get
+    // emitted; the raw message is never logged because it can embed storage
+    // paths or keys.
+    loaderThrew = true;
+    loadedPages = { pages: [], sourceContentSha256: null, failureReason: null };
+    const { name: errorName, code: errorCode } = sanitizedLoaderError(error);
+    console.error(
+      "[ai-executions] loader-error",
+      {
+        errorName,
+        errorCode,
+        ...loaderFailureContext(versionRow),
+      },
+    );
   }
   if (
     loadedPages.pages.length === 0
@@ -467,6 +554,19 @@ async function createExecution(req: Request, res: import("express").Response) {
     // type fails closed on null/mismatch.
     || loadedPages.sourceContentSha256 !== versionRow.content_sha256
   ) {
+    if (!loaderThrew) {
+      // Exactly one structured, fully allowlisted log per pre-provider page
+      // failure: every emitted value is a boolean or an allowlisted token.
+      console.error(
+        "[ai-executions] page-loader-failure",
+        {
+          reason: loadedPages.failureReason ?? null,
+          sourceHashMatch:
+            loadedPages.sourceContentSha256 === versionRow.content_sha256,
+          ...loaderFailureContext(versionRow),
+        },
+      );
+    }
     const failed = await failExecution({
       db,
       row,

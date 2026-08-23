@@ -9,9 +9,24 @@ export type AiDocumentVersionPage = {
   textSha256: string;
 };
 
+/**
+ * Observable, consumer-safe reason for every fail-closed early return.
+ * Thrown errors (DB failures, insert races that lose) keep propagating to
+ * the route's catch and are NOT classified here.
+ */
+export type AiDocumentPageFailureReason =
+  | "missing-source-metadata"
+  | "download-missing"
+  | "source-hash-mismatch"
+  | "extraction-empty"
+  | "page-count-mismatch"
+  | "stored-page-mismatch";
+
 export type AiDocumentVersionPagesResult = {
   pages: AiDocumentVersionPage[];
   sourceContentSha256: string | null;
+  /** null on success; the fail-closed reason on every early return. */
+  failureReason: AiDocumentPageFailureReason | null;
 };
 
 type Db = ReturnType<typeof createServerSupabase>;
@@ -118,18 +133,38 @@ export async function loadAiDocumentVersionPages(
   source: VersionSource,
 ): Promise<AiDocumentVersionPagesResult> {
   if (!source.storage_path || !/^[a-f0-9]{64}$/.test(source.content_sha256)) {
-    return { pages: [], sourceContentSha256: null };
+    return {
+      pages: [],
+      sourceContentSha256: null,
+      failureReason: "missing-source-metadata",
+    };
   }
 
   const raw = await downloadFile(source.storage_path);
-  if (!raw) return { pages: [], sourceContentSha256: null };
+  if (!raw) {
+    return {
+      pages: [],
+      sourceContentSha256: null,
+      failureReason: "download-missing",
+    };
+  }
   const sourceContentSha256 = sha256Hex(raw);
   if (sourceContentSha256 !== source.content_sha256) {
-    return { pages: [], sourceContentSha256 };
+    return {
+      pages: [],
+      sourceContentSha256,
+      failureReason: "source-hash-mismatch",
+    };
   }
 
   const extracted = await extractPagesFromBytes(source, raw);
-  if (extracted.length === 0) return { pages: [], sourceContentSha256 };
+  if (extracted.length === 0) {
+    return {
+      pages: [],
+      sourceContentSha256,
+      failureReason: "extraction-empty",
+    };
+  }
   // DOCX uploads record page_count=null; a valid, hash-verified extraction
   // defines exactly one logical page. Every other type stays fail-closed:
   // page_count is required and must match the extracted pages.
@@ -138,7 +173,11 @@ export async function loadAiDocumentVersionPages(
     (!isDocx && source.page_count == null)
     || (source.page_count != null && extracted.length !== source.page_count)
   ) {
-    return { pages: [], sourceContentSha256 };
+    return {
+      pages: [],
+      sourceContentSha256,
+      failureReason: "page-count-mismatch",
+    };
   }
 
   const { data: stored, error } = await db
@@ -152,11 +191,16 @@ export async function loadAiDocumentVersionPages(
   const storedPages = (stored ?? []) as StoredPageRow[];
   if (storedPages.length > 0) {
     if (!storedPagesMatch(storedPages, extracted)) {
-      return { pages: [], sourceContentSha256 };
+      return {
+        pages: [],
+        sourceContentSha256,
+        failureReason: "stored-page-mismatch",
+      };
     }
     return {
       pages: storedPagesToResult(storedPages),
       sourceContentSha256,
+      failureReason: null,
     };
   }
 
@@ -189,6 +233,7 @@ export async function loadAiDocumentVersionPages(
       return {
         pages: storedPagesToResult((concurrentStored ?? []) as StoredPageRow[]),
         sourceContentSha256,
+        failureReason: null,
       };
     }
     throw insertError;
@@ -200,5 +245,6 @@ export async function loadAiDocumentVersionPages(
       textSha256: row.content_sha256,
     })),
     sourceContentSha256,
+    failureReason: null,
   };
 }
