@@ -16,8 +16,9 @@
 #     autenticado -> proyecto + matter privado -> upload de
 #     e2e/fixtures/beta01-contract.docx con HTTP 201, versión, content hash
 #     y metadata de página;
-#   - única otra opción: e2e/beta01-ai-smoke.spec.ts (Gate 2 IA, receipts y
-#     citations sintéticos);
+#   - opciones adicionales: e2e/beta01-ai-smoke.spec.ts (Gate 2 IA, receipts y
+#     citations sintéticos) y e2e/beta01-integrated-journey.spec.ts (journey
+#     integrado completo con revisión, redline, Drive, auditoría y aislamiento);
 #   - cualquier otro valor (path, flags, whitespace) falla ANTES de cualquier
 #     acción de stack o mutación del repositorio;
 #   - BETA01_FAKE_STATE_FILE (Gate 2 fix A): path owned por el runner dentro
@@ -58,7 +59,7 @@
 #
 # Usage, from the repo root:
 #   bash scripts/e2e-beta01-setup-smoke.sh                            # Gate 1 (setup smoke)
-#   BETA01_SMOKE_SPEC=e2e/beta01-ai-smoke.spec.ts bash scripts/e2e-beta01-setup-smoke.sh  # Gate 2 (IA)
+#   BETA01_SMOKE_SPEC=e2e/beta01-integrated-journey.spec.ts bash scripts/e2e-beta01-setup-smoke.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -70,15 +71,15 @@ MINIO_CONTAINER="beta01-minio"
 MINIO_HELPER="$ROOT/e2e/support/beta01-minio-owner.cjs"
 # Gate 2 spec selector: BETA01_SMOKE_SPEC with a CLOSED allowlist. The
 # default preserves Gate 1 behavior EXACTLY (setup smoke); the only other
-# accepted value is the Gate 2 AI smoke. Any other value — another path,
+# accepted values are the Gate 2 AI smoke and the integrated journey. Any other value — another path,
 # shell flags, whitespace around or inside the value — fails HERE, before
 # any stack action, temp dir, or repository mutation.
 SPEC="${BETA01_SMOKE_SPEC:-e2e/beta01-setup-smoke.spec.ts}"
 case "$SPEC" in
-  "e2e/beta01-setup-smoke.spec.ts" | "e2e/beta01-ai-smoke.spec.ts") ;;
+  "e2e/beta01-setup-smoke.spec.ts" | "e2e/beta01-ai-smoke.spec.ts" | "e2e/beta01-integrated-journey.spec.ts") ;;
   *)
     printf '[beta01-smoke] ERROR: BETA01_SMOKE_SPEC rechazado: %s\n' "$SPEC" >&2
-    printf '[beta01-smoke] ERROR: allowlist cerrada: e2e/beta01-setup-smoke.spec.ts, e2e/beta01-ai-smoke.spec.ts\n' >&2
+    printf '[beta01-smoke] ERROR: allowlist cerrada: e2e/beta01-setup-smoke.spec.ts, e2e/beta01-ai-smoke.spec.ts, e2e/beta01-integrated-journey.spec.ts\n' >&2
     exit 1
     ;;
 esac
@@ -93,7 +94,7 @@ FAKE_FILE="$ROOT/e2e/support/beta01-fakes.cjs"
 # (default) conserva EXACTAMENTE el comportamiento Gate 1 (stack canónico,
 # reuso seguro vía snapshot si ya estaba corriendo).
 SPEC_IS_AI=0
-if [ "$SPEC" = "e2e/beta01-ai-smoke.spec.ts" ]; then
+if [ "$SPEC" = "e2e/beta01-ai-smoke.spec.ts" ] || [ "$SPEC" = "e2e/beta01-integrated-journey.spec.ts" ]; then
   SPEC_IS_AI=1
 fi
 SUPABASE_OWNER_HELPER="$ROOT/e2e/support/beta01-supabase-owner.cjs"
@@ -156,6 +157,7 @@ clear_inherited_targets() {
   for v in "${TARGET_VARS[@]}"; do
     unset "$v"
   done
+  unset BETA01_DISPOSABLE_STACK
   log "inherited target variables cleared"
 }
 
@@ -272,6 +274,10 @@ SQL
 
 ensure_supabase() {
   if [ "$SPEC_IS_AI" = "1" ]; then
+    # AI journey cleanup is owned by the disposable stack teardown. The
+    # append-only AI tables must never be deleted row-by-row before the stack
+    # owner destroys its recorded containers/volumes/network.
+    export BETA01_DISPOSABLE_STACK=1
     ensure_supabase_disposable
     return
   fi
@@ -320,13 +326,29 @@ ensure_supabase_disposable() {
     -e "s/^port = 54321/port = $api_port/" \
     -e "s/^port = 54322/port = $db_port/" \
     -e "s/^shadow_port = 54320/shadow_port = $shadow_port/" \
+    -e "s/^health_timeout = \"2m\"/health_timeout = \"5m\"/" \
     -e "s/^port = 54329/port = $pooler_port/" \
     -e "s/^port = 54323/port = $studio_port/" \
     -e "s/^port = 54324/port = $smtp_port/" \
     -e "s/^inspector_port = 8083/inspector_port = $inspector_port/" \
     -e "s/^port = 54327/port = $analytics_port/" \
     "$BACKEND/supabase/config.toml" >"$SBDISPOSABLE_WORKDIR/supabase/config.toml"
-  log "disposable Supabase config written (project $SBDISPOSABLE_PROJECT, api :$api_port, db :$db_port)"
+  node -e '
+const fs = require("node:fs");
+const file = process.argv[1];
+const input = fs.readFileSync(file, "utf8");
+const studioMarker = "[studio]\nenabled = true";
+const vectorMarker = "[storage.vector]\nenabled = true";
+if (!input.includes(studioMarker)) throw new Error("derived Supabase config has no enabled Studio section");
+if (!input.includes(vectorMarker)) throw new Error("derived Supabase config has no enabled vector storage section");
+fs.writeFileSync(
+  file,
+  input
+    .replace(studioMarker, "[studio]\nenabled = false")
+    .replace(vectorMarker, "[storage.vector]\nenabled = false"),
+);
+' "$SBDISPOSABLE_WORKDIR/supabase/config.toml"
+  log "disposable Supabase config written (project $SBDISPOSABLE_PROJECT, api :$api_port, db :$db_port, studio/vector disabled)"
 
   # Ownership decision BEFORE any mutation: resources that already carry OUR
   # project label fail closed (stale/racing stack) — never reused nor touched.
@@ -409,6 +431,11 @@ wire_env() {
   export R2_ACCESS_KEY_ID="minioadmin"
   export R2_SECRET_ACCESS_KEY="minioadmin"
   export R2_BUCKET_NAME="mike"
+  # Synthetic local-only credential: route resolution must succeed before the
+  # preloaded fake provider can intercept the request. This value is never sent
+  # to a real provider and is not a user secret.
+  export DEEPSEEK_API_KEY="beta01-fake-local-only"
+  export GOOGLE_DRIVE_ACCESS_TOKEN="beta01-fake-local-only"
   log "local target variables exported (supabase/api/r2 -> local harness)"
 }
 
@@ -469,7 +496,7 @@ cleanup() {
     sb_cleanup="$(node "$SUPABASE_OWNER_HELPER" --cleanup --state-file "$SBDISPOSABLE_STATE" 2>>"$SUPABASE_LOG")"
     sb_rc=$?
     if [ "$sb_rc" -ne 0 ] || [ "$(jq -r '.ok // "false"' <<<"${sb_cleanup:-}" 2>/dev/null)" != "true" ]; then
-      log "teardown FAILED — disposable Supabase cleanup: $(jq -r '.reason // .note // "unknown failure"' <<<"${sb_cleanup:-}" 2>/dev/null) (see $SUPABASE_LOG)"
+      log "teardown FAILED — disposable Supabase cleanup: $(jq -r '.reason // .note // .error // "unknown failure"' <<<"${sb_cleanup:-}" 2>/dev/null) (see $SUPABASE_LOG)"
       cleanup_rc=1
     fi
   elif [ "$SUPABASE_STARTED" = "yes" ]; then

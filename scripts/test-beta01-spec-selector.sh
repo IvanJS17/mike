@@ -9,7 +9,9 @@
 #       --workers=1 --retries=0;
 #   c2. BETA01_SMOKE_SPEC=e2e/beta01-ai-smoke.spec.ts selecciona el spec IA
 #       con los mismos workers/retries;
-#   c3. cualquier otro valor (path arbitrario, flags, whitespace) FALLA con
+#   c3. BETA01_SMOKE_SPEC=e2e/beta01-integrated-journey.spec.ts selecciona el
+#       journey integrado con el mismo runner disposable;
+#   c4. cualquier otro valor (path arbitrario, flags, whitespace) FALLA con
 #       exit 1 ANTES de cualquier acción de stack: cero llamadas a stubs y
 #       cero mutaciones (sin backend/.env, sin dirs /tmp/beta01-smoke.*);
 #   c4. el lifecycle Gate 1 queda intacto: los casos exitosos recorren el
@@ -67,6 +69,7 @@ cp "$HERE/e2e-beta01-setup-smoke.sh" "$REPO/scripts/"
 cp "$HERE/../backend/supabase/config.toml" "$REPO/backend/supabase/"
 : >"$REPO/e2e/beta01-setup-smoke.spec.ts"
 : >"$REPO/e2e/beta01-ai-smoke.spec.ts"
+: >"$REPO/e2e/beta01-integrated-journey.spec.ts"
 : >"$REPO/e2e/support/beta01-minio-owner.cjs"
 : >"$REPO/e2e/support/beta01-target-guard.cjs"
 : >"$REPO/e2e/support/beta01-fakes.cjs"
@@ -243,7 +246,7 @@ run_ok() {
   # --workdir único bajo SMOKE_DIR, ownership snapshot/record/cleanup, NUNCA
   # `supabase stop`, cero DELETE vía psql); el spec setup conserva el flujo
   # canónico (start/stop SIN --workdir, sin helper de ownership).
-  if [ "$expected" = "e2e/beta01-ai-smoke.spec.ts" ]; then
+  if [ "$expected" = "e2e/beta01-ai-smoke.spec.ts" ] || [ "$expected" = "e2e/beta01-integrated-journey.spec.ts" ]; then
     if grep -qE '^npx supabase start --workdir /tmp/beta01-smoke\.' "$CALLS"; then
       ok "$label: fixC — start usa --workdir del stack disposable bajo SMOKE_DIR"
     else
@@ -322,6 +325,9 @@ run_ok "" e2e/beta01-setup-smoke.spec.ts "empty"
 printf '[c2] BETA01_SMOKE_SPEC=AI -> spec IA\n'
 run_ok e2e/beta01-ai-smoke.spec.ts e2e/beta01-ai-smoke.spec.ts "ai"
 
+printf '[c3] BETA01_SMOKE_SPEC=integrated -> journey completo\n'
+run_ok e2e/beta01-integrated-journey.spec.ts e2e/beta01-integrated-journey.spec.ts "integrated"
+
 printf '[fixA] BETA01_FAKE_STATE_FILE heredado arbitrario -> reemplazado antes de mutar\n'
 ARBITRARY_STATE="$TMP/arbitrary-fake-state.json"
 printf '%s\n' '{"provider_calls":999,"drive_upload_calls":7,"junk":"arbitrary"}' >"$ARBITRARY_STATE"
@@ -332,19 +338,19 @@ else
   bad "fixA — el archivo heredado arbitrario fue alterado"
 fi
 
-printf '[c3] path arbitrario -> fail con cero mutaciones\n'
+printf '[c4] path arbitrario -> fail con cero mutaciones\n'
 expect_reject "e2e/other.spec.ts" "arbitrary-path"
 
-printf '[c3] flags -> fail con cero mutaciones\n'
+printf '[c4] flags -> fail con cero mutaciones\n'
 expect_reject "--workers=4" "flags"
 
-printf '[c3] spec permitido + flags -> fail con cero mutaciones\n'
+printf '[c4] spec permitido + flags -> fail con cero mutaciones\n'
 expect_reject "e2e/beta01-setup-smoke.spec.ts --headed" "spec-plus-flags"
 
-printf '[c3] whitespace delante -> fail con cero mutaciones\n'
+printf '[c4] whitespace delante -> fail con cero mutaciones\n'
 expect_reject " e2e/beta01-setup-smoke.spec.ts" "ws-prefix"
 
-printf '[c3] whitespace detrás -> fail con cero mutaciones\n'
+printf '[c4] whitespace detrás -> fail con cero mutaciones\n'
 expect_reject "e2e/beta01-setup-smoke.spec.ts " "ws-trailing"
 
 printf '== resultado: %d checks, %d fallas ==\n' "$CHECKS" "$FAILS"

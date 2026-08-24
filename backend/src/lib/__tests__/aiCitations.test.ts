@@ -39,6 +39,7 @@ describe("strict AI citations", () => {
   it("resolves an exact document version, page, and span", () => {
     expect(resolveCitation(validCitation, context)).toEqual({
       citation_id: "c1",
+      document_id: "document-1",
       document_version_id: "version-1",
       page: 1,
       span: { start_char: 0, end_char: 12 },
@@ -55,6 +56,7 @@ describe("strict AI citations", () => {
     expect(buildCitationReceiptFields([resolved])).toEqual([
       {
         citation_id: "c1",
+        document_id: "document-1",
         document_version_id: "version-1",
         page: 1,
         span: { start_char: 0, end_char: 12 },
@@ -157,6 +159,7 @@ describe("strict AI citations", () => {
       citations: [
         {
           citation_id: "c1",
+          document_id: "document-1",
           document_version_id: "version-1",
           page: 1,
           span: { start_char: 0, end_char: 12 },

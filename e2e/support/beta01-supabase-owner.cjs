@@ -69,7 +69,7 @@ function isAbsentStderr(stderr, kind) {
   const patterns = {
     container: /no such (?:container|object):\s*\S+/i,
     volume: /(?:no such volume\s*:\s*\S+|get\s+\S+\s*:\s*no such volume)/i,
-    network: /no such network:\s*\S+/i,
+    network: /(?:no such network:\s*\S+|network\s+\S+\s+not found)/i,
   };
   return patterns[kind].test(String(stderr || ""));
 }

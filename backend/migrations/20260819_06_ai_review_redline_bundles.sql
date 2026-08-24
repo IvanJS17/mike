@@ -38,7 +38,7 @@ CREATE OR REPLACE FUNCTION public.ai_redline_bundle_scope_guard()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public
+SET search_path = public, extensions
 AS $$
 DECLARE
   v_execution_matter_id uuid;

@@ -99,7 +99,7 @@ CREATE INDEX IF NOT EXISTS ai_receipts_execution_idx
 CREATE OR REPLACE FUNCTION public.ai_document_version_pages_integrity()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, extensions
 AS $$
 DECLARE
   version_document_id uuid;
