@@ -12,6 +12,20 @@ Cloudflare R2-compatible object storage.
 
 Website: [mikeoss.com](https://mikeoss.com) (upstream)
 
+## Project control and upstream recovery
+
+The current LiTT/Beta lifecycle, upstream divergence and recovery program are
+maintained in the repository rather than in Kanban history:
+
+- [Current project status](docs/PROJECT_STATUS.md)
+- [Upstream recovery plan](docs/UPSTREAM_RECOVERY_PLAN.md)
+- [Permanent upstream policy](docs/UPSTREAM_POLICY.md)
+- [Technical debt ledger](docs/TECHNICAL_DEBT.md)
+- [Release gates](docs/RELEASE_GATES.md)
+
+`PROJECT_STATUS.md` is the operational source of truth. Kanban cards are execution
+receipts and cannot supersede these documents.
+
 ## Quick start with Docker
 
 Run the whole application stack with one command and no Supabase or object
@@ -167,7 +181,6 @@ storage rather than the infrastructure bundled in Docker Compose.
 - A Supabase project
 - A Cloudflare R2 bucket, MinIO bucket, or another S3-compatible bucket
 - At least one supported model provider API key, or an accessible Ollama server
-- Optional: a CourtListener API token for case law lookup and citation verification
 - LibreOffice installed locally if you need DOC/DOCX to PDF conversion
 
 ### Database setup
@@ -263,9 +276,11 @@ workflows.
 1. Sign up in the app.
 2. If you did not set provider keys in `backend/.env`, open
    **Account > Models & API Keys** and add an Anthropic, Gemini, or OpenAI key.
-3. To use legal research tools, add a CourtListener token in `backend/.env` or
-   **Account > Models & API Keys**.
-4. Create or open a project and start chatting with documents.
+3. Create or open a project and start chatting with documents.
+
+CourtListener and its US case-law tools are not supported in LiTT. Any future
+Mexican legal-research integration requires a separately reviewed product and
+source-governance design; do not configure a CourtListener token for this fork.
 
 ## Troubleshooting
 
