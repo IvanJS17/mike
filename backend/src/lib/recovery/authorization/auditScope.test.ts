@@ -9,10 +9,12 @@ const IDENTITY = {
 };
 
 const SCOPE = {
+  user_id: IDENTITY.user_id,
   organization_id: "org-1",
   matter_id: "m-1",
   membership_role: "member",
   authorization_epoch: 7,
+  requires_explicit_matter_membership: false,
 };
 
 describe("audit scope — minimum data for the coordinator audit boundary", () => {
@@ -63,6 +65,16 @@ describe("audit scope — minimum data for the coordinator audit boundary", () =
       kind: "non_browser_bearer",
       client_name: "loadtest",
     });
+  });
+
+  it("rejects an identity that does not match the granted scope", () => {
+    expect(() =>
+      buildAuditScope({
+        identity: { ...IDENTITY, user_id: "user-other" },
+        scope: SCOPE,
+        action: "document.generated",
+      }),
+    ).toThrow(/user/i);
   });
 
   it("defaults status to completed, matching the upstream AuditStatus vocabulary", () => {

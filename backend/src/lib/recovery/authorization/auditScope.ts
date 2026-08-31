@@ -55,6 +55,11 @@ export function buildAuditScope(input: {
   if (!input.action || !input.action.trim()) {
     throw new Error("audit scope requires a non-empty action");
   }
+  if (input.identity.user_id !== input.scope.user_id) {
+    throw new Error(
+      "audit scope user does not match the granted authorization",
+    );
+  }
   const status = input.status ?? "completed";
   if (!(AUDIT_STATUSES as readonly string[]).includes(status)) {
     throw new Error(`audit scope has an invalid status: ${String(status)}`);

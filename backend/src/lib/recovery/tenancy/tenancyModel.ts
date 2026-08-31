@@ -33,6 +33,8 @@ export type OrganizationMembership = {
 
 /** Optional workspace membership inside one organization. */
 export type WorkspaceMembership = {
+  user_id: string;
+  organization_id: string;
   workspace_id: string;
   role: string;
   status: OrgMembershipStatus;
@@ -40,6 +42,7 @@ export type WorkspaceMembership = {
 
 /** Explicit per-matter membership (required for private matters). */
 export type MatterMembership = {
+  user_id: string;
   matter_id: string;
   role: string;
   status: OrgMembershipStatus;
@@ -88,6 +91,8 @@ export function buildOrganizationMembership(
 export function buildWorkspaceMembership(
   input: WorkspaceMembership,
 ): WorkspaceMembership {
+  assertNonEmpty(input.user_id, "user_id");
+  assertNonEmpty(input.organization_id, "organization_id");
   assertNonEmpty(input.workspace_id, "workspace_id");
   assertNonEmpty(input.role, "role");
   assertStatus(input.status);
@@ -97,6 +102,7 @@ export function buildWorkspaceMembership(
 export function buildMatterMembership(
   input: MatterMembership,
 ): MatterMembership {
+  assertNonEmpty(input.user_id, "user_id");
   assertNonEmpty(input.matter_id, "matter_id");
   assertNonEmpty(input.role, "role");
   assertStatus(input.status);

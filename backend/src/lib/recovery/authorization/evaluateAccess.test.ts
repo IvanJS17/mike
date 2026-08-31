@@ -52,7 +52,12 @@ function privateMatter(): MatterRecord {
 function matterMembership(
   status: "active" | "revoked" = "active",
 ): MatterMembership {
-  return buildMatterMembership({ matter_id: "m-1", role: "lead", status });
+  return buildMatterMembership({
+    user_id: USER,
+    matter_id: "m-1",
+    role: "lead",
+    status,
+  });
 }
 
 function evaluate(overrides: {
@@ -93,11 +98,7 @@ describe("evaluateAccess — adversarial tenancy matrix", () => {
 
   it("returns generic non-disclosure for a missing org membership", () => {
     const decision = evaluate({ membership: null });
-    expect(decision).toMatchObject({ outcome: "not_found" });
-    if (decision.outcome === "not_found") {
-      // The reason must not leak tenant, workspace or matter existence.
-      expect(decision.reason).not.toMatch(/org|matter|tenant|workspace/i);
-    }
+    expect(decision).toEqual({ outcome: "not_found" });
   });
 
   it("returns generic non-disclosure for an inactive org membership", () => {
@@ -110,6 +111,13 @@ describe("evaluateAccess — adversarial tenancy matrix", () => {
   it("returns generic non-disclosure for a revoked org membership", () => {
     const decision = evaluate({
       membership: { ...activeMembership(), status: "revoked" },
+    });
+    expect(decision).toMatchObject({ outcome: "not_found" });
+  });
+
+  it("returns not_found when the organization membership belongs to another identity", () => {
+    const decision = evaluate({
+      membership: { ...activeMembership(), user_id: "user-other" },
     });
     expect(decision).toMatchObject({ outcome: "not_found" });
   });
@@ -130,14 +138,33 @@ describe("evaluateAccess — adversarial tenancy matrix", () => {
     expect(decision).toMatchObject({ outcome: "not_found" });
   });
 
-  it("allows a private matter with explicit active membership, carrying the role", () => {
+  it("returns not_found for private membership belonging to another user or matter", () => {
+    const otherUser = evaluate({
+      matter: privateMatter(),
+      matterMembership: { ...matterMembership(), user_id: "user-other" },
+    });
+    expect(otherUser).toMatchObject({ outcome: "not_found" });
+
+    const otherMatter = evaluate({
+      matter: privateMatter(),
+      matterMembership: { ...matterMembership(), matter_id: "m-other" },
+    });
+    expect(otherMatter).toMatchObject({ outcome: "not_found" });
+  });
+
+  it("allows a private matter with explicit active membership, carrying the matter role", () => {
     const decision = evaluate({
       matter: privateMatter(),
       matterMembership: matterMembership("active"),
     });
     expect(decision).toMatchObject({
       outcome: "allow",
-      scope: { matter_id: "m-1", membership_role: "member" },
+      scope: {
+        user_id: USER,
+        matter_id: "m-1",
+        membership_role: "lead",
+        requires_explicit_matter_membership: true,
+      },
     });
   });
 
@@ -154,6 +181,28 @@ describe("evaluateAccess — adversarial tenancy matrix", () => {
   it("returns not_found when the matter does not exist", () => {
     const decision = evaluate({ matter: null });
     expect(decision).toMatchObject({ outcome: "not_found" });
+  });
+
+  it("uses one opaque shape for every non-disclosure path", () => {
+    const decisions = [
+      evaluate({ membership: null }),
+      evaluate({ matter: null }),
+      evaluate({
+        matter: buildMatterRecord({
+          matter_id: "m-other",
+          organization_id: "org-other",
+          visibility: "public",
+        }),
+      }),
+      evaluate({ matter: privateMatter(), matterMembership: null }),
+      evaluate({
+        matter: privateMatter(),
+        matterMembership: { ...matterMembership(), user_id: "user-other" },
+      }),
+    ];
+    for (const decision of decisions) {
+      expect(decision).toEqual({ outcome: "not_found" });
+    }
   });
 
   it("denies an MFA-required operation with unsatisfied assurance", () => {
@@ -203,6 +252,18 @@ describe("recheckFreshAuthorization — mutation-time fresh authorization", () =
       membership: activeMembership(7),
     });
     expect(result).toMatchObject({ fresh: true });
+  });
+
+  it("denies when the current identity differs from the granted user", () => {
+    const result = recheckFreshAuthorization({
+      scope: scopeFor(),
+      identity: { ...activeIdentity(), user_id: "user-other" },
+      membership: activeMembership(7),
+    });
+    expect(result).toMatchObject({
+      fresh: false,
+      code: "identity_mismatch",
+    });
   });
 
   it("denies when the epoch advanced between check and mutation recheck", () => {
@@ -262,6 +323,56 @@ describe("recheckFreshAuthorization — mutation-time fresh authorization", () =
       fresh: false,
       code: "matter_membership_no_longer_active",
     });
+  });
+
+  it("denies when a private-matter recheck omits explicit membership", () => {
+    const privateDecision = evaluateAccess({
+      identity: activeIdentity(),
+      membership: activeMembership(7),
+      matter: privateMatter(),
+      matterMembership: matterMembership("active"),
+      requiresMfa: false,
+    });
+    if (privateDecision.outcome !== "allow") {
+      throw new Error("test setup: expected initial allow");
+    }
+    const result = recheckFreshAuthorization({
+      scope: privateDecision.scope,
+      identity: activeIdentity(),
+      membership: activeMembership(7),
+    });
+    expect(result).toMatchObject({
+      fresh: false,
+      code: "matter_membership_no_longer_active",
+    });
+  });
+
+  it("denies when private membership belongs to another user or matter at recheck", () => {
+    const privateDecision = evaluateAccess({
+      identity: activeIdentity(),
+      membership: activeMembership(7),
+      matter: privateMatter(),
+      matterMembership: matterMembership("active"),
+      requiresMfa: false,
+    });
+    if (privateDecision.outcome !== "allow") {
+      throw new Error("test setup: expected initial allow");
+    }
+    for (const current of [
+      { ...matterMembership(), user_id: "user-other" },
+      { ...matterMembership(), matter_id: "m-other" },
+    ]) {
+      const result = recheckFreshAuthorization({
+        scope: privateDecision.scope,
+        identity: activeIdentity(),
+        membership: activeMembership(7),
+        matterMembership: current,
+      });
+      expect(result).toMatchObject({
+        fresh: false,
+        code: "matter_membership_mismatch",
+      });
+    }
   });
 
   it("denies an MFA-required mutation whose assurance lapsed after the initial check", () => {

@@ -30,26 +30,20 @@ import type {
  * is organization + matter.
  */
 export type AuthorizationScope = {
+  user_id: string;
   organization_id: string;
   workspace_id?: string;
   matter_id?: string;
   membership_role: string;
   authorization_epoch: number;
+  requires_explicit_matter_membership: boolean;
 };
 
 /** Read decision: allow, authenticated-but-stale deny, or non-disclosure. */
 export type AccessDecision =
   | { outcome: "allow"; scope: AuthorizationScope }
   | { outcome: "denied"; code: "mfa_required"; reason: string }
-  | { outcome: "not_found"; reason: string };
-
-/** Why an initial read evaluation did not allow. */
-export type AccessDenyReason =
-  | "membership_missing_or_inactive"
-  | "matter_missing"
-  | "matter_not_in_organization"
-  | "matter_membership_missing_or_inactive"
-  | "mfa_required";
+  | { outcome: "not_found" };
 
 /**
  * Evaluate access for one (identity, membership, matter) triple.
@@ -63,33 +57,30 @@ export function evaluateAccess(input: {
   requiresMfa: boolean;
 }): AccessDecision {
   const membership = input.membership;
-  if (!membership || membership.status !== "active") {
-    return {
-      outcome: "not_found",
-      reason: "membership_missing_or_inactive",
-    };
+  if (
+    !membership ||
+    membership.status !== "active" ||
+    membership.user_id !== input.identity.user_id
+  ) {
+    return { outcome: "not_found" };
   }
   const matter = input.matter;
   if (!matter) {
-    return {
-      outcome: "not_found",
-      reason: "matter_missing",
-    };
+    return { outcome: "not_found" };
   }
   if (matter.organization_id !== membership.organization_id) {
-    return {
-      outcome: "not_found",
-      reason: "matter_not_in_organization",
-    };
+    return { outcome: "not_found" };
   }
+  const requiresExplicitMatterMembership = matter.visibility === "private";
+  const matterMembership = input.matterMembership;
   if (
-    matter.visibility === "private" &&
-    (!input.matterMembership || input.matterMembership.status !== "active")
+    requiresExplicitMatterMembership &&
+    (!matterMembership ||
+      matterMembership.status !== "active" ||
+      matterMembership.user_id !== input.identity.user_id ||
+      matterMembership.matter_id !== matter.matter_id)
   ) {
-    return {
-      outcome: "not_found",
-      reason: "matter_membership_missing_or_inactive",
-    };
+    return { outcome: "not_found" };
   }
   if (input.requiresMfa && !input.identity.mfa_satisfied) {
     return {
@@ -101,10 +92,14 @@ export function evaluateAccess(input: {
   return {
     outcome: "allow",
     scope: {
+      user_id: input.identity.user_id,
       organization_id: membership.organization_id,
       matter_id: matter.matter_id,
-      membership_role: membership.role,
+      membership_role: requiresExplicitMatterMembership
+        ? matterMembership!.role
+        : membership.role,
       authorization_epoch: membership.authorization_epoch,
+      requires_explicit_matter_membership: requiresExplicitMatterMembership,
     },
   };
 }
@@ -129,9 +124,11 @@ export type FreshRecheckResult =
   | {
       fresh: false;
       code:
+        | "identity_mismatch"
         | "stale_authorization_epoch"
         | "membership_no_longer_active"
         | "matter_membership_no_longer_active"
+        | "matter_membership_mismatch"
         | "mfa_required";
       reason: string;
     };
@@ -147,7 +144,18 @@ export function recheckFreshAuthorization(
   input: FreshRecheckInput,
 ): FreshRecheckResult {
   const { scope, membership } = input;
-  if (!membership || membership.status !== "active") {
+  if (input.identity.user_id !== scope.user_id) {
+    return {
+      fresh: false,
+      code: "identity_mismatch",
+      reason: "authenticated user differs from the granted scope",
+    };
+  }
+  if (
+    !membership ||
+    membership.status !== "active" ||
+    membership.user_id !== scope.user_id
+  ) {
     return {
       fresh: false,
       code: "membership_no_longer_active",
@@ -168,16 +176,28 @@ export function recheckFreshAuthorization(
       reason: "authorization epoch advanced since grant",
     };
   }
-  if (
-    scope.matter_id &&
-    input.matterMembership &&
-    input.matterMembership.status !== "active"
-  ) {
-    return {
-      fresh: false,
-      code: "matter_membership_no_longer_active",
-      reason: "explicit matter membership is no longer active at mutation time",
-    };
+  if (scope.requires_explicit_matter_membership) {
+    const matterMembership = input.matterMembership;
+    if (!matterMembership || matterMembership.status !== "active") {
+      return {
+        fresh: false,
+        code: "matter_membership_no_longer_active",
+        reason:
+          "explicit matter membership is no longer active at mutation time",
+      };
+    }
+    if (
+      matterMembership.user_id !== scope.user_id ||
+      matterMembership.matter_id !== scope.matter_id ||
+      matterMembership.role !== scope.membership_role
+    ) {
+      return {
+        fresh: false,
+        code: "matter_membership_mismatch",
+        reason:
+          "explicit matter membership no longer matches the granted scope",
+      };
+    }
   }
   if (input.requiresMfa && !input.identity.mfa_satisfied) {
     return {

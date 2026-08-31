@@ -104,11 +104,17 @@ describe("organization membership", () => {
 describe("workspace membership (optional layer)", () => {
   it("builds when present", () => {
     const workspace = buildWorkspaceMembership({
+      user_id: USER,
+      organization_id: ORG,
       workspace_id: "ws-1",
       role: "collaborator",
       status: "active",
     });
-    expect(workspace.workspace_id).toBe("ws-1");
+    expect(workspace).toMatchObject({
+      user_id: USER,
+      organization_id: ORG,
+      workspace_id: "ws-1",
+    });
   });
 
   it("is representable as absent — no implicit workspace grant", () => {
@@ -137,22 +143,33 @@ describe("matter records and explicit matter membership", () => {
 
   it("builds an explicit private-matter membership with a role", () => {
     const membership = buildMatterMembership({
+      user_id: USER,
       matter_id: "m-1",
       role: "lead",
       status: "active",
     });
     expect(membership).toEqual({
+      user_id: USER,
       matter_id: "m-1",
       role: "lead",
       status: "active",
     });
     expect(() =>
       buildMatterMembership({
+        user_id: USER,
         matter_id: "m-1",
         role: "",
         status: "active",
       }),
     ).toThrow(/role/);
+    expect(() =>
+      buildMatterMembership({
+        user_id: "",
+        matter_id: "m-1",
+        role: "lead",
+        status: "active",
+      }),
+    ).toThrow(/user_id/);
   });
 });
 
