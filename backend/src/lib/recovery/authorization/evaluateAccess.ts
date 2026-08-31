@@ -20,21 +20,23 @@ import type { AuthenticatedIdentity } from "../identity/authStateMatrix";
 import type {
   MatterMembership,
   MatterRecord,
+  MatterRole,
   OrganizationMembership,
+  OrganizationRole,
 } from "../tenancy/tenancyModel";
 
 /**
  * The authorization scope at grant time. Mirrors the frozen ledger
- * `TenancyScope` shape for the fields the access decision derives; the
- * optional `workspace_id` stays absent here because the A1 decision surface
- * is organization + matter.
+ * `TenancyScope` shape for the fields the access decision derives and carries
+ * the matter's persisted `workspace_id`, preserving the
+ * organization→workspace→matter hierarchy in every granted scope.
  */
 export type AuthorizationScope = {
   user_id: string;
   organization_id: string;
-  workspace_id?: string;
-  matter_id?: string;
-  membership_role: string;
+  workspace_id: string;
+  matter_id: string;
+  membership_role: OrganizationRole | MatterRole;
   authorization_epoch: number;
   requires_explicit_matter_membership: boolean;
 };
@@ -94,6 +96,7 @@ export function evaluateAccess(input: {
     scope: {
       user_id: input.identity.user_id,
       organization_id: membership.organization_id,
+      workspace_id: matter.workspace_id,
       matter_id: matter.matter_id,
       membership_role: requiresExplicitMatterMembership
         ? matterMembership!.role
@@ -114,6 +117,8 @@ export type FreshRecheckInput = {
   identity: AuthenticatedIdentity;
   /** Membership as it stands at mutation time. */
   membership: OrganizationMembership | null;
+  /** Matter as it stands at mutation time. */
+  matter: MatterRecord | null;
   /** Explicit matter membership at mutation time, when the matter is private. */
   matterMembership?: MatterMembership | null;
   requiresMfa?: boolean;
@@ -127,6 +132,8 @@ export type FreshRecheckResult =
         | "identity_mismatch"
         | "stale_authorization_epoch"
         | "membership_no_longer_active"
+        | "matter_no_longer_available"
+        | "matter_scope_mismatch"
         | "matter_membership_no_longer_active"
         | "matter_membership_mismatch"
         | "mfa_required";
@@ -174,6 +181,28 @@ export function recheckFreshAuthorization(
       fresh: false,
       code: "stale_authorization_epoch",
       reason: "authorization epoch advanced since grant",
+    };
+  }
+  const matter = input.matter;
+  if (!matter) {
+    return {
+      fresh: false,
+      code: "matter_no_longer_available",
+      reason: "matter is no longer available at mutation time",
+    };
+  }
+  const currentRequiresExplicitMembership = matter.visibility === "private";
+  if (
+    matter.matter_id !== scope.matter_id ||
+    matter.organization_id !== scope.organization_id ||
+    matter.workspace_id !== scope.workspace_id ||
+    currentRequiresExplicitMembership !==
+      scope.requires_explicit_matter_membership
+  ) {
+    return {
+      fresh: false,
+      code: "matter_scope_mismatch",
+      reason: "matter scope changed since grant",
     };
   }
   if (scope.requires_explicit_matter_membership) {

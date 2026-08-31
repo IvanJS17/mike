@@ -17,6 +17,37 @@ export const ORG_MEMBERSHIP_STATUSES = [
 
 export type OrgMembershipStatus = (typeof ORG_MEMBERSHIP_STATUSES)[number];
 
+/** Closed organization role vocabulary (A2a schema check). */
+export const ORGANIZATION_ROLES = [
+  "org_owner",
+  "workspace_admin",
+  "editor",
+  "viewer",
+  "technical_operator",
+] as const;
+
+export type OrganizationRole = (typeof ORGANIZATION_ROLES)[number];
+
+/** Closed workspace role vocabulary (A2a schema check). */
+export const WORKSPACE_ROLES = [
+  "workspace_admin",
+  "editor",
+  "viewer",
+  "technical_operator",
+] as const;
+
+export type WorkspaceRole = (typeof WORKSPACE_ROLES)[number];
+
+/** Closed matter role vocabulary (A2a schema check). */
+export const MATTER_ROLES = [
+  "matter_owner",
+  "editor",
+  "viewer",
+  "technical_operator",
+] as const;
+
+export type MatterRole = (typeof MATTER_ROLES)[number];
+
 /** Closed matter visibility vocabulary. */
 export const MATTER_VISIBILITIES = ["public", "private"] as const;
 
@@ -26,7 +57,7 @@ export type MatterVisibility = (typeof MATTER_VISIBILITIES)[number];
 export type OrganizationMembership = {
   user_id: string;
   organization_id: string;
-  role: string;
+  role: OrganizationRole;
   status: OrgMembershipStatus;
   authorization_epoch: number;
 };
@@ -36,7 +67,7 @@ export type WorkspaceMembership = {
   user_id: string;
   organization_id: string;
   workspace_id: string;
-  role: string;
+  role: WorkspaceRole;
   status: OrgMembershipStatus;
 };
 
@@ -44,13 +75,17 @@ export type WorkspaceMembership = {
 export type MatterMembership = {
   user_id: string;
   matter_id: string;
-  role: string;
+  role: MatterRole;
   status: OrgMembershipStatus;
 };
 
-/** A matter record scoped to exactly one organization. */
+/**
+ * A matter record persisting the organization→workspace→matter hierarchy:
+ * the matter lives in exactly one workspace of exactly one organization.
+ */
 export type MatterRecord = {
   matter_id: string;
+  workspace_id: string;
   organization_id: string;
   visibility: MatterVisibility;
 };
@@ -77,12 +112,22 @@ function assertEpoch(epoch: number): void {
   }
 }
 
+function assertClosedVocabulary(
+  vocabulary: readonly string[],
+  value: string,
+  label: string,
+): void {
+  if (!vocabulary.includes(value)) {
+    throw new Error(`${label} is not part of the closed ${label} vocabulary`);
+  }
+}
+
 export function buildOrganizationMembership(
   input: OrganizationMembership,
 ): OrganizationMembership {
   assertNonEmpty(input.user_id, "user_id");
   assertNonEmpty(input.organization_id, "organization_id");
-  assertNonEmpty(input.role, "role");
+  assertClosedVocabulary(ORGANIZATION_ROLES, input.role, "organization role");
   assertStatus(input.status);
   assertEpoch(input.authorization_epoch);
   return { ...input };
@@ -94,7 +139,7 @@ export function buildWorkspaceMembership(
   assertNonEmpty(input.user_id, "user_id");
   assertNonEmpty(input.organization_id, "organization_id");
   assertNonEmpty(input.workspace_id, "workspace_id");
-  assertNonEmpty(input.role, "role");
+  assertClosedVocabulary(WORKSPACE_ROLES, input.role, "workspace role");
   assertStatus(input.status);
   return { ...input };
 }
@@ -104,13 +149,14 @@ export function buildMatterMembership(
 ): MatterMembership {
   assertNonEmpty(input.user_id, "user_id");
   assertNonEmpty(input.matter_id, "matter_id");
-  assertNonEmpty(input.role, "role");
+  assertClosedVocabulary(MATTER_ROLES, input.role, "matter role");
   assertStatus(input.status);
   return { ...input };
 }
 
 export function buildMatterRecord(input: MatterRecord): MatterRecord {
   assertNonEmpty(input.matter_id, "matter_id");
+  assertNonEmpty(input.workspace_id, "workspace_id");
   assertNonEmpty(input.organization_id, "organization_id");
   if (!(MATTER_VISIBILITIES as readonly string[]).includes(input.visibility)) {
     throw new Error(

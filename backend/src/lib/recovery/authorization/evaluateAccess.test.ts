@@ -13,6 +13,7 @@ import {
 import { evaluateAccess, recheckFreshAuthorization } from "./evaluateAccess";
 
 const ORG = "org-1";
+const WS = "ws-1";
 const USER = "user-1";
 
 function activeIdentity(): AuthenticatedIdentity {
@@ -27,7 +28,7 @@ function activeMembership(epoch = 7): OrganizationMembership {
   return buildOrganizationMembership({
     user_id: USER,
     organization_id: ORG,
-    role: "member",
+    role: "editor",
     status: "active",
     authorization_epoch: epoch,
   });
@@ -36,6 +37,7 @@ function activeMembership(epoch = 7): OrganizationMembership {
 function publicMatter(): MatterRecord {
   return buildMatterRecord({
     matter_id: "m-1",
+    workspace_id: WS,
     organization_id: ORG,
     visibility: "public",
   });
@@ -44,6 +46,7 @@ function publicMatter(): MatterRecord {
 function privateMatter(): MatterRecord {
   return buildMatterRecord({
     matter_id: "m-1",
+    workspace_id: WS,
     organization_id: ORG,
     visibility: "private",
   });
@@ -55,7 +58,7 @@ function matterMembership(
   return buildMatterMembership({
     user_id: USER,
     matter_id: "m-1",
-    role: "lead",
+    role: "matter_owner",
     status,
   });
 }
@@ -89,8 +92,9 @@ describe("evaluateAccess — adversarial tenancy matrix", () => {
       outcome: "allow",
       scope: {
         organization_id: ORG,
+        workspace_id: WS,
         matter_id: "m-1",
-        membership_role: "member",
+        membership_role: "editor",
         authorization_epoch: 7,
       },
     });
@@ -162,7 +166,7 @@ describe("evaluateAccess — adversarial tenancy matrix", () => {
       scope: {
         user_id: USER,
         matter_id: "m-1",
-        membership_role: "lead",
+        membership_role: "matter_owner",
         requires_explicit_matter_membership: true,
       },
     });
@@ -171,6 +175,7 @@ describe("evaluateAccess — adversarial tenancy matrix", () => {
   it("returns not_found when the matter belongs to another organization", () => {
     const crossTenant = buildMatterRecord({
       matter_id: "m-2",
+      workspace_id: "ws-other",
       organization_id: "org-other",
       visibility: "public",
     });
@@ -190,6 +195,7 @@ describe("evaluateAccess — adversarial tenancy matrix", () => {
       evaluate({
         matter: buildMatterRecord({
           matter_id: "m-other",
+          workspace_id: "ws-other",
           organization_id: "org-other",
           visibility: "public",
         }),
@@ -203,6 +209,17 @@ describe("evaluateAccess — adversarial tenancy matrix", () => {
     for (const decision of decisions) {
       expect(decision).toEqual({ outcome: "not_found" });
     }
+  });
+
+  it("carries the matter's persisted workspace_id in the allow scope", () => {
+    const decision = evaluate({
+      matter: privateMatter(),
+      matterMembership: matterMembership("active"),
+    });
+    if (decision.outcome !== "allow") {
+      throw new Error("test setup: expected allow");
+    }
+    expect(decision.scope.workspace_id).toBe(WS);
   });
 
   it("denies an MFA-required operation with unsatisfied assurance", () => {
@@ -233,6 +250,7 @@ describe("recheckFreshAuthorization — mutation-time fresh authorization", () =
       membership: activeMembership(epoch),
       matter: buildMatterRecord({
         matter_id: matterId ?? "m-1",
+        workspace_id: WS,
         organization_id: ORG,
         visibility: "public",
       }),
@@ -250,6 +268,7 @@ describe("recheckFreshAuthorization — mutation-time fresh authorization", () =
       scope: scopeFor(),
       identity: activeIdentity(),
       membership: activeMembership(7),
+      matter: publicMatter(),
     });
     expect(result).toMatchObject({ fresh: true });
   });
@@ -259,6 +278,7 @@ describe("recheckFreshAuthorization — mutation-time fresh authorization", () =
       scope: scopeFor(),
       identity: { ...activeIdentity(), user_id: "user-other" },
       membership: activeMembership(7),
+      matter: publicMatter(),
     });
     expect(result).toMatchObject({
       fresh: false,
@@ -271,6 +291,7 @@ describe("recheckFreshAuthorization — mutation-time fresh authorization", () =
       scope: scopeFor(7),
       identity: activeIdentity(),
       membership: activeMembership(advanceEpoch(7)),
+      matter: publicMatter(),
     });
     expect(result).toMatchObject({
       fresh: false,
@@ -278,11 +299,42 @@ describe("recheckFreshAuthorization — mutation-time fresh authorization", () =
     });
   });
 
+  it("denies when the matter disappeared or changed scope before mutation", () => {
+    const scope = scopeFor();
+    const disappeared = recheckFreshAuthorization({
+      scope,
+      identity: activeIdentity(),
+      membership: activeMembership(7),
+      matter: null,
+    });
+    expect(disappeared).toMatchObject({
+      fresh: false,
+      code: "matter_no_longer_available",
+    });
+
+    for (const changed of [
+      { ...publicMatter(), workspace_id: "ws-other" },
+      { ...publicMatter(), visibility: "private" as const },
+    ]) {
+      const result = recheckFreshAuthorization({
+        scope,
+        identity: activeIdentity(),
+        membership: activeMembership(7),
+        matter: changed,
+      });
+      expect(result).toMatchObject({
+        fresh: false,
+        code: "matter_scope_mismatch",
+      });
+    }
+  });
+
   it("denies when membership was revoked between check and recheck", () => {
     const result = recheckFreshAuthorization({
       scope: scopeFor(7),
       identity: activeIdentity(),
       membership: { ...activeMembership(7), status: "revoked" },
+      matter: publicMatter(),
     });
     expect(result).toMatchObject({
       fresh: false,
@@ -295,6 +347,7 @@ describe("recheckFreshAuthorization — mutation-time fresh authorization", () =
       scope: scopeFor(7),
       identity: activeIdentity(),
       membership: null,
+      matter: publicMatter(),
     });
     expect(result).toMatchObject({
       fresh: false,
@@ -317,6 +370,7 @@ describe("recheckFreshAuthorization — mutation-time fresh authorization", () =
       scope: privateDecision.scope,
       identity: activeIdentity(),
       membership: activeMembership(7),
+      matter: privateMatter(),
       matterMembership: matterMembership("revoked"),
     });
     expect(result).toMatchObject({
@@ -340,6 +394,7 @@ describe("recheckFreshAuthorization — mutation-time fresh authorization", () =
       scope: privateDecision.scope,
       identity: activeIdentity(),
       membership: activeMembership(7),
+      matter: privateMatter(),
     });
     expect(result).toMatchObject({
       fresh: false,
@@ -366,6 +421,7 @@ describe("recheckFreshAuthorization — mutation-time fresh authorization", () =
         scope: privateDecision.scope,
         identity: activeIdentity(),
         membership: activeMembership(7),
+        matter: privateMatter(),
         matterMembership: current,
       });
       expect(result).toMatchObject({
@@ -380,6 +436,7 @@ describe("recheckFreshAuthorization — mutation-time fresh authorization", () =
       scope: scopeFor(),
       identity: { ...activeIdentity(), mfa_satisfied: false },
       membership: activeMembership(7),
+      matter: publicMatter(),
       requiresMfa: true,
     });
     expect(result).toMatchObject({ fresh: false, code: "mfa_required" });
@@ -390,6 +447,7 @@ describe("recheckFreshAuthorization — mutation-time fresh authorization", () =
       scope: scopeFor(7),
       identity: activeIdentity(),
       membership: activeMembership(advanceEpoch(7)),
+      matter: publicMatter(),
     });
     expect(result).not.toHaveProperty("scope");
   });
