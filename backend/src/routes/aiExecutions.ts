@@ -3,7 +3,10 @@ import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
 import { checkProjectAccess } from "../lib/access";
 import { checkMatterAccess } from "../lib/aiAccess";
-import { loadAiDocumentVersionPages } from "../lib/aiDocumentPages";
+import {
+  isDocxFileType,
+  loadAiDocumentVersionPages,
+} from "../lib/aiDocumentPages";
 import { completeText } from "../lib/llm";
 import {
   parseModelRoute,
@@ -34,6 +37,7 @@ import {
   CIVIL_MERCANTIL_MX_PLAYBOOK_PROMPT,
   CIVIL_MERCANTIL_MX_PLAYBOOK_VERSION,
 } from "../lib/civilMercantilePlaybook";
+import { ALLOWED_DOCUMENT_TYPES } from "../lib/documentTypes";
 import type { AiExecutionStatus } from "../lib/aiExecutions";
 
 export const aiExecutionsRouter = Router({ mergeParams: true });
@@ -92,6 +96,76 @@ function bodyOf(req: Request): Record<string, unknown> {
   return req.body && typeof req.body === "object" && !Array.isArray(req.body)
     ? (req.body as Record<string, unknown>)
     : {};
+}
+
+/**
+ * Production-observability sanitizers (Gate 2 probe G): every field emitted
+ * into the pre-provider failure logs is drawn from a strict allowlist so the
+ * log can never carry storage paths, hashes, bytes, text, full IDs or
+ * token/PII material.
+ */
+
+const MAX_LOG_PAGE_COUNT = 10_000;
+
+/** Only the canonical upload suffixes are ever emitted; anything else → null. */
+function allowlistedFileType(fileType: string | null | undefined): string | null {
+  const type = (fileType ?? "").toLowerCase();
+  return ALLOWED_DOCUMENT_TYPES.has(type) ? type : null;
+}
+
+/** Declared page counts are emitted only when present and within bounds. */
+function boundedPageCount(pageCount: number | null | undefined): number | null {
+  return typeof pageCount === "number"
+    && Number.isInteger(pageCount)
+    && pageCount > 0
+    && pageCount <= MAX_LOG_PAGE_COUNT
+    ? pageCount
+    : null;
+}
+
+const ALLOWLISTED_ERROR_NAMES = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "AggregateError",
+  "PostgrestError",
+]);
+
+/**
+ * Postgres SQLSTATE codes ("23505"), Postgrest codes ("PGRST116") and fetch
+ * codes ("ECONNREFUSED") are short alphanumeric tokens; anything else (paths
+ * with "/" or ".", free text) is rejected. The raw message is NEVER logged
+ * because it can embed storage paths or keys.
+ */
+const ALLOWLISTED_ERROR_CODE_PATTERN = /^[A-Za-z0-9_]{1,24}$/;
+
+function sanitizedLoaderError(
+  error: unknown,
+): { name: string | null; code: string | null } {
+  const name = error instanceof Error ? error.name : null;
+  const rawCode =
+    typeof error === "object" && error !== null && "code" in error
+      ? (error as { code?: unknown }).code
+      : null;
+  return {
+    name: name && ALLOWLISTED_ERROR_NAMES.has(name) ? name : null,
+    code:
+      typeof rawCode === "string" && ALLOWLISTED_ERROR_CODE_PATTERN.test(rawCode)
+        ? rawCode
+        : null,
+  };
+}
+
+function loaderFailureContext(version: VersionRow): {
+  hasStoragePath: boolean;
+  fileType: string | null;
+  pageCount: number | null;
+} {
+  return {
+    hasStoragePath: Boolean(version.storage_path),
+    fileType: allowlistedFileType(version.file_type),
+    pageCount: boundedPageCount(version.page_count),
+  };
 }
 
 function requiredString(value: unknown, field: string):
@@ -444,7 +518,9 @@ async function createExecution(req: Request, res: import("express").Response) {
   let loadedPages: Awaited<ReturnType<typeof loadAiDocumentVersionPages>> = {
     pages: [],
     sourceContentSha256: null,
+    failureReason: null,
   };
+  let loaderThrew = false;
   try {
     loadedPages = await loadAiDocumentVersionPages(db, {
       document_id: versionRow.document_id,
@@ -454,14 +530,43 @@ async function createExecution(req: Request, res: import("express").Response) {
       file_type: versionRow.file_type,
       page_count: versionRow.page_count,
     });
-  } catch {
-    loadedPages = { pages: [], sourceContentSha256: null };
+  } catch (error) {
+    // Thrown loader errors (DB failures) become the single `loader-error`
+    // log: only allowlisted error name/code and sanitized context fields get
+    // emitted; the raw message is never logged because it can embed storage
+    // paths or keys.
+    loaderThrew = true;
+    loadedPages = { pages: [], sourceContentSha256: null, failureReason: null };
+    const { name: errorName, code: errorCode } = sanitizedLoaderError(error);
+    console.error(
+      "[ai-executions] loader-error",
+      {
+        errorName,
+        errorCode,
+        ...loaderFailureContext(versionRow),
+      },
+    );
   }
   if (
     loadedPages.pages.length === 0
-    || versionRow.page_count == null
+    // Per-type page_count enforcement lives in loadAiDocumentVersionPages:
+    // DOCX tolerates a null declared count (one logical page), every other
+    // type fails closed on null/mismatch.
     || loadedPages.sourceContentSha256 !== versionRow.content_sha256
   ) {
+    if (!loaderThrew) {
+      // Exactly one structured, fully allowlisted log per pre-provider page
+      // failure: every emitted value is a boolean or an allowlisted token.
+      console.error(
+        "[ai-executions] page-loader-failure",
+        {
+          reason: loadedPages.failureReason ?? null,
+          sourceHashMatch:
+            loadedPages.sourceContentSha256 === versionRow.content_sha256,
+          ...loaderFailureContext(versionRow),
+        },
+      );
+    }
     const failed = await failExecution({
       db,
       row,
@@ -472,6 +577,26 @@ async function createExecution(req: Request, res: import("express").Response) {
     return void res.status(422).json(failed);
   }
   const pages = loadedPages.pages;
+  // DOCX uploads record page_count=null; a valid, hash-verified extraction
+  // defines exactly one logical page, so the effective page count always
+  // comes from the persisted pages themselves.
+  const effectivePageCount = pages.length;
+
+  if (isDocxFileType(versionRow.file_type) && versionRow.page_count == null) {
+    const { error: pageCountSyncError } = await db
+      .from("document_versions")
+      .update({ page_count: effectivePageCount })
+      .eq("id", versionRow.id)
+      .is("page_count", null);
+    // Optional metadata backfill (null→1): conditional and idempotent, never
+    // overwrites an existing count, and never blocks the AI execution.
+    if (pageCountSyncError) {
+      console.error(
+        "[ai-executions] page_count backfill failed",
+        pageCountSyncError,
+      );
+    }
+  }
 
   const startedAt = new Date().toISOString();
   await updateExecution(db, row.id, { status: "running", started_at: startedAt });
@@ -515,7 +640,7 @@ async function createExecution(req: Request, res: import("express").Response) {
     documentVersionId: versionRow.id,
     documentContentSha256: versionRow.content_sha256,
     sourceContentSha256: loadedPages.sourceContentSha256,
-    pageCount: versionRow.page_count,
+    pageCount: effectivePageCount,
     pages,
   };
   const resolved = resolveCitations(parsedCitations.citations, citationContext);

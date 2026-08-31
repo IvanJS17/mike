@@ -1439,7 +1439,7 @@ CREATE INDEX IF NOT EXISTS ai_receipts_execution_idx
   ON public.ai_receipts(execution_id);
 
 CREATE OR REPLACE FUNCTION public.ai_document_version_pages_integrity()
-RETURNS trigger LANGUAGE plpgsql SET search_path = public AS $$
+RETURNS trigger LANGUAGE plpgsql SET search_path = public, extensions AS $$
 DECLARE version_document_id uuid;
 BEGIN
   SELECT document_id INTO version_document_id FROM public.document_versions
@@ -2537,7 +2537,7 @@ CREATE OR REPLACE FUNCTION public.ai_redline_bundle_scope_guard()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public
+SET search_path = public, extensions
 AS $$
 DECLARE
   v_execution_matter_id uuid;

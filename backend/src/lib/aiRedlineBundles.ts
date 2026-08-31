@@ -286,7 +286,21 @@ export function prepareAiRedlineBundle(
     }
     for (const citation of item.citation_refs) {
       const action = citationAction(citation, item, input);
-      if (!action) return { ok: false, code: "unverified_citation" };
+      if (!action) {
+        if (isRecord(citation)) {
+          console.error("[ai-redline] citation-integrity-failure", {
+            itemKey: item.item_key,
+            citationId: typeof citation.citation_id === "string" ? citation.citation_id : null,
+            documentId: typeof citation.document_id === "string" ? citation.document_id : null,
+            documentVersionId: typeof citation.document_version_id === "string" ? citation.document_version_id : null,
+            page: typeof citation.page === "number" ? citation.page : null,
+            span: isRecord(citation.span)
+              ? { start: citation.span.start_char, end: citation.span.end_char }
+              : null,
+          });
+        }
+        return { ok: false, code: "unverified_citation" };
+      }
       actions.push(action);
     }
   }

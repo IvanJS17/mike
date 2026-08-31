@@ -6,6 +6,11 @@
 -- roles receive no grants on these tables; the triggers below remain active
 -- for service_role so append-only and identity invariants cannot be bypassed.
 
+-- This migration uses digest() in page hashes and integrity triggers. Fresh
+-- databases applying incremental migrations do not necessarily run the full
+-- backend/schema.sql bootstrap first, so make the dependency explicit here.
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
 -- A matter may optionally be the private domain scope for a legacy project.
 ALTER TABLE public.matters
   ADD COLUMN IF NOT EXISTS project_id uuid
@@ -94,7 +99,7 @@ CREATE INDEX IF NOT EXISTS ai_receipts_execution_idx
 CREATE OR REPLACE FUNCTION public.ai_document_version_pages_integrity()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, extensions
 AS $$
 DECLARE
   version_document_id uuid;

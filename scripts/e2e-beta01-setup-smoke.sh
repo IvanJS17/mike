@@ -10,10 +10,43 @@
 #     (e2e/support/beta01-fakes.cjs via NODE_OPTIONS);
 #   - frontend built for production and served with `next start`
 #     (CI pattern: no dev server, no hydration overlay);
-# and then runs EXACTLY ONCE the targeted Playwright spec
-# e2e/beta01-setup-smoke.spec.ts: owner autenticado -> proyecto + matter
-# privado -> upload de e2e/fixtures/beta01-contract.docx con HTTP 201,
-# versión, content hash y metadata de página.
+# and then runs EXACTLY ONCE the targeted Playwright spec selected by
+# BETA01_SMOKE_SPEC (Gate 2 selector, allowlist cerrada):
+#   - default (unset/vacía): e2e/beta01-setup-smoke.spec.ts — owner
+#     autenticado -> proyecto + matter privado -> upload de
+#     e2e/fixtures/beta01-contract.docx con HTTP 201, versión, content hash
+#     y metadata de página;
+#   - opciones adicionales: e2e/beta01-ai-smoke.spec.ts (Gate 2 IA, receipts y
+#     citations sintéticos) y e2e/beta01-integrated-journey.spec.ts (journey
+#     integrado completo con revisión, redline, Drive, auditoría y aislamiento);
+#   - cualquier otro valor (path, flags, whitespace) falla ANTES de cualquier
+#     acción de stack o mutación del repositorio;
+#   - BETA01_FAKE_STATE_FILE (Gate 2 fix A): path owned por el runner dentro
+#     de SMOKE_DIR, exportado ANTES de arrancar backend/fakes e inicializado
+#     vacío (ningún valor heredado/arbitrario llega a hijos); beta01-fakes.cjs
+#     persiste ahí provider/drive counters y el spec AI afirma provider=1/
+#     drive=0 leyendo ese mismo path; el teardown lo elimina junto con
+#     SMOKE_DIR y nunca imprime su contenido.
+#   - Gate 2 probe (spec AI): si el POST /ai-executions responde 422, el spec
+#     escribe ANTES del teardown, dentro de SMOKE_DIR, gate2-ai-failure-probe.json
+#     con modo 0600 y contenido SANEADO (status/code de la respuesta,
+#     id/status/error_class de la ejecución, error_class del receipt y
+#     contadores provider/drive; NUNCA tokens/keys/texto/PII). En fallo el
+#     runner PRESERVA SMOKE_DIR como evidencia; sólo una corrida exitosa lo
+#     elimina normalmente.
+#   - BETA01_SMOKE_SPEC=e2e/beta01-ai-smoke.spec.ts (Gate 2 fix C) NUNCA
+#     reutiliza/resetea/detiene un stack Supabase preexistente: el runner
+#     levanta un stack DISPOSABLE exclusivo de la corrida bajo SMOKE_DIR
+#     (supabase-project/) con project_id y ports ÚNICOS derivados de RUN_ID
+#     sobre la config canónica backend/supabase/config.toml (workdir propio),
+#     lo arranca/consulta con `npx supabase start|status --workdir`, y
+#     backend/frontend reciben SÓLO las URLs/keys de ese stack; el ownership
+#     exacto (containers por ID/label com.supabase.cli.project, volumes,
+#     network) lo registra e2e/support/beta01-supabase-owner.cjs y el teardown
+#     destruye ÚNICAMENTE esos recursos (incluso ante fallo parcial del start),
+#     verificando que todo stack preexistente conserva mismo IDs/estado y que
+#     quedan CERO recursos propios; la limpieza NUNCA borra filas (las tablas
+#     terminales ai_executions/receipts/audit quedan intactas por diseño).
 #
 # Teardown is unconditional (trap EXIT): every process and container this
 # script started is stopped/removed, and it fails if any of its own
@@ -24,7 +57,9 @@
 # running/healthy with the fixture label and is never stopped/removed by this
 # script (see e2e/support/beta01-minio-owner.cjs).
 #
-# Usage, from the repo root:  bash scripts/e2e-beta01-setup-smoke.sh
+# Usage, from the repo root:
+#   bash scripts/e2e-beta01-setup-smoke.sh                            # Gate 1 (setup smoke)
+#   BETA01_SMOKE_SPEC=e2e/beta01-integrated-journey.spec.ts bash scripts/e2e-beta01-setup-smoke.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -34,8 +69,39 @@ FRONTEND="$ROOT/frontend"
 MINIO_IMAGE="minio/minio:RELEASE.2025-09-07T16-13-09Z"
 MINIO_CONTAINER="beta01-minio"
 MINIO_HELPER="$ROOT/e2e/support/beta01-minio-owner.cjs"
-SPEC="e2e/beta01-setup-smoke.spec.ts"
+# Gate 2 spec selector: BETA01_SMOKE_SPEC with a CLOSED allowlist. The
+# default preserves Gate 1 behavior EXACTLY (setup smoke); the only other
+# accepted values are the Gate 2 AI smoke and the integrated journey. Any other value — another path,
+# shell flags, whitespace around or inside the value — fails HERE, before
+# any stack action, temp dir, or repository mutation.
+SPEC="${BETA01_SMOKE_SPEC:-e2e/beta01-setup-smoke.spec.ts}"
+case "$SPEC" in
+  "e2e/beta01-setup-smoke.spec.ts" | "e2e/beta01-ai-smoke.spec.ts" | "e2e/beta01-integrated-journey.spec.ts") ;;
+  *)
+    printf '[beta01-smoke] ERROR: BETA01_SMOKE_SPEC rechazado: %s\n' "$SPEC" >&2
+    printf '[beta01-smoke] ERROR: allowlist cerrada: e2e/beta01-setup-smoke.spec.ts, e2e/beta01-ai-smoke.spec.ts, e2e/beta01-integrated-journey.spec.ts\n' >&2
+    exit 1
+    ;;
+esac
+[ -f "$ROOT/$SPEC" ] || {
+  printf '[beta01-smoke] ERROR: spec permitida pero no existe en el repo: %s\n' "$SPEC" >&2
+  exit 1
+}
 FAKE_FILE="$ROOT/e2e/support/beta01-fakes.cjs"
+
+# Gate 2 fix C: el spec IA usa un stack Supabase DISPOSABLE exclusivo de la
+# corrida (project_id/ports/workdir únicos bajo SMOKE_DIR); el spec setup
+# (default) conserva EXACTAMENTE el comportamiento Gate 1 (stack canónico,
+# reuso seguro vía snapshot si ya estaba corriendo).
+SPEC_IS_AI=0
+if [ "$SPEC" = "e2e/beta01-ai-smoke.spec.ts" ] || [ "$SPEC" = "e2e/beta01-integrated-journey.spec.ts" ]; then
+  SPEC_IS_AI=1
+fi
+SUPABASE_OWNER_HELPER="$ROOT/e2e/support/beta01-supabase-owner.cjs"
+SBDISPOSABLE_ACTIVE="no"
+SBDISPOSABLE_PROJECT=""
+SBDISPOSABLE_WORKDIR=""
+SBDISPOSABLE_STATE=""
 
 SMOKE_DIR="$(mktemp -d /tmp/beta01-smoke.XXXXXX)"
 BACKEND_LOG="$SMOKE_DIR/backend.log"
@@ -47,6 +113,15 @@ BUILD_LOG="$SMOKE_DIR/frontend-build.log"
 # com.mike.beta01.run) and scopes the ownership state file.
 RUN_ID="$(basename "$SMOKE_DIR")"
 MINIO_STATE="$SMOKE_DIR/minio-owner.json"
+# Gate 2 fix A: fake state file owned by the runner. BETA01_FAKE_STATE_FILE
+# apunta SIEMPRE al archivo de ESTA corrida dentro de SMOKE_DIR, así ningún
+# valor heredado/arbitrario llega al backend ni al spec; se exporta ANTES de
+# arrancar backend/fakes y se inicializa vacío para que ningún contenido
+# viejo pueda leerse (beta01-fakes.cjs escribe aquí provider/drive counters;
+# el teardown elimina el archivo junto con SMOKE_DIR y nunca lo imprime).
+FAKE_STATE_FILE="$SMOKE_DIR/fake-state.json"
+export BETA01_FAKE_STATE_FILE="$FAKE_STATE_FILE"
+: >"$BETA01_FAKE_STATE_FILE" && chmod 600 "$BETA01_FAKE_STATE_FILE"
 
 BACKEND_PID=""
 FRONTEND_PID=""
@@ -82,6 +157,7 @@ clear_inherited_targets() {
   for v in "${TARGET_VARS[@]}"; do
     unset "$v"
   done
+  unset BETA01_DISPOSABLE_STACK
   log "inherited target variables cleared"
 }
 
@@ -91,9 +167,13 @@ clear_inherited_targets() {
 # ---------------------------------------------------------------------------
 snapshot() {
   PRE_CONTAINERS="$(docker ps --format '{{.Names}}' | sort)"
-  if [ -n "$PRE_CONTAINERS" ] && grep -qE '^supabase_' <<<"$PRE_CONTAINERS"; then
+  # Gate 2 fix C: en modo AI el stack Supabase SIEMPRE es disposable propio;
+  # la presencia de un stack preexistente no cambia nada aquí (el helper
+  # beta01-supabase-owner.cjs registra y verifica los preexistentes por label).
+  # El chequeo de reuso aplica sólo al spec setup (comportamiento Gate 1).
+  if [ "$SPEC_IS_AI" != "1" ] && [ -n "$PRE_CONTAINERS" ] && grep -qE '^supabase_' <<<"$PRE_CONTAINERS"; then
     log "a Supabase stack was already running — teardown will not stop it"
-  else
+  elif [ "$SPEC_IS_AI" != "1" ]; then
     SUPABASE_STARTED="yes"
   fi
   PRE_WATCHERS="$(ps -eo args | grep -E 'watch src/index\.ts|next-server' | grep -v grep || true)"
@@ -175,22 +255,7 @@ ensure_minio() {
 # ---------------------------------------------------------------------------
 # Supabase CLI stack + schema/migrations/grants (same recipe as e2e-local-stack.sh)
 # ---------------------------------------------------------------------------
-ensure_supabase() {
-  if [ "$SUPABASE_STARTED" = "yes" ]; then
-    log "starting local Supabase stack"
-    (cd "$BACKEND" && npx supabase start) >"$SUPABASE_LOG" 2>&1 \
-      || fail "supabase start failed (see $SUPABASE_LOG)"
-  else
-    log "Supabase stack already running — reusing it"
-  fi
-  local status
-  status="$(cd "$BACKEND" && npx supabase status -o json)" \
-    || fail "supabase status failed"
-  DB_URL="$(jq -r '.DB_URL' <<<"$status")"
-  API_URL="$(jq -r '.API_URL' <<<"$status")"
-  ANON_KEY="$(jq -r '.ANON_KEY' <<<"$status")"
-  SERVICE_KEY="$(jq -r '.SERVICE_ROLE_KEY' <<<"$status")"
-
+apply_schema() {
   if [ "$(psql "$DB_URL" -tAc "SELECT to_regclass('public.user_profiles') IS NULL")" = "t" ]; then
     log "loading schema.sql into fresh database"
     psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "$BACKEND/schema.sql"
@@ -205,6 +270,116 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO service_r
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO service_role;
 NOTIFY pgrst, 'reload schema';
 SQL
+}
+
+ensure_supabase() {
+  if [ "$SPEC_IS_AI" = "1" ]; then
+    # AI journey cleanup is owned by the disposable stack teardown. The
+    # append-only AI tables must never be deleted row-by-row before the stack
+    # owner destroys its recorded containers/volumes/network.
+    export BETA01_DISPOSABLE_STACK=1
+    ensure_supabase_disposable
+    return
+  fi
+  if [ "$SUPABASE_STARTED" = "yes" ]; then
+    log "starting local Supabase stack"
+    (cd "$BACKEND" && npx supabase start) >"$SUPABASE_LOG" 2>&1 \
+      || fail "supabase start failed (see $SUPABASE_LOG)"
+  else
+    log "Supabase stack already running — reusing it"
+  fi
+  local status
+  status="$(cd "$BACKEND" && npx supabase status -o json)" \
+    || fail "supabase status failed"
+  DB_URL="$(jq -r '.DB_URL' <<<"$status")"
+  API_URL="$(jq -r '.API_URL' <<<"$status")"
+  ANON_KEY="$(jq -r '.ANON_KEY' <<<"$status")"
+  SERVICE_KEY="$(jq -r '.SERVICE_ROLE_KEY' <<<"$status")"
+  apply_schema
+}
+
+# Gate 2 fix C — DISPOSABLE Supabase stack, exclusive property of THIS run.
+# Unique project_id/ports/workdir under SMOKE_DIR derived from RUN_ID over the
+# canonical config; backend/frontend receive ONLY this stack's URLs/keys; a
+# preexisting stack is never reused, reset, stopped nor mutated (ownership
+# helper snapshots it and the teardown verifies same IDs/state byte-by-byte).
+ensure_supabase_disposable() {
+  local seed base api_port db_port shadow_port pooler_port studio_port smtp_port inspector_port analytics_port snap mode status
+  SBDISPOSABLE_PROJECT="beta01ai$(printf '%s' "$RUN_ID" | tr -cd 'a-z0-9' | tail -c 10)"
+  seed="$(printf '%s' "$RUN_ID" | cksum | awk '{print $1}')"
+  base=$(( 56000 + (seed % 1500) ))
+  api_port=$base
+  db_port=$((base + 1))
+  shadow_port=$((base - 1))
+  pooler_port=$((base + 8))
+  studio_port=$((base + 2))
+  smtp_port=$((base + 3))
+  inspector_port=$((base + 9))
+  analytics_port=$((base + 6))
+
+  # Unique config derived from the canonical one (project_id + every port the
+  # CLI binds), never touching backend/supabase/config.toml itself.
+  SBDISPOSABLE_WORKDIR="$SMOKE_DIR/supabase-project"
+  mkdir -p "$SBDISPOSABLE_WORKDIR/supabase"
+  sed \
+    -e "s/^project_id = .*/project_id = \"$SBDISPOSABLE_PROJECT\"/" \
+    -e "s/^port = 54321/port = $api_port/" \
+    -e "s/^port = 54322/port = $db_port/" \
+    -e "s/^shadow_port = 54320/shadow_port = $shadow_port/" \
+    -e "s/^health_timeout = \"2m\"/health_timeout = \"5m\"/" \
+    -e "s/^port = 54329/port = $pooler_port/" \
+    -e "s/^port = 54323/port = $studio_port/" \
+    -e "s/^port = 54324/port = $smtp_port/" \
+    -e "s/^inspector_port = 8083/inspector_port = $inspector_port/" \
+    -e "s/^port = 54327/port = $analytics_port/" \
+    "$BACKEND/supabase/config.toml" >"$SBDISPOSABLE_WORKDIR/supabase/config.toml"
+  node -e '
+const fs = require("node:fs");
+const file = process.argv[1];
+const input = fs.readFileSync(file, "utf8");
+const studioMarker = "[studio]\nenabled = true";
+const vectorMarker = "[storage.vector]\nenabled = true";
+if (!input.includes(studioMarker)) throw new Error("derived Supabase config has no enabled Studio section");
+if (!input.includes(vectorMarker)) throw new Error("derived Supabase config has no enabled vector storage section");
+fs.writeFileSync(
+  file,
+  input
+    .replace(studioMarker, "[studio]\nenabled = false")
+    .replace(vectorMarker, "[storage.vector]\nenabled = false"),
+);
+' "$SBDISPOSABLE_WORKDIR/supabase/config.toml"
+  log "disposable Supabase config written (project $SBDISPOSABLE_PROJECT, api :$api_port, db :$db_port, studio/vector disabled)"
+
+  # Ownership decision BEFORE any mutation: resources that already carry OUR
+  # project label fail closed (stale/racing stack) — never reused nor touched.
+  SBDISPOSABLE_STATE="$SMOKE_DIR/supabase-owner.json"
+  snap="$(node "$SUPABASE_OWNER_HELPER" --snapshot --project-id "$SBDISPOSABLE_PROJECT" --state-file "$SBDISPOSABLE_STATE")" \
+    || fail "supabase disposable ownership snapshot failed (see $SUPABASE_LOG)"
+  mode="$(jq -r '.mode // "unknown"' <<<"$snap")"
+  if [ "$mode" != "create" ]; then
+    fail "supabase disposable: $(jq -r '.reason // "unknown"' <<<"$snap" 2>/dev/null) — FAIL antes de mutar, no se toca nada"
+  fi
+  SBDISPOSABLE_ACTIVE="yes"
+
+  log "starting DISPOSABLE Supabase stack (--workdir $SBDISPOSABLE_WORKDIR)"
+  (cd "$BACKEND" && npx supabase start --workdir "$SBDISPOSABLE_WORKDIR") >"$SUPABASE_LOG" 2>&1 \
+    || fail "supabase start (disposable) failed (see $SUPABASE_LOG)"
+  SUPABASE_STARTED="yes"
+
+  # URLs/keys from THIS stack only.
+  status="$(cd "$BACKEND" && npx supabase status -o json --workdir "$SBDISPOSABLE_WORKDIR")" \
+    || fail "supabase status (disposable) failed (see $SUPABASE_LOG)"
+  DB_URL="$(jq -r '.DB_URL' <<<"$status")"
+  API_URL="$(jq -r '.API_URL' <<<"$status")"
+  ANON_KEY="$(jq -r '.ANON_KEY' <<<"$status")"
+  SERVICE_KEY="$(jq -r '.SERVICE_ROLE_KEY' <<<"$status")"
+
+  # Record EXACT ownership (containers by ID, volumes, network — label
+  # com.supabase.cli.project=<pid>) BEFORE the stack is used.
+  node "$SUPABASE_OWNER_HELPER" --record --state-file "$SBDISPOSABLE_STATE" >/dev/null \
+    || fail "supabase disposable ownership record failed (see $SUPABASE_LOG)"
+  log "disposable Supabase ready: $API_URL (db: ${DB_URL%%\?*})"
+  apply_schema
 }
 
 # ---------------------------------------------------------------------------
@@ -256,6 +431,11 @@ wire_env() {
   export R2_ACCESS_KEY_ID="minioadmin"
   export R2_SECRET_ACCESS_KEY="minioadmin"
   export R2_BUCKET_NAME="mike"
+  # Synthetic local-only credential: route resolution must succeed before the
+  # preloaded fake provider can intercept the request. This value is never sent
+  # to a real provider and is not a user secret.
+  export DEEPSEEK_API_KEY="beta01-fake-local-only"
+  export GOOGLE_DRIVE_ACCESS_TOKEN="beta01-fake-local-only"
   log "local target variables exported (supabase/api/r2 -> local harness)"
 }
 
@@ -308,7 +488,18 @@ cleanup() {
     done
   done
 
-  if [ "$SUPABASE_STARTED" = "yes" ]; then
+  if [ "$SBDISPOSABLE_ACTIVE" = "yes" ]; then
+    # Gate 2 fix C: destroy ONLY the disposable stack (recorded containers by
+    # ID, volumes, network). A preexisting stack is never stopped; the helper
+    # verifies it kept same IDs/state and that zero own resources remain.
+    log "teardown: destroying DISPOSABLE Supabase stack (project $SBDISPOSABLE_PROJECT)"
+    sb_cleanup="$(node "$SUPABASE_OWNER_HELPER" --cleanup --state-file "$SBDISPOSABLE_STATE" 2>>"$SUPABASE_LOG")"
+    sb_rc=$?
+    if [ "$sb_rc" -ne 0 ] || [ "$(jq -r '.ok // "false"' <<<"${sb_cleanup:-}" 2>/dev/null)" != "true" ]; then
+      log "teardown FAILED — disposable Supabase cleanup: $(jq -r '.reason // .note // .error // "unknown failure"' <<<"${sb_cleanup:-}" 2>/dev/null) (see $SUPABASE_LOG)"
+      cleanup_rc=1
+    fi
+  elif [ "$SUPABASE_STARTED" = "yes" ]; then
     log "teardown: stopping local Supabase stack (containers removed, data volume kept)"
     (cd "$BACKEND" && npx supabase stop) >"$SUPABASE_LOG" 2>&1
   fi
@@ -331,11 +522,17 @@ cleanup() {
     exit 1
   fi
 
-  rm -rf "$SMOKE_DIR"
   if [ "$run_rc" -ne 0 ]; then
-    log "teardown verified after run failure (exit code $run_rc) — result remains FAILED"
+    # Gate 2 probe: la evidencia de un fallo LIVE se conserva. El spec escribe
+    # gate2-ai-failure-probe.json (0600) dentro de SMOKE_DIR ANTES del
+    # teardown; con el stack ya destruido y el runner limpiando normalmente,
+    # este directorio se preserva para diagnóstico (logs + probe + fake
+    # state). Sólo una corrida EXITOSA elimina SMOKE_DIR normalmente.
+    log "run FAILED (exit code $run_rc) — teardown OK; preserving evidence $SMOKE_DIR (gate2-ai-failure-probe.json si el POST ai-executions respondió 422)"
     exit "$run_rc"
   fi
+
+  rm -rf "$SMOKE_DIR"
   log "teardown OK — zero own processes/containers left"
   exit 0
 }
@@ -349,7 +546,17 @@ verify_clean() {
   # the same ID/state, failing the teardown otherwise. The Supabase stack is
   # ours ONLY when this run started it (SUPABASE_STARTED=yes); when it was
   # already running we reuse it and the residue check must not flag it.
-  if [ "$SUPABASE_STARTED" = "yes" ]; then
+  if [ "$SBDISPOSABLE_ACTIVE" = "yes" ]; then
+    # Gate 2 fix C: the disposable stack must be at ZERO own resources; a
+    # preexisting stack (other project ids) is verified by the ownership
+    # helper and must NOT be flagged here.
+    own_containers="$(docker ps -a --filter "label=com.supabase.cli.project=$SBDISPOSABLE_PROJECT" --format '{{.Names}}' | grep -E "^supabase_.*_${SBDISPOSABLE_PROJECT}$" || true)"
+    if [ -n "$own_containers" ]; then
+      log "RESIDUE: own disposable supabase containers still running:"
+      log "$own_containers"
+      residue=1
+    fi
+  elif [ "$SUPABASE_STARTED" = "yes" ]; then
     own_containers="$(docker ps --format '{{.Names}}' | grep -E '^supabase_' || true)"
     if [ -n "$own_containers" ]; then
       log "RESIDUE: own supabase containers still running:"

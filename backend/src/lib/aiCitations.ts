@@ -25,6 +25,7 @@ export type CitationResolutionContext = {
 
 export type ResolvedCitation = {
   citation_id: string;
+  document_id: string;
   document_version_id: string;
   page: number;
   span: { start_char: number; end_char: number };
@@ -147,6 +148,7 @@ export function resolveCitation(
 
   return {
     citation_id: value.citation_id,
+    document_id: context.documentId,
     document_version_id: context.documentVersionId,
     page,
     span: { start_char: start, end_char: end },
@@ -177,6 +179,7 @@ export function buildCitationReceiptFields(
 ): CanonicalReceipt["citations"] {
   return citations.map((citation) => ({
     citation_id: citation.citation_id,
+    document_id: citation.document_id,
     document_version_id: citation.document_version_id,
     page: citation.page,
     span: citation.span,

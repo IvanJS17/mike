@@ -55,11 +55,16 @@ export default function LoginPage() {
 
             router.push("/assistant");
         } catch (error: unknown) {
-            setError(
+            const message =
                 error instanceof Error
                     ? error.message
-                    : "An error occurred during login",
-            );
+                    : error &&
+                        typeof error === "object" &&
+                        "message" in error &&
+                        typeof error.message === "string"
+                      ? error.message
+                      : "An error occurred during login";
+            setError(message);
         } finally {
             setLoading(false);
         }

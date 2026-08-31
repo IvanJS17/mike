@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import { sha256Hex, buildExecutionInputHash } from "../../lib/aiReceipts";
 import {
@@ -19,6 +19,7 @@ const { completeText, resolveModelRouteForUser, checkProjectAccess, checkMatterA
 const pageText = "La parte compradora podrá terminar el contrato.";
 const quote = pageText.slice(0, 20);
 const writes: { table: string; operation: string; payload?: Record<string, unknown> }[] = [];
+const consoleErrorSpies: ReturnType<typeof vi.spyOn>[] = [];
 const rows = {
   documents: [
     {
@@ -35,6 +36,26 @@ const rows = {
       page_count: 1,
       content_sha256: "a".repeat(64),
       deleted_at: null,
+    },
+    {
+      id: "version-docx-1",
+      document_id: "document-1",
+      version_number: 2,
+      page_count: null,
+      content_sha256: "a".repeat(64),
+      deleted_at: null,
+      file_type: "docx",
+      storage_path: "storage/document-1/version-2.docx",
+    },
+    {
+      id: "version-docx-2",
+      document_id: "document-1",
+      version_number: 3,
+      page_count: 1,
+      content_sha256: "a".repeat(64),
+      deleted_at: null,
+      file_type: "docx",
+      storage_path: "storage/document-1/version-3.docx",
     },
   ],
   organizations: [
@@ -145,8 +166,10 @@ vi.mock("../../lib/aiAccess", () => ({
   checkMatterAccess: (...args: unknown[]) => checkMatterAccess(...args),
 }));
 
-vi.mock("../../lib/aiDocumentPages", () => ({
-  loadAiDocumentVersionPages: (...args: unknown[]) => loadAiDocumentVersionPages(...args),
+vi.mock("../../lib/aiDocumentPages", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/aiDocumentPages")>()),
+  loadAiDocumentVersionPages: (...args: unknown[]) =>
+    loadAiDocumentVersionPages(...args),
 }));
 
 vi.mock("../../lib/llm/governedRoutes", () => ({
@@ -189,6 +212,7 @@ describe("AI execution routes", () => {
         },
       ],
       sourceContentSha256: "a".repeat(64),
+      failureReason: null,
     });
     resolveModelRouteForUser.mockResolvedValue({
       ok: true,
@@ -213,6 +237,11 @@ describe("AI execution routes", () => {
         },
       ])}</CITATIONS>`,
     );
+  });
+
+  afterEach(() => {
+    for (const spy of consoleErrorSpies) spy.mockRestore();
+    consoleErrorSpies.length = 0;
   });
 
   it("requires an explicit private matter scope", async () => {
@@ -323,6 +352,105 @@ describe("AI execution routes", () => {
     expect(JSON.stringify(writes)).not.toContain(pageText);
   });
 
+  it("accepts a DOCX version with a null page count as one logical page and backfills page_count", async () => {
+    completeText.mockResolvedValue(
+      `La parte compradora puede terminar el contrato.\n<CITATIONS>${JSON.stringify([
+        {
+          citation_id: "c1",
+          document_id: "document-1",
+          document_version_id: "version-docx-1",
+          page: 1,
+          span: { start_char: 0, end_char: quote.length },
+          quote,
+          quote_sha256: sha256Hex(quote),
+          finding_text: "La parte compradora puede terminar el contrato.",
+        },
+      ])}</CITATIONS>`,
+    );
+    const res = await request(app)
+      .post("/projects/project-1/ai-executions")
+      .set("Authorization", "Bearer test")
+      .send({
+        matter_id: "matter-1",
+        document_version_id: "version-docx-1",
+        route: {
+          provider: "deepseek",
+          model: "deepseek-chat",
+          credential_ref: "deepseek:v1",
+        },
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      id: "execution-1",
+      status: "succeeded",
+      output_id: "output-1",
+      receipt_id: "receipt-1",
+    });
+    // Conditional/idempotent metadata backfill: document_versions null→1.
+    const backfill = writes.find(
+      (write) =>
+        write.table === "document_versions" && write.operation === "update",
+    );
+    expect(backfill?.payload).toEqual({ page_count: 1 });
+    const outputInsert = writes.find(
+      (write) =>
+        write.table === "ai_output_versions" && write.operation === "insert",
+    );
+    const citationRefs = outputInsert?.payload?.citation_refs as
+      | Record<string, unknown>[]
+      | undefined;
+    expect(citationRefs).toHaveLength(1);
+    expect(citationRefs?.[0]).toMatchObject({
+      page: 1,
+      verified: true,
+    });
+    const receiptInsert = writes.find(
+      (write) => write.table === "ai_receipts" && write.operation === "insert",
+    );
+    expect(receiptInsert?.payload?.canonical_json).toMatchObject({
+      citations: [{ page: 1, verified: true }],
+    });
+  });
+
+  it("does not backfill page_count when the DOCX version already declares one", async () => {
+    completeText.mockResolvedValue(
+      `La parte compradora puede terminar el contrato.\n<CITATIONS>${JSON.stringify([
+        {
+          citation_id: "c1",
+          document_id: "document-1",
+          document_version_id: "version-docx-2",
+          page: 1,
+          span: { start_char: 0, end_char: quote.length },
+          quote,
+          quote_sha256: sha256Hex(quote),
+          finding_text: "La parte compradora puede terminar el contrato.",
+        },
+      ])}</CITATIONS>`,
+    );
+    const res = await request(app)
+      .post("/projects/project-1/ai-executions")
+      .set("Authorization", "Bearer test")
+      .send({
+        matter_id: "matter-1",
+        document_version_id: "version-docx-2",
+        route: {
+          provider: "deepseek",
+          model: "deepseek-chat",
+          credential_ref: "deepseek:v1",
+        },
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.status).toBe("succeeded");
+    expect(
+      writes.filter(
+        (write) =>
+          write.table === "document_versions" && write.operation === "update",
+      ),
+    ).toHaveLength(0);
+  });
+
   it("uses a custom workflow without mixing in the default playbook", async () => {
     const customPlaybook = "# Custom workflow\nOnly use this workflow.";
     const res = await request(app)
@@ -400,6 +528,7 @@ describe("AI execution routes", () => {
         },
       ],
       sourceContentSha256: "b".repeat(64),
+      failureReason: "source-hash-mismatch",
     });
 
     const res = await request(app)
@@ -547,5 +676,108 @@ describe("AI execution routes", () => {
     expect(writes.filter((write) => write.table === "audit_events").at(-1)?.operation).toBe(
       "ai.execution.failed",
     );
+  });
+
+  it("logs exactly one sanitized page-loader-failure with the pre-provider reason", async () => {
+    const logSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    consoleErrorSpies.push(logSpy);
+    loadAiDocumentVersionPages.mockResolvedValue({
+      pages: [],
+      sourceContentSha256: "b".repeat(64),
+      failureReason: "source-hash-mismatch",
+    });
+
+    const res = await request(app)
+      .post("/projects/project-1/ai-executions")
+      .set("Authorization", "Bearer test")
+      .send({
+        matter_id: "matter-1",
+        document_version_id: "version-docx-2",
+        route: {
+          provider: "deepseek",
+          model: "deepseek-chat",
+          credential_ref: "deepseek:v1",
+        },
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({
+      id: "execution-1",
+      status: "failed",
+      error_class: "citation_unresolvable",
+    });
+    expect(completeText).not.toHaveBeenCalled();
+    const failureLogs = logSpy.mock.calls.filter(
+      (call) => call[0] === "[ai-executions] page-loader-failure",
+    );
+    expect(failureLogs).toHaveLength(1);
+    expect(failureLogs[0]?.[1]).toEqual({
+      reason: "source-hash-mismatch",
+      sourceHashMatch: false,
+      hasStoragePath: true,
+      fileType: "docx",
+      pageCount: 1,
+    });
+    expect(logSpy.mock.calls.filter((call) => call[0] === "[ai-executions] loader-error")).toHaveLength(0);
+    const serializedLogs = JSON.stringify(logSpy.mock.calls);
+    expect(serializedLogs).not.toContain("storage/document-1");
+    expect(serializedLogs).not.toContain("b".repeat(64));
+    expect(serializedLogs).not.toContain(pageText);
+    expect(serializedLogs).not.toContain("execution-1");
+    expect(serializedLogs).not.toContain("version-docx-2");
+    expect(serializedLogs).not.toContain("document-1");
+  });
+
+  it("logs exactly one sanitized loader-error with allowlisted name/code and no raw message", async () => {
+    const logSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    consoleErrorSpies.push(logSpy);
+    loadAiDocumentVersionPages.mockRejectedValue(
+      Object.assign(
+        new Error(
+          "NoSuchKey: The specified key does not exist: storage/document-1/version-2.docx",
+        ),
+        { code: "NoSuchKey" },
+      ),
+    );
+
+    const res = await request(app)
+      .post("/projects/project-1/ai-executions")
+      .set("Authorization", "Bearer test")
+      .send({
+        matter_id: "matter-1",
+        document_version_id: "version-docx-1",
+        route: {
+          provider: "deepseek",
+          model: "deepseek-chat",
+          credential_ref: "deepseek:v1",
+        },
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({
+      id: "execution-1",
+      status: "failed",
+      error_class: "citation_unresolvable",
+    });
+    expect(completeText).not.toHaveBeenCalled();
+    const errorLogs = logSpy.mock.calls.filter(
+      (call) => call[0] === "[ai-executions] loader-error",
+    );
+    expect(errorLogs).toHaveLength(1);
+    expect(errorLogs[0]?.[1]).toEqual({
+      errorName: "Error",
+      errorCode: "NoSuchKey",
+      hasStoragePath: true,
+      fileType: "docx",
+      pageCount: null,
+    });
+    expect(logSpy.mock.calls.filter((call) => call[0] === "[ai-executions] page-loader-failure")).toHaveLength(0);
+    const serializedLogs = JSON.stringify(logSpy.mock.calls);
+    expect(serializedLogs).not.toContain("NoSuchKey: The specified key");
+    expect(serializedLogs).not.toContain("storage/document-1");
+    expect(serializedLogs).not.toContain(pageText);
+    expect(serializedLogs).not.toContain("execution-1");
+    expect(serializedLogs).not.toContain("version-docx-1");
+    expect(serializedLogs).not.toContain("document-1");
   });
 });
