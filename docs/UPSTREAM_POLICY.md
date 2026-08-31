@@ -161,9 +161,11 @@ The following documents are updated in the same lifecycle transition when their 
 change:
 
 - [`PROJECT_STATUS.md`](PROJECT_STATUS.md)
-- this policy/ledger section;
+- [`UPSTREAM_RECOVERY_PLAN.md`](UPSTREAM_RECOVERY_PLAN.md)
+- this policy;
 - [`TECHNICAL_DEBT.md`](TECHNICAL_DEBT.md)
 - [`RELEASE_GATES.md`](RELEASE_GATES.md)
+- [`UPSTREAM_COMPATIBILITY_LEDGER.md`](UPSTREAM_COMPATIBILITY_LEDGER.md)
 
 Kanban comments may link evidence but cannot supersede these documents.
 
@@ -171,7 +173,8 @@ Kanban comments may link evidence but cannot supersede these documents.
 
 | Intake date | Old upstream | New upstream | Commits | Capability groups | Disposition | LiTT integration | Reviewer | Notes/debt |
 | --- | --- | --- | ---: | --- | --- | --- | --- | --- |
-| 2026-08-24 | `204d2d5` | `54681b5` | 254 | recovery baseline | pending Phase 2 classification | not integrated | not applicable | See recovery plan |
+| 2026-08-24 | `204d2d533a075c74fc69f8b283c70fb4e94ec104` | `54681b550d991f8c885f19f93dec762f1967ab3f` | 254 | initial recovery baseline | superseded by the 2026-08-30 re-pin | not integrated | not applicable | Historical audit receipt |
+| 2026-08-30 | `54681b550d991f8c885f19f93dec762f1967ab3f` | `1b58c7aa0520ff185c44698cea1a9e0c96af50ab` | 24 (278 total from common ancestor) | 25-row schema/auth/provider/workflow/frontend/Word/CI reconciliation | `adopt` / `port` / `reject` / `defer` in the integrated compatibility ledger | Phase 2 not started; writers 0 | `t_15f7252d` PASS for the ledger | Upstream re-fetched unchanged at closeout; implementation evidence still required per slice |
 
 ## Release metadata
 

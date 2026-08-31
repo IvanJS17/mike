@@ -1,17 +1,20 @@
 # LiTT Upstream Compatibility Ledger
 
-> **Candidate control artifact.** This file consolidates the four immutable,
-> read-only recovery analyses. It does not supersede the five canonical control
-> documents and does not authorize implementation, publication, merge, staging,
-> external-provider contact, or production.
+> **Integrated control artifact.** This file consolidates the four immutable,
+> read-only recovery analyses and governs compatibility, interfaces and writer
+> ownership together with the five canonical control documents. It does not by
+> itself authorize a product writer, staging, external-provider contact or production.
 
 ## 1. Current gate
 
-The Phase 0 control package and the reviewed Beta baseline are integrated in
-`origin/main`. PR #18 merged the final reviewed head
+The Phase 0 control package, reviewed Beta baseline and this compatibility ledger
+are integrated in `origin/main`. PR #18 merged the final reviewed Beta head
 `192310b6930d430667d729ed943e15e8441a61b1` into commit
 `cc497bbf8f2ca7407d19801c4750340636e46548` with tree
-`60aba275013aa788bc6d57ddd32b20f5cca03afb`.
+`60aba275013aa788bc6d57ddd32b20f5cca03afb`. PR #19 merged the reviewed ledger
+head `33ea753368c70bf6b6edbe34d2a0f0f8e0c93b60` into the ledger-acceptance baseline
+`0cafb80c85e8a0e75f7f78df744eb4806b7057d6` with tree
+`e2d87cd2e9712233c3fe409949986e0feee8f083`.
 
 G4 evidence is current:
 
@@ -28,11 +31,13 @@ G4 evidence is current:
 - attributed cleanup: zero owned containers, volumes, networks, listeners,
   processes, or ignored files; the detached post-merge verification worktree
   and its synthetic failure evidence were removed.
+- ledger review `t_15f7252d`: PASS with zero P1/P2 on exact tree `e2d87cd2`;
+- PR #19 exact-head CI: 8/8 PASS; post-merge push workflows on `0cafb80`: 5/5 PASS.
 
-This compatibility ledger remains a candidate. No implementation writer may
-start until the ledger has an exact-snapshot review/authorized integration and
-the coordinator has created a compiling recovery scaffold from the pinned
-upstream core. This ledger file itself changes no product code.
+The ledger review/integration gate is complete. No implementation writer may start
+until the coordinator creates a compiling recovery scaffold, migration baseline and
+shared interfaces from the pinned upstream core. This ledger and its closeout change
+no product code.
 
 ## 2. Immutable evidence set
 
@@ -41,7 +46,8 @@ this recovery batch; newer upstream commits belong to the next intake.
 
 | Identity | Commit | Tree | Lifecycle meaning |
 | --- | --- | --- | --- |
-| Current integrated LiTT/Beta baseline | `cc497bbf8f2ca7407d19801c4750340636e46548` | `60aba275013aa788bc6d57ddd32b20f5cca03afb` | PR #18 squash merge; G4 CI, bounded Beta journey, and cleanup passed |
+| Ledger-acceptance control/Beta/ledger baseline | `0cafb80c85e8a0e75f7f78df744eb4806b7057d6` | `e2d87cd2e9712233c3fe409949986e0feee8f083` | PR #19 squash; exact-head CI and post-merge workflows passed before the docs-only closeout |
+| Integrated Beta G4 baseline | `cc497bbf8f2ca7407d19801c4750340636e46548` | `60aba275013aa788bc6d57ddd32b20f5cca03afb` | PR #18 squash; G4 CI, bounded Beta journey, and cleanup passed |
 | Integrated control-package baseline | `d63fdd83dd1ccaaf07a23466b0e2fe540a4d973d` | `ac1a31ec4845ec6a2eedb50f6282297b00fce4a4` | PR #17; exact control tree used by all four analysis cards |
 | LiTT/Beta analysis reference | `22cba89fe104b3c9df518762fb5a7170a5b16b03` | `4aba258495698862e5e77268beeefd5ca38ea459` | Original reviewed Beta behavior inspected by all four analysts |
 | Final Beta PR head | `192310b6930d430667d729ed943e15e8441a61b1` | `5fbf99682e0e9592bfc53ff7a7cd7cdf3f8144d6` | Original Beta plus reviewed Playwright runner-selection delta (`t_b54d75b3`) |
@@ -55,16 +61,17 @@ Observed at dispatch:
 | Beta vs upstream | 28 | 278 | Beta 258 / upstream 718 | 108 |
 | Integrated control vs upstream | 17 | 278 | control 252 / upstream 718 | 108 |
 
-Current integrated baseline against the same pinned upstream batch:
+Ledger-acceptance baseline against the same pinned upstream batch:
 
 | Comparison | Left-only commits | Right-only commits | Changed paths from ancestor | Overlap with upstream |
 | --- | ---: | ---: | ---: | ---: |
-| `cc497bb` vs pinned upstream | 18 | 278 | LiTT 264 / upstream 718 | 108 |
+| `0cafb80` vs pinned upstream | 19 | 278 | LiTT 265 / upstream 718 | 108 |
 
-The final Beta PR head and the integrated tree differ on exactly six paths:
-`README.md` and the five canonical control documents. Each of those six blobs in
-the integrated tree equals the PR #17 control baseline; no Beta product path was
-lost during composition.
+The final Beta PR head and ledger-acceptance tree differ on exactly seven paths:
+`README.md`, the five canonical control documents and this ledger. Before PR #19,
+each of the first six blobs in the integrated Beta tree equaled the PR #17 control
+baseline; PR #19 added only this ledger. No Beta product path was lost during
+composition.
 
 Canonical authority, in descending order:
 
@@ -124,7 +131,7 @@ TypeScript names are frozen in the coordinator snapshot handed to the writer.
 | Credential domains | membership identity; provider API key; OAuth access token; OAuth refresh token | no interchange between domains; refresh tokens encrypted and never stored in `user_api_keys` or chats | auth/provider shared files |
 | Workflow identity | `workflow_key`, `version`, `content_hash`, `source_commit`, distribution/type, source and approval provenance | executed receipt pins the exact active hash; catalog edits do not rewrite prior receipts | catalog schema and shared API type |
 | Execution provenance | tenant/matter/project/chat/document-version scope; input/output/citation hashes; provider route; workflow identity; status/error class | append-only evidence; actual route, not intended route; receipt sanitizer rejects secret/prompt/content fields except hashes | schema, receipt types, audit |
-| Review state | item decision `accepted|rejected|edited`; terminal review `approved|changes_requested`; reviewer separation and fresh authorization | approval requires no pending item; revoked reviewer cannot write; rejected findings excluded and edited values preserved | evidence schema/API contract |
+| Review state | item decision `accepted`, `rejected`, or `edited`; terminal review `approved` or `changes_requested`; reviewer separation and fresh authorization | approval requires no pending item; revoked reviewer cannot write; rejected findings excluded and edited values preserved | evidence schema/API contract |
 | Approved redline | bundle id/SHA, review id/revision, source document/version/SHA, action spans and before/after hashes | fresh identity/hash/span revalidation before every write; ambiguity, overlap, supersession, Save-As, or document drift produces no partial write | Word API contract and `approvedRedline.ts` |
 | Document/storage ownership | tenant/matter/project/document IDs, version hash, object prefix, download-grant id/expiry/use state | object prefix confinement; single-use/expiry; outsider non-disclosure; deletion waits for retention contract when evidence is implicated | schema/access/API boundary |
 | Publication intent | matter folder identity, approved artifact hash, idempotency key, attempt/outcome, provider file id when known | fresh authorization before upload and DB update; unknown outcome reconciled before retry; no real Drive in default tests | Drive publication API/schema boundary |
@@ -217,15 +224,16 @@ Completed:
 1. Exact reviewed Beta candidate integrated through authorized PR #18.
 2. Exact-head CI, separately authorized merge, post-merge CI, bounded Beta smoke,
    composed-tree proof, and zero-residue cleanup completed on `cc497bb` / `60aba275`.
+3. Exact-tree ledger review `t_15f7252d`, authorized PR #19, exact-head CI 8/8,
+   merge `0cafb80` / `e2d87cd2`, and post-merge push workflows 5/5 completed.
 
 Still required before the first writer:
 
-1. Obtain exact-snapshot review and authorized integration of this ledger candidate.
-2. Create the coordinator recovery worktree from upstream commit
+1. Create the coordinator recovery worktree from upstream commit
    `1b58c7aa0520ff185c44698cea1a9e0c96af50ab`.
-3. Coordinator creates a compiling RED contract scaffold and the first collision-free
+2. Coordinator creates a compiling RED contract scaffold and the first collision-free
    migration plan. No writer receives a non-compiling base.
-4. Freeze the shared contracts and coordinator-exclusive path set in an exact commit.
+3. Freeze the shared contracts and coordinator-exclusive path set in an exact commit.
 
 ### Serialized and parallel work
 
@@ -476,13 +484,15 @@ Phase 4 starts only after the recovered candidate completes Phase 3, receives th
 terminal governing review, is integrated, and the permanent cadence in
 `UPSTREAM_POLICY.md` is activated.
 
-## 13. Candidate ledger lifecycle
+## 13. Integrated ledger lifecycle
 
-This file is intentionally uncommitted. Before it can become authority:
+The candidate gate closed as follows:
 
-- verify it is the only changed path in its documentation worktree;
-- record its SHA-256 and exact base commit/tree;
-- obtain a separate exact-snapshot Reviewer-profile verdict when authorization is
-  given;
-- commit, push/PR, and merge only under their respective separate authorizations;
-- update the five canonical documents only after the ledger candidate is accepted.
+- exact candidate tree: `e2d87cd2e9712233c3fe409949986e0feee8f083`;
+- governing review: `t_15f7252d` PASS with zero P1/P2;
+- local commit: `33ea753368c70bf6b6edbe34d2a0f0f8e0c93b60` with the approved tree;
+- PR #19 exact-head CI: 8/8 PASS;
+- integrated main: `0cafb80c85e8a0e75f7f78df744eb4806b7057d6` with the approved tree;
+- post-merge push workflows: 5/5 PASS;
+- this separate closeout transition reconciles the five canonical documents only
+  after that acceptance, without changing product code or starting writers.
