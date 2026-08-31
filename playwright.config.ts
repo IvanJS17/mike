@@ -6,6 +6,17 @@ import { defineConfig, devices } from "@playwright/test";
  */
 export default defineConfig({
     testDir: "./e2e",
+    /* The AI and integrated Beta journeys require the dedicated runner, which
+       owns BETA01_FAKE_STATE_FILE, preloads provider/Drive fakes, and creates a
+       disposable Supabase stack. Keep them out of generic Playwright runs;
+       scripts/e2e-beta01-setup-smoke.sh exports the owned state path before
+       selecting either spec explicitly. */
+    testIgnore: process.env.BETA01_FAKE_STATE_FILE
+        ? []
+        : [
+              /beta01-ai-smoke\.spec\.ts/,
+              /beta01-integrated-journey\.spec\.ts/,
+          ],
     /* These E2E tests run against a single shared backend and a single shared
        test user (e2e@mike.local). Running them concurrently causes data races
        on shared list views (projects/chats/workflows) and on the user's

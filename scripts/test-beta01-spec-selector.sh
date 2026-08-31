@@ -28,6 +28,8 @@
 #       --workdir único bajo SMOKE_DIR, ownership snapshot/record/cleanup,
 #       NUNCA supabase stop y cero DELETE (tablas terminales intactas); el
 #       spec setup conserva start/stop canónicos SIN --workdir y sin helper.
+#   c8. el Playwright genérico NO descubre los specs AI/integrated que exigen
+#       este runner; con BETA01_FAKE_STATE_FILE runner-owned sí los enumera.
 #
 # El stack completo se simula con stubs en un PATH prefijado; cada stub
 # registra su invocación en CALLS, así "cero mutaciones" es una aserción
@@ -312,9 +314,57 @@ expect_reject() {
 }
 
 # ---------------------------------------------------------------------------
+# Config-level selection contract. `--list` loads the real Playwright config
+# without booting servers or executing specs. The generic suite must not absorb
+# runner-only tests; the dedicated environment must keep both discoverable.
+# ---------------------------------------------------------------------------
+check_playwright_config_selection() {
+  local generic_list runner_list runner_state rc
+  runner_state="$TMP/runner-owned-fake-state.json"
+  : >"$runner_state"
+  chmod 600 "$runner_state"
+
+  set +e
+  generic_list="$(cd "$HERE/.." && CI=true BETA01_FAKE_STATE_FILE= npx playwright test --list 2>&1)"
+  rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    ok "c8 — generic Playwright list carga sin stack"
+  else
+    bad "c8 — generic Playwright list falló: $generic_list"
+  fi
+  for spec in beta01-ai-smoke.spec.ts beta01-integrated-journey.spec.ts; do
+    if grep -q "$spec" <<<"$generic_list"; then
+      bad "c8 — generic Playwright filtró incorrectamente $spec"
+    else
+      ok "c8 — generic Playwright omite $spec"
+    fi
+  done
+
+  set +e
+  runner_list="$(cd "$HERE/.." && CI=true BETA01_FAKE_STATE_FILE="$runner_state" npx playwright test --list 2>&1)"
+  rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    ok "c8 — runner Playwright list carga sin stack"
+  else
+    bad "c8 — runner Playwright list falló: $runner_list"
+  fi
+  for spec in beta01-ai-smoke.spec.ts beta01-integrated-journey.spec.ts; do
+    if grep -q "$spec" <<<"$runner_list"; then
+      ok "c8 — runner Playwright conserva $spec"
+    else
+      bad "c8 — runner Playwright perdió $spec"
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
 # Casos (contrato)
 # ---------------------------------------------------------------------------
 printf '== beta01 spec selector: contract checks ==\n'
+
+check_playwright_config_selection
 
 printf '[c1] default (variable ausente) -> setup\n'
 run_ok __UNSET__ e2e/beta01-setup-smoke.spec.ts "default"
