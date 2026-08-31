@@ -15,6 +15,21 @@ as the no-regression acceptance contract rather than the architecture to preserv
 **Current identities:** See [`PROJECT_STATUS.md`](PROJECT_STATUS.md). Every execution
 must fetch again and replace moving refs with full commit/tree OIDs before work.
 
+**Program state (2026-08-30):**
+
+- Phase 0 control package integrated by PR #17 at
+  `d63fdd83dd1ccaaf07a23466b0e2fe540a4d973d`;
+- Phase 1 Beta baseline integrated by PR #18 at
+  `cc497bbf8f2ca7407d19801c4750340636e46548`, with exact-head CI 8/8,
+  post-merge workflows 5/5 and the bounded Beta journey 2/2 PASS;
+- compatibility ledger reviewed by `t_15f7252d` and integrated by PR #19 at
+  `0cafb80c85e8a0e75f7f78df744eb4806b7057d6` /
+  `e2d87cd2e9712233c3fe409949986e0feee8f083`;
+- pinned upstream target re-fetched unchanged at
+  `1b58c7aa0520ff185c44698cea1a9e0c96af50ab` /
+  `ce8d7e1a6e4b5460258441a5568a353c52180162`;
+- Phase 2 implementation has not started; active writers: 0.
+
 ## Non-negotiable constraints
 
 - Never edit `main` directly; use a dedicated worktree per implementation slice.
@@ -51,6 +66,8 @@ new LiTT main baseline
 
 ## Phase 0 — Control plane and freeze
 
+**Status:** complete and integrated by PR #17.
+
 ### Objective
 
 Stop unmanaged divergence and make status, debt, gates and upstream decisions
@@ -74,6 +91,10 @@ reproducible.
 - new feature cards remain paused.
 
 ## Phase 1 — Consolidate the internal LiTT baseline
+
+**Status:** complete and integrated by PR #18. G4 evidence is recorded in
+[`PROJECT_STATUS.md`](PROJECT_STATUS.md) and
+[`RELEASE_GATES.md`](RELEASE_GATES.md).
 
 ### Objective
 
@@ -116,9 +137,13 @@ than resolving a monolithic merge.
 
 1. Fetch upstream and pin the chosen full commit/tree.
 2. Create one coordinator recovery worktree from that upstream commit.
-3. Freeze a compatibility matrix: upstream capability, LiTT invariant, target module,
-   migration impact, tests and disposition (`adopt`, `port`, `reject`, `defer`).
-4. Establish compiling contract tests before parallel implementation begins.
+3. Use the integrated
+   [`UPSTREAM_COMPATIBILITY_LEDGER.md`](UPSTREAM_COMPATIBILITY_LEDGER.md) as the
+   frozen compatibility/ownership matrix; do not regenerate it from worker prose.
+4. Establish the coordinator-owned migration baseline, shared interfaces and
+   compiling RED contract tests before any implementation writer begins.
+5. Execute Slice A serially. Only after its interfaces are integrated may the
+   ledger's explicitly disjoint writer pairs run with a maximum concurrency of two.
 
 ### Slice A — Identity, tenancy and authorization
 

@@ -148,13 +148,34 @@ deploy receipt or an owner statement approving a different snapshot.
 
 ## Current Beta placement
 
-Beta candidate `22cba89` has:
+The integrated Beta baseline has:
 
-- G0: documented in this recovery package;
-- G1: focused implementation evidence passed;
-- G2: Reviewer-profile PASS with non-blocking reservations;
-- G3: not started;
-- G4–G7: not started/not authorized.
+- G0: control package integrated by PR #17;
+- G1: focused Beta implementation evidence passed on the historical reviewed
+  `22cba89` / `4aba258` snapshot and the final Playwright selector delta;
+- G2: governing review `t_6ad4f0c2` PASS with non-blocking reservations plus
+  bounded delta review `t_b54d75b3` PASS for final head `192310b6` /
+  `5fbf9968`;
+- G3: PR #18 exact-head CI 8/8 PASS;
+- G4: squash `cc497bb` / `60aba275`, post-merge push workflows 5/5 PASS,
+  bounded integrated Beta journey 2/2 PASS and attributed cleanup complete;
+- G5–G7: not started and not authorized.
+
+## Current recovery-control placement
+
+The compatibility-ledger transition has:
+
+- G0: four immutable read-only analyses consolidated into one 25-row ownership
+  ledger with seven bounded writer prompts;
+- G2: exact-tree review `t_15f7252d` PASS with zero P1/P2;
+- G3: PR #19 exact-head CI 8/8 PASS;
+- G4: squash `0cafb80c85e8a0e75f7f78df744eb4806b7057d6` /
+  `e2d87cd2e9712233c3fe409949986e0feee8f083` and post-merge push workflows
+  CI, Stack tests, CodeQL, Secret scan and Scorecard 5/5 PASS;
+- product acceptance was not rerun for the docs-only PR #19 because its merge tree
+  equals the exact PR head tree and product bytes are unchanged from the already
+  verified Beta G4 baseline;
+- Phase 2 product implementation and G5–G7: not started and not authorized.
 
 ## Reporting template
 
