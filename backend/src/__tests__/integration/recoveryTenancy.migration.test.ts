@@ -141,10 +141,17 @@ describe("blocker 1: migration targets the exact d9fa8380 LiTT baseline", () => 
     })
       .split("\n")
       .filter((line) => line.endsWith(".sql"))
-      .map((line) => path.basename(line));
+      .map((line) => path.basename(line))
+      .filter((name) => name !== MIGRATION_NAME);
     expect(() =>
       assertRecoveryMigrationName(MIGRATION_NAME, existing),
     ).not.toThrow();
+    expect(() =>
+      assertRecoveryMigrationName(MIGRATION_NAME, [
+        ...existing,
+        "20260831_01_other.sql",
+      ]),
+    ).toThrow(/collides with an existing migration/i);
   });
 });
 
