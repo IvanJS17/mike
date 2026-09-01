@@ -7,6 +7,7 @@ import request from "supertest";
 process.env.SUPABASE_URL = "http://supabase.test.local";
 process.env.SUPABASE_PUBLISHABLE_KEY = "test-publishable-key";
 process.env.SUPABASE_SECRET_KEY = "test-service-key";
+process.env.MIKE_NON_BROWSER_BEARER_CLIENTS = "backend-integration-test";
 
 // Mock the supabase-js client factory so the real requireAuth middleware never
 // makes a network call: auth.getUser() resolves to no user for any token,
@@ -70,7 +71,8 @@ describe("requireAuth middleware", () => {
         // any token — simulating an expired/invalid token.
         const res = await request(app)
             .get("/chat")
-            .set("Authorization", "Bearer invalid-token");
+            .set("Authorization", "Bearer invalid-token")
+            .set("X-Mike-Client", "backend-integration-test");
         expect(res.status).toBe(401);
         expect(res.body.detail).toMatch(/invalid|expired/i);
     });
