@@ -62,16 +62,26 @@ export type OnboardingProvisioningResult =
   | InvalidOnboardingInput
   | OnboardingDependencyFailure;
 
-const DEPENDENCY_FAILURE: OnboardingDependencyFailure = {
-  ok: false,
-  error: {
-    kind: "dependency_failure",
-    message: "onboarding provisioning is unavailable",
-  },
-};
+function dependencyFailure(): OnboardingDependencyFailure {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      kind: "dependency_failure",
+      message: "onboarding provisioning is unavailable",
+    }),
+  });
+}
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function hasExactKeys(value: object, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  return (
+    actual.length === expected.length &&
+    actual.every((key, index) => key === [...expected].sort()[index])
+  );
 }
 
 function validatePersistenceResult(
@@ -79,6 +89,9 @@ function validatePersistenceResult(
   input: OnboardingProvisioningInput,
 ): InitialOrganizationPersistenceResult | undefined {
   if (!value || typeof value !== "object") return undefined;
+  if (!hasExactKeys(value, ["disposition", "membership", "organization"])) {
+    return undefined;
+  }
   const persisted = value as Partial<InitialOrganizationPersistenceResult>;
   if (
     persisted.disposition !== "created" &&
@@ -89,8 +102,18 @@ function validatePersistenceResult(
   if (!persisted.organization || !persisted.membership) return undefined;
   const organization = persisted.organization;
   if (
+    !hasExactKeys(organization, ["name", "organization_id"]) ||
+    !hasExactKeys(persisted.membership, [
+      "authorization_epoch",
+      "organization_id",
+      "role",
+      "status",
+      "user_id",
+    ]) ||
     !isNonEmptyString(organization.organization_id) ||
-    !isNonEmptyString(organization.name)
+    !isNonEmptyString(organization.name) ||
+    (persisted.disposition === "created" &&
+      organization.name !== input.organization_name)
   ) {
     return undefined;
   }
@@ -104,7 +127,20 @@ function validatePersistenceResult(
     ) {
       return undefined;
     }
-    return { disposition: persisted.disposition, organization, membership };
+    return {
+      disposition: persisted.disposition,
+      organization: {
+        organization_id: organization.organization_id,
+        name: organization.name,
+      },
+      membership: {
+        user_id: membership.user_id,
+        organization_id: membership.organization_id,
+        role: membership.role,
+        status: membership.status,
+        authorization_epoch: membership.authorization_epoch,
+      },
+    };
   } catch {
     return undefined;
   }
@@ -133,7 +169,7 @@ export async function provisionInitialOrganization(
       await port.provisionInitialOrganization(persistenceInput),
       persistenceInput,
     );
-    if (!persisted) return DEPENDENCY_FAILURE;
+    if (!persisted) return dependencyFailure();
     return {
       ok: true,
       ...persisted,
@@ -146,7 +182,7 @@ export async function provisionInitialOrganization(
       matter_provisioned: false,
     };
   } catch {
-    return DEPENDENCY_FAILURE;
+    return dependencyFailure();
   }
 }
 
@@ -164,6 +200,10 @@ export type InvitationRoleResolutionResult =
   | {
       ok: false;
       error: { kind: "invalid_invitation_role"; scope: InvitationScope };
+    }
+  | {
+      ok: false;
+      error: { kind: "invalid_invitation_scope" };
     };
 
 export function resolveExplicitInvitationRole(
@@ -174,6 +214,9 @@ export function resolveExplicitInvitationRole(
     workspace: WORKSPACE_ROLES,
     matter: MATTER_ROLES,
   } as const;
+  if (!Object.prototype.hasOwnProperty.call(vocabularies, input.scope)) {
+    return { ok: false, error: { kind: "invalid_invitation_scope" } };
+  }
   const vocabulary = vocabularies[input.scope] as readonly string[];
   if (!input.role || !vocabulary.includes(input.role)) {
     return {

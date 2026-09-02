@@ -203,6 +203,75 @@ describe("initial organization onboarding", () => {
     }
   });
 
+  it("rejects persistence envelopes with extra fields instead of leaking them", async () => {
+    const valid = await successfulPort().provisionInitialOrganization({
+      user_id: USER_ID,
+      organization_name: ORGANIZATION_NAME,
+    });
+    const malformed = [
+      { ...valid, secret: "do-not-leak" },
+      {
+        ...valid,
+        organization: {
+          ...valid.organization,
+          workspace_id: "workspace-must-not-exist",
+        },
+      },
+      {
+        ...valid,
+        membership: {
+          ...valid.membership,
+          matter_id: "matter-must-not-exist",
+        },
+      },
+      {
+        ...valid,
+        disposition: "created",
+        organization: { ...valid.organization, name: "Unexpected name" },
+      },
+    ];
+
+    for (const persisted of malformed) {
+      const result = await provisionInitialOrganization(
+        { user_id: USER_ID, organization_name: ORGANIZATION_NAME },
+        malformedPort(persisted),
+      );
+      expect(result).toEqual({
+        ok: false,
+        error: {
+          kind: "dependency_failure",
+          message: "onboarding provisioning is unavailable",
+        },
+      });
+      expect(JSON.stringify(result)).not.toMatch(
+        /do-not-leak|workspace-must-not-exist|matter-must-not-exist|Unexpected name/,
+      );
+    }
+  });
+
+  it("returns a fresh immutable dependency failure for every rejected result", async () => {
+    const first = await provisionInitialOrganization(
+      { user_id: USER_ID, organization_name: ORGANIZATION_NAME },
+      malformedPort(null),
+    );
+    if (!first.ok && first.error.kind === "dependency_failure") {
+      expect(() => {
+        (first.error as { message: string }).message = "poisoned";
+      }).toThrow();
+    }
+    const second = await provisionInitialOrganization(
+      { user_id: USER_ID, organization_name: ORGANIZATION_NAME },
+      malformedPort(null),
+    );
+    expect(second).toEqual({
+      ok: false,
+      error: {
+        kind: "dependency_failure",
+        message: "onboarding provisioning is unavailable",
+      },
+    });
+  });
+
   it("redacts thrown persistence errors into one dependency failure", async () => {
     const port: OnboardingProvisioningPort = {
       async provisionInitialOrganization() {
@@ -258,6 +327,18 @@ describe("explicit invitation roles", () => {
         error: { kind: "invalid_invitation_role", scope: input.scope },
       });
     }
+  });
+
+  it("rejects an unknown runtime scope without throwing or reflecting it", () => {
+    expect(
+      resolveExplicitInvitationRole({
+        scope: "tenant_admin" as "organization",
+        role: "org_owner",
+      }),
+    ).toEqual({
+      ok: false,
+      error: { kind: "invalid_invitation_scope" },
+    });
   });
 });
 
