@@ -191,8 +191,8 @@ review snapshot, compatibility-ledger update, and change to this ownership list.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: |
 | Fresh schema and upgrades | Canonical fresh schema plus schema-drift fingerprint workflow | Fresh and supported incremental paths converge; security grants/policies preserved | adopt + port | One consolidated fresh schema and a new collision-free recovery migration series from the integrated LiTT baseline | Beta integration; coordinator scaffold | schema, migrations, fingerprint script | coordinator only | fresh bootstrap; supported upgrade; fingerprint equality; security invariants | high: divergent schemas and duplicate stems | TD-003 | 0 |
 | Password/session auth | HttpOnly cookies, trusted-origin checks, session endpoints | MFA default-on and no tenancy bypass | adopt + port | Upstream auth stack with LiTT MFA/tenancy guards | schema/auth contract | middleware, auth/user routes, contexts | Slice A domain services/tests only | login/recovery/session/origin/MFA matrix | user profile/trigger convergence | TD-004 | 1 |
-| Google OAuth and Word handoff | OAuth exchange plus single-use handoff tickets | onboarding must create intended tenant membership; tokens remain distinct | adopt + port | Cookie web flow and one-time Word handoff; no browser Bearer fallback | owner decision on initial tenant defaults | auth schema/routes/client contexts | Slice A tests and non-shared onboarding service | one-use/expiry; OAuth cannot bypass MFA/tenancy | auth tickets and profile triggers | product decision: initial org/workspace/matter role | 1 |
-| Organizations/workspaces/matters | Upstream lacks LiTT’s complete private-tenancy model | org/workspace/matter roles, private matters, outsider 404 | port | Backend-mediated tenancy mutations; RLS defense in depth | schema scaffold | schema/access/audit/app | Slice A `tenancy.ts`, new domain services/routes excluding shared registration | cross-tenant matrix; private matter; invitation/onboarding | new consolidated tables/policies/functions | invitation-to-membership semantics | 1 |
+| Google OAuth and Word handoff | OAuth exchange plus single-use handoff tickets | onboarding creates exactly one initial organization with an active `org_owner` membership; no initial workspace/matter; tokens remain distinct | adopt + port | Cookie web flow and one-time Word handoff; idempotent organization provisioning shared by password and OAuth completion; no browser Bearer fallback | resolved owner decision in section 11 | auth schema/routes/client contexts | Slice A tests and non-shared onboarding service | one-use/expiry; OAuth/password cannot bypass MFA/tenancy; retry cannot duplicate tenant | auth tickets, profile triggers and organization membership transaction | none for initial defaults | 1 |
+| Organizations/workspaces/matters | Upstream lacks LiTT’s complete private-tenancy model | org/workspace/matter roles, private matters, outsider 404 | port | Backend-mediated tenancy mutations; RLS defense in depth; invitations require an explicitly selected valid role and never infer one | schema scaffold | schema/access/audit/app | Slice A `tenancy.ts`, new domain services/routes excluding shared registration | cross-tenant matrix; private matter; explicit-role invitation/onboarding | new consolidated tables/policies/functions | none for invitation default semantics | 1 |
 | Revocation and epochs | Ordinary current-session authorization | revocation effective during long mutations | port | Organization authorization epoch checked before every sensitive write | tenancy model | schema/access/audit | Slice A tenancy/AI access helpers and focused tests | stale epoch and revocation race negatives | epoch columns/functions/triggers | none after interface freeze | 1 |
 | RLS and service role | Narrower backend-mediated posture but different grants | no browser bypass; insert-only evidence; least privilege | port + reject broad grants | Per-table grants plus RLS and backend authorization; no blanket post-migration grant | schema convergence | schema/migrations/security script | coordinator; Slice A tests | RLS coverage; service-role route guard; negative DML | substantial grant reconciliation | TD-003/004 | 1 |
 | Audit | Mutable upstream audit table | insert-only, scoped, sanitized audit detail | port | One consolidated append-only `audit_events` model and one audit module | tenancy schema | schema/migrations/audit | Slice A callers/tests outside shared module | service-role UPDATE/DELETE denial; scoped detail | incompatible table definitions | retention ADR for erasure | 1 |
@@ -294,9 +294,12 @@ compile. Read the five canonical control documents and
 
 Behavioral goal: make the upstream auth stack preserve LiTT organization/workspace/
 matter membership, private-matter 404, MFA, authorization-epoch revocation, and
-append-only audit callers. Add the smallest discriminating RED contracts first, then
-GREEN implementation. Do not decide retention, invitation-to-role defaults, egress,
-or jurisdiction.
+append-only audit callers. Implement the resolved onboarding contract exactly: create
+one initial organization with an active `org_owner` membership, create no workspace or
+matter automatically, and require an explicitly selected valid role for every
+invitation. Make organization provisioning idempotent across password and OAuth
+completion. Add the smallest discriminating RED contracts first, then GREEN
+implementation. Do not decide retention, egress, or jurisdiction.
 
 You may edit only the coordinator-issued Slice A allowlist: tenancy/epoch service
 modules, new non-shared org/workspace/matter route modules, and focused tests. Never
@@ -453,10 +456,26 @@ authorized.
 
 ## 11. Product decisions that implementation may not invent
 
+### Resolved for Slice A
+
+On 2026-09-02, Iván fixed the onboarding and invitation contract:
+
+1. Successful onboarding provisions exactly one initial organization and one active
+   membership for the authenticated user with role `org_owner`.
+2. Onboarding provisions no workspace and no matter implicitly.
+3. Password and Google OAuth completion use the same idempotent organization-
+   provisioning boundary; retry must not create a second organization or membership.
+4. Every invitation requires an explicitly selected role from the applicable closed
+   role vocabulary. There is no default invitation role and no fallback grant.
+
+This decision does not authorize retention/erasure behavior, provider egress,
+jurisdictional sources, real Shared Drive, or production topology.
+
+### Still pending
+
 | Decision | Needed before | Fail-closed behavior until decided |
 | --- | --- | --- |
 | Retention/erasure of append-only audit and AI evidence, including storage residues | Any destructive account/project endpoint claimed complete; Slice E closeout | Evidence deletion disabled; endpoint returns a typed blocked/conflict result rather than weakening guards |
-| Invitation and onboarding tenant semantics: initial organization/workspace/matter and default role | Slice A completion | No implicit membership grant beyond the executable current invariant; onboarding cannot claim completion |
 | User BYOK support and precedence for Vercel/OpenCode router credentials | Slice C completion for those routers | Unsupported user credential route is unavailable; no env/user silent substitution |
 | Which real provider egress routes are supported | G6 canary planning | Default CI/local uses fakes; no real calls |
 | Whether and when real Shared Drive becomes supported | G6 | Fake-only publication; no production support claim |
