@@ -116,7 +116,6 @@ describe("fail-closed product placeholders (no invented product decisions)", () 
       "evidence_deletion",
       "jurisdiction_research_source",
       "material_ux_legal_review_change",
-      "onboarding_tenant_defaults",
       "production_topology",
       "publication_to_real_drive",
       "real_provider_egress",

@@ -7,11 +7,12 @@
  *
  * These are typed fail-closed placeholders ONLY. They intentionally do not
  * implement Slice A behavior (tenancy model, provider adapters, workflow
- * catalog, evidence UI, Word UI, or Drive publication). Where a contract
- * boundary reaches a product decision listed in ledger section 11 (retention/
- * erasure, onboarding defaults, BYOK precedence, real egress, Shared Drive,
- * residency, jurisdiction sources, material UX), the scaffold fails closed with
- * a typed result instead of selecting behavior.
+ * catalog, evidence UI, Word UI, or Drive publication). Where contract
+ * boundaries still reach an unresolved product decision listed in ledger section 11
+ * (retention/erasure, BYOK precedence, real egress, Shared Drive, residency,
+ * jurisdiction sources or material UX), the scaffold fails closed with a typed result
+ * instead of selecting behavior. Onboarding defaults are no longer in this list: the
+ * resolved contract lives in `authorization/onboardingProvisioning.ts`.
  */
 
 import type { WorkflowCatalogRow } from "../workflowCatalog";
@@ -98,7 +99,6 @@ export function resolveEgressTarget(
  */
 export const BLOCKED_OPERATION_KINDS = [
   "evidence_deletion",
-  "onboarding_tenant_defaults",
   "user_byok_router_credential",
   "real_provider_egress",
   "publication_to_real_drive",

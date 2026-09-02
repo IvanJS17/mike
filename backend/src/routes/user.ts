@@ -2,6 +2,8 @@ import crypto from "crypto";
 import { Router } from "express";
 import { requireAuth, requireMfaIfEnrolled } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
+import { provisionInitialOrganization } from "../lib/recovery/authorization/onboardingProvisioning";
+import { createSupabaseOnboardingProvisioningPort } from "../lib/recovery/authorization/supabaseOnboardingProvisioningPort";
 import { recordAudit } from "../lib/audit";
 import { sendInternalError } from "../lib/httpError";
 import {
@@ -1173,13 +1175,44 @@ userRouter.post("/onboarding", requireAuth, async (req, res) => {
     const db = createServerSupabase();
     const ensureError = await ensureProfileRow(db, userId);
     if (ensureError) {
-        return void res.status(500).json({ detail: ensureError.message });
+        return void sendInternalError(res, ensureError);
+    }
+
+    const profileResult = await selectProfile(db, userId, "maybe");
+    if (profileResult.error) {
+        return void sendInternalError(res, profileResult.error);
+    }
+    const profile = profileResult.data as UserProfileRow | null;
+    const organizationName =
+        typeof profile?.organisation === "string"
+            ? profile.organisation.trim()
+            : "";
+    if (!organizationName || organizationName.length > 200) {
+        return void res.status(409).json({
+            detail: "Complete your organization profile before onboarding",
+        });
+    }
+
+    const provisioning = await provisionInitialOrganization(
+        { user_id: userId, organization_name: organizationName },
+        createSupabaseOnboardingProvisioningPort(db),
+    );
+    if (!provisioning.ok) {
+        if (provisioning.error.kind === "invalid_input") {
+            return void res
+                .status(400)
+                .json({ detail: "organizationName is required" });
+        }
+        return void res.status(503).json({
+            detail: "Onboarding provisioning is temporarily unavailable",
+        });
     }
 
     const { error: updateError } = await db
         .from("user_profiles")
         .update({
             ...personalisationUpdate,
+            organisation: organizationName,
             onboarding_version: 1,
             updated_at: new Date().toISOString(),
         })

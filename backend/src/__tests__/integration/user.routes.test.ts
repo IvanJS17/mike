@@ -258,7 +258,25 @@ describe("user.routes", () => {
         buildUserAccountExport.mockResolvedValue({ account: "data" });
         buildUserChatsExport.mockResolvedValue({ chats: "data" });
         buildUserTabularReviewsExport.mockResolvedValue({ reviews: "data" });
-        supabaseRpc.mockResolvedValue({ data: null, error: null });
+        supabaseRpc.mockImplementation((name: string) => {
+            if (name === "provision_initial_organization") {
+                return Promise.resolve({
+                    data: [
+                        {
+                            disposition: "created",
+                            organization_id: "00000000-0000-0000-0000-000000000001",
+                            organization_name: "Acme",
+                            membership_user_id: "u1",
+                            membership_role: "org_owner",
+                            membership_status: "active",
+                            authorization_epoch: 0,
+                        },
+                    ],
+                    error: null,
+                });
+            }
+            return Promise.resolve({ data: null, error: null });
+        });
     });
 
     // ── GET /user/profile (MFA bootstrap path) ────────────────────────────
@@ -725,6 +743,14 @@ describe("user.routes", () => {
                 onboardingComplete: false,
                 onboardingVersion: null,
             });
+            expect(supabaseRpc).toHaveBeenCalledWith(
+                "provision_initial_organization",
+                {
+                    p_user_id: "u1",
+                    p_organization_name: "Acme",
+                },
+            );
+            expect(supabaseRpc.mock.calls[0][1]).not.toHaveProperty("transport");
         });
 
         it("treats onboarding version 0 as legacy-exempt", async () => {
@@ -756,6 +782,50 @@ describe("user.routes", () => {
                 .send({ practiceAreas: [] });
 
             expect(res.status).toBe(200);
+        });
+
+        it("fails closed before provisioning when the saved organization is empty", async () => {
+            supabaseState.tables.user_profiles = {
+                data: profileRow({ organisation: "", onboarding_version: null }),
+                error: null,
+            };
+
+            const res = await request(app)
+                .post("/user/onboarding")
+                .set(...AUTH)
+                .send({ practiceAreas: [] });
+
+            expect(res.status).toBe(409);
+            expect(res.body).toEqual({
+                detail: "Complete your organization profile before onboarding",
+            });
+            expect(supabaseRpc).not.toHaveBeenCalled();
+        });
+
+        it("redacts provisioning dependency failure and does not claim completion", async () => {
+            supabaseState.tables.user_profiles = {
+                data: profileRow({ onboarding_version: null }),
+                error: null,
+            };
+            supabaseRpc.mockResolvedValueOnce({
+                data: null,
+                error: { message: "secret relation organization_memberships" },
+            });
+
+            const res = await request(app)
+                .post("/user/onboarding")
+                .set(...AUTH)
+                .send({ practiceAreas: [] });
+
+            expect(res.status).toBe(503);
+            expect(res.body).toMatchObject({
+                code: "internal_error",
+                detail: "Something went wrong. Please try again.",
+            });
+            expect(res.body.request_id).toEqual(expect.any(String));
+            expect(JSON.stringify(res.body)).not.toMatch(
+                /secret|relation|organization_memberships/i,
+            );
         });
 
         it("rejects an invalid jurisdiction when one is supplied", async () => {
