@@ -22,9 +22,18 @@ const canonicalize = (value: unknown): string => {
 };
 async function minimalDocx(): Promise<Uint8Array> {
   const zip = new JSZip();
-  zip.file("[Content_Types].xml", "<Types/>");
-  zip.file("_rels/.rels", "<Relationships/>");
-  zip.file("word/document.xml", "<w:document/>");
+  zip.file(
+    "[Content_Types].xml",
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+  );
+  zip.file(
+    "_rels/.rels",
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+  );
+  zip.file(
+    "word/document.xml",
+    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>',
+  );
   return zip.generateAsync({ type: "uint8array" });
 }
 const outputText = "SECRET raw output";
@@ -227,6 +236,43 @@ const minimalReceipt = {
 };
 
 describe("approved review report", () => {
+  it("rejects ZIP entries with junk OOXML and object-valued idempotency before append", async () => {
+    const junk = new JSZip();
+    junk.file("[Content_Types].xml", "junk");
+    junk.file("_rels/.rels", "junk");
+    junk.file("word/document.xml", "junk");
+    for (const value of [
+      {
+        idempotency_key: "report:junk",
+        bytes: await junk.generateAsync({ type: "uint8array" }),
+      },
+      {
+        idempotency_key: {
+          toString: () => "report:coerced",
+        },
+        bytes: await minimalDocx(),
+      },
+    ]) {
+      const append = vi.fn();
+      const result = await produceApprovedReviewReport({
+        identity,
+        granted_scope: scope,
+        tenancy_port: tenancy(),
+        resource_scope_port: resources(),
+        requires_mfa: true,
+        idempotency_key: value.idempotency_key,
+        expected_review_revision: 4,
+        review,
+        execution,
+        evidence_receipt: evidenceReceipt,
+        renderer: { render: vi.fn(async () => value.bytes) },
+        append_port: { append },
+      } as never);
+      expect(result.ok).toBe(false);
+      expect(append).not.toHaveBeenCalled();
+    }
+  });
+
   it("fails closed before render for scope drift, revocation, fake evidence and missing revision", async () => {
     const safeReview = {
       ...review,

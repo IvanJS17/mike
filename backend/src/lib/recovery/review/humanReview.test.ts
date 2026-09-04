@@ -5,7 +5,9 @@ import {
   completeHumanReview,
   createHumanReview,
   decideHumanReviewItem,
+  parseBoundEvidenceReceipt,
   parseHumanReview,
+  parseHumanReviewExecution,
   reviewMatchesExecutionEvidence,
   type HumanReviewMutationPort,
 } from "./humanReview";
@@ -201,6 +203,151 @@ const auth = {
 };
 
 describe("human review", () => {
+  it("accepts canonical chat scope, preserves hashed output bytes, and rejects non-E1a receipt arrays", () => {
+    const secondCitation = {
+      ...citation,
+      citation_id: "citation-2",
+      page: 2,
+      finding_text: "Segundo",
+    };
+    const output = "  Sin citas\n";
+    const chatBody = {
+      ...JSON.parse(evidenceCanonical),
+      tenant_scope: {
+        organization_id: "org",
+        matter_id: "matter",
+        project_id: "project",
+        chat_id: "chat-1",
+        document_version_id: "version",
+      },
+      input_hashes: ["0".repeat(64), "a".repeat(64), "a".repeat(64)],
+      page_hashes: [
+        JSON.parse(evidenceCanonical).page_hashes[0],
+        {
+          document_id: "doc",
+          document_version_id: "version",
+          page: 2,
+          text_sha256: sha("page-2"),
+        },
+      ],
+      output_hash: sha(output),
+      citation_hashes: [citation, secondCitation].map((item) => ({
+        citation_id: item.citation_id,
+        document_id: item.document_id,
+        document_version_id: item.document_version_id,
+        page: item.page,
+        span: item.span,
+        quote_sha256: item.quote_sha256,
+        finding_sha256: sha(item.finding_text),
+      })),
+    };
+    const canonical = canonicalize(chatBody);
+    const parsedExecution = parseHumanReviewExecution({
+      ...execution,
+      chat_id: "chat-1",
+      evidence_receipt_sha256: sha(canonical),
+      output_text: output,
+      output_sha256: sha(output),
+      citations: [citation, secondCitation],
+    });
+    expect(parsedExecution?.output_text).toBe(output);
+    expect(parsedExecution && sha(parsedExecution.output_text)).toBe(
+      parsedExecution?.output_sha256,
+    );
+    expect(
+      parsedExecution &&
+        parseBoundEvidenceReceipt(
+          {
+            receipt_version: "evidence-v1",
+            canonical_json: canonical,
+            receipt_sha256: sha(canonical),
+          },
+          parsedExecution,
+        ),
+    ).not.toBeNull();
+
+    for (const invalidBody of [
+      {
+        ...chatBody,
+        citation_hashes: [
+          chatBody.citation_hashes[0],
+          chatBody.citation_hashes[0],
+        ],
+      },
+      { ...chatBody, input_hashes: [...chatBody.input_hashes].reverse() },
+      { ...chatBody, page_hashes: [...chatBody.page_hashes].reverse() },
+      { ...chatBody, citation_hashes: [...chatBody.citation_hashes].reverse() },
+    ]) {
+      const invalidCanonical = canonicalize(invalidBody);
+      expect(
+        parsedExecution &&
+          parseBoundEvidenceReceipt(
+            {
+              receipt_version: "evidence-v1",
+              canonical_json: invalidCanonical,
+              receipt_sha256: sha(invalidCanonical),
+            },
+            {
+              ...parsedExecution,
+              evidence_receipt_sha256: sha(invalidCanonical),
+            },
+          ),
+      ).toBeNull();
+    }
+  });
+
+  it("snapshots create identifiers and complete terminal state exactly once", async () => {
+    let reviewIdReads = 0;
+    let createKeyReads = 0;
+    const created = await createHumanReview({
+      ...auth,
+      tenancy_port: tenancy(),
+      resource_scope_port: resources(),
+      get review_id() {
+        reviewIdReads += 1;
+        return reviewIdReads === 1 ? "review-snapshot" : "review-forged";
+      },
+      get idempotency_key() {
+        createKeyReads += 1;
+        return createKeyReads === 1 ? "review:create:snapshot" : "forged";
+      },
+      execution,
+      mutation_port: port(),
+    });
+    expect(created.ok).toBe(true);
+    expect(reviewIdReads).toBe(1);
+    expect(createKeyReads).toBe(1);
+    if (!created.ok) return;
+
+    const decided = await decideHumanReviewItem({
+      ...auth,
+      tenancy_port: tenancy(),
+      resource_scope_port: resources(),
+      idempotency_key: "review:decide:snapshot",
+      review: created.review,
+      item_id: created.review.items[0].item_id,
+      decision: "accepted",
+      mutation_port: port(),
+    });
+    if (!decided.ok) throw new Error("fixture");
+    let terminalReads = 0;
+    const completed = await completeHumanReview({
+      ...auth,
+      tenancy_port: tenancy(),
+      resource_scope_port: resources(),
+      idempotency_key: "review:complete:snapshot",
+      review: decided.review,
+      execution,
+      get terminal_state() {
+        terminalReads += 1;
+        return terminalReads === 1 ? "approved" : "changes_requested";
+      },
+      mutation_port: port(),
+    });
+    expect(completed.ok && completed.review.status).toBe("approved");
+    expect(terminalReads).toBe(1);
+  });
+
   it("rejects forged accepted-state content centrally", () => {
     const forged = {
       review_id: "review-forged",

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { XMLParser, XMLValidator } from "fast-xml-parser";
 import JSZip from "jszip";
 
 import type { AuthenticatedIdentity } from "../identity/authStateMatrix";
@@ -290,13 +291,75 @@ async function validateDocx(value: unknown): Promise<Uint8Array | null> {
       "word/document.xml",
     ];
     let total = 0;
+    const contents: string[] = [];
+    const decoder = new TextDecoder("utf-8", { fatal: true });
     for (const path of required) {
       const entry = zip.file(path);
       if (!entry) return null;
       const content = await entry.async("uint8array");
       total += content.length;
       if (content.length === 0 || total > 5_000_000) return null;
+      const xml = decoder.decode(content);
+      if (XMLValidator.validate(xml) !== true) return null;
+      contents.push(xml);
     }
+    const parser = new XMLParser({
+      ignoreAttributes: false,
+      attributeNamePrefix: "@_",
+      processEntities: false,
+    });
+    const [contentTypes, relationships, document] = contents.map(
+      (xml) => parser.parse(xml) as Record<string, unknown>,
+    );
+    const types = contentTypes.Types;
+    const rels = relationships.Relationships;
+    if (!record(types) || !record(rels)) return null;
+    const overrides = Array.isArray(types.Override)
+      ? types.Override
+      : [types.Override];
+    if (
+      types["@_xmlns"] !==
+        "http://schemas.openxmlformats.org/package/2006/content-types" ||
+      !overrides.some(
+        (item) =>
+          record(item) &&
+          item["@_PartName"] === "/word/document.xml" &&
+          item["@_ContentType"] ===
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+      )
+    )
+      return null;
+    const relationshipEntries = Array.isArray(rels.Relationship)
+      ? rels.Relationship
+      : [rels.Relationship];
+    if (
+      rels["@_xmlns"] !==
+        "http://schemas.openxmlformats.org/package/2006/relationships" ||
+      !relationshipEntries.some(
+        (item) =>
+          record(item) &&
+          item["@_Type"] ===
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" &&
+          item["@_Target"] === "word/document.xml",
+      )
+    )
+      return null;
+    const documentRootName = Object.keys(document).find(
+      (key) => key === "document" || key.endsWith(":document"),
+    );
+    if (!documentRootName) return null;
+    const documentRoot = document[documentRootName];
+    if (!record(documentRoot)) return null;
+    const prefix = documentRootName.includes(":")
+      ? documentRootName.slice(0, documentRootName.indexOf(":"))
+      : null;
+    const namespace =
+      documentRoot[prefix === null ? "@_xmlns" : `@_xmlns:${prefix}`];
+    if (
+      namespace !==
+      "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    )
+      return null;
     return bytes;
   } catch {
     return null;
@@ -370,6 +433,7 @@ export async function produceApprovedReviewReport(input: {
     !Number.isInteger(values.expected_review_revision) ||
     values.expected_review_revision < 1 ||
     values.expected_review_revision !== review.revision ||
+    typeof values.idempotency_key !== "string" ||
     !IDEMPOTENCY_RE.test(values.idempotency_key) ||
     !sameAuthority(review, execution, values.granted_scope) ||
     !parseBoundEvidenceReceipt(values.evidence_receipt, execution) ||

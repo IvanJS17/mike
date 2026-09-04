@@ -241,6 +241,45 @@ const base = {
 };
 
 describe("approved redline bundle", () => {
+  it("rejects coercing idempotency and retains the captured append receiver", async () => {
+    const coerced = await produceApprovedRedlineBundle({
+      ...base,
+      idempotency_key: { toString: () => "redline:coerced" },
+      append_port: appendPort(),
+    } as never);
+    expect(coerced.ok).toBe(false);
+
+    let receiverReads = 0;
+    const expectedReceiver = appendPort();
+    const otherReceiver = appendPort();
+    const append = vi.fn(async function (
+      this: ApprovedRedlineAppendPort,
+      bundle,
+    ) {
+      if (this !== expectedReceiver) throw new Error("wrong receiver");
+      return {
+        disposition: "applied",
+        review_id: bundle.review_id,
+        review_revision: bundle.review_revision,
+        execution_id: bundle.execution_id,
+        bundle_sha256: bundle.bundle_sha256,
+        action_count: bundle.actions.length,
+        idempotency_key: bundle.idempotency_key,
+      };
+    });
+    expectedReceiver.append = append;
+    const result = await produceApprovedRedlineBundle({
+      ...base,
+      get append_port() {
+        receiverReads += 1;
+        return receiverReads === 1 ? expectedReceiver : otherReceiver;
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(receiverReads).toBe(1);
+    expect(append).toHaveBeenCalledTimes(1);
+  });
+
   it("builds deterministic deeply frozen actions with exact source/span/before/replacement hashes and no rejected content", async () => {
     const first = await produceApprovedRedlineBundle({
       ...base,

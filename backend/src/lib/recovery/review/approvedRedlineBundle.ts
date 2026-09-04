@@ -371,38 +371,67 @@ export async function produceApprovedRedlineBundle(input: {
     }
   | ApprovedRedlineFailure
 > {
-  let revision: number;
-  let expectedReviewRevision: number;
-  let idempotencyKey: string;
-  let appendMethod: ApprovedRedlineAppendPort["append"];
+  let values;
   try {
-    revision = input.revision;
-    expectedReviewRevision = input.expected_review_revision;
-    idempotencyKey = input.idempotency_key;
-    appendMethod = input.append_port.append;
+    const {
+      identity,
+      granted_scope,
+      tenancy_port,
+      resource_scope_port,
+      requires_mfa,
+      idempotency_key,
+      revision,
+      expected_review_revision,
+      review: rawReview,
+      execution: rawExecution,
+      evidence_receipt,
+      source_version,
+      pages: rawPages,
+      append_port,
+    } = input;
+    const append = append_port?.append;
+    values = {
+      identity,
+      granted_scope,
+      tenancy_port,
+      resource_scope_port,
+      requires_mfa,
+      idempotency_key,
+      revision,
+      expected_review_revision,
+      rawReview,
+      rawExecution,
+      evidence_receipt,
+      source_version,
+      rawPages,
+      append_port,
+      append,
+    };
   } catch {
     return failure("invalid_approved_redline");
   }
-  const review = parseHumanReview(input.review);
-  const execution = parseHumanReviewExecution(input.execution);
+  const review = parseHumanReview(values.rawReview);
+  const execution = parseHumanReviewExecution(values.rawExecution);
   if (
     !review ||
     !execution ||
-    !Number.isInteger(revision) ||
-    revision < 1 ||
-    !Number.isInteger(expectedReviewRevision) ||
-    expectedReviewRevision < 1 ||
-    expectedReviewRevision !== review.revision ||
-    !IDEMPOTENCY_RE.test(idempotencyKey) ||
-    !sameAuthority(review, execution, input.granted_scope) ||
-    !parseBoundEvidenceReceipt(input.evidence_receipt, execution) ||
-    !validSource(input.source_version, execution) ||
-    !input.append_port ||
-    !input.resource_scope_port ||
-    typeof appendMethod !== "function"
+    !Number.isInteger(values.revision) ||
+    values.revision < 1 ||
+    !Number.isInteger(values.expected_review_revision) ||
+    values.expected_review_revision < 1 ||
+    values.expected_review_revision !== review.revision ||
+    typeof values.idempotency_key !== "string" ||
+    !IDEMPOTENCY_RE.test(values.idempotency_key) ||
+    !sameAuthority(review, execution, values.granted_scope) ||
+    !parseBoundEvidenceReceipt(values.evidence_receipt, execution) ||
+    !validSource(values.source_version, execution) ||
+    !values.append_port ||
+    !values.resource_scope_port ||
+    typeof values.append !== "function"
   )
     return failure("invalid_approved_redline");
-  const pages = parsePages(input.pages, execution);
+  const revision = values.revision as number;
+  const pages = parsePages(values.rawPages, execution);
   if (!pages) return failure("invalid_approved_redline");
   const actions = buildActions(review, pages, revision);
   if (!actions) return failure("invalid_approved_redline");
@@ -432,14 +461,14 @@ export async function produceApprovedRedlineBundle(input: {
   } as ApprovedRedlineBundle);
   const append = deepFreeze({
     ...bundle,
-    idempotency_key: idempotencyKey,
+    idempotency_key: values.idempotency_key,
   });
   let fresh;
   try {
-    fresh = await recheckFreshAccessViaPort(input.tenancy_port, {
-      scope: input.granted_scope,
-      identity: input.identity,
-      requiresMfa: input.requires_mfa,
+    fresh = await recheckFreshAccessViaPort(values.tenancy_port, {
+      scope: values.granted_scope,
+      identity: values.identity,
+      requiresMfa: values.requires_mfa,
     });
   } catch {
     return failure("authorization_dependency_failed");
@@ -449,7 +478,7 @@ export async function produceApprovedRedlineBundle(input: {
   if (!fresh.result.fresh)
     return failure("approved_redline_authorization_failed");
   const resource = await recheckHumanReviewResourceScope(
-    input.resource_scope_port,
+    values.resource_scope_port,
     review,
   );
   if (resource === "dependency_failed")
@@ -459,7 +488,7 @@ export async function produceApprovedRedlineBundle(input: {
   let receipt: ApprovedRedlineAppendReceipt | null;
   try {
     receipt = parseAppendReceipt(
-      await appendMethod.call(input.append_port, append),
+      await values.append.call(values.append_port, append),
       append,
     );
   } catch {

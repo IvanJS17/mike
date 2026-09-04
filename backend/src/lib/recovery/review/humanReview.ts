@@ -39,6 +39,7 @@ export type HumanReviewScope = {
 export type HumanReviewExecution = HumanReviewScope & {
   execution_id: string;
   author_user_id: string;
+  chat_id?: string;
   status: "succeeded";
   evidence_receipt_sha256: string;
   output_text: string;
@@ -122,6 +123,7 @@ const EXECUTION_KEYS = [
   "output_sha256",
   "citations",
 ] as const;
+const EXECUTION_CHAT_KEYS = [...EXECUTION_KEYS, "chat_id"] as const;
 const REVIEW_KEYS = [
   "review_id",
   "revision",
@@ -341,7 +343,14 @@ export function parseHumanReviewExecution(
 ): HumanReviewExecution | null {
   try {
     const raw = snapshot(value);
-    if (!record(raw) || !exact(raw, EXECUTION_KEYS)) return null;
+    if (
+      !record(raw) ||
+      !exact(
+        raw,
+        raw.chat_id === undefined ? EXECUTION_KEYS : EXECUTION_CHAT_KEYS,
+      )
+    )
+      return null;
     if (
       !identity(raw.execution_id) ||
       !identity(raw.author_user_id) ||
@@ -349,6 +358,7 @@ export function parseHumanReviewExecution(
       !identity(raw.organization_id) ||
       !identity(raw.matter_id) ||
       !identity(raw.project_id) ||
+      (raw.chat_id !== undefined && !identity(raw.chat_id)) ||
       !identity(raw.document_id) ||
       !identity(raw.document_version_id) ||
       typeof raw.document_content_sha256 !== "string" ||
@@ -387,11 +397,12 @@ export function parseHumanReviewExecution(
       organization_id: raw.organization_id,
       matter_id: raw.matter_id,
       project_id: raw.project_id,
+      ...(raw.chat_id === undefined ? {} : { chat_id: raw.chat_id }),
       document_id: raw.document_id,
       document_version_id: raw.document_version_id,
       document_content_sha256: raw.document_content_sha256,
       evidence_receipt_sha256: raw.evidence_receipt_sha256,
-      output_text: raw.output_text.trim(),
+      output_text: raw.output_text,
       output_sha256: raw.output_sha256,
       citations,
     });
@@ -569,10 +580,17 @@ export function parseBoundEvidenceReceipt(
       typeof body.idempotency_key !== "string" ||
       !IDEMPOTENCY_RE.test(body.idempotency_key) ||
       !record(tenant) ||
-      !exact(tenant, TENANT_SCOPE_KEYS) ||
+      !exact(
+        tenant,
+        tenant.chat_id === undefined
+          ? TENANT_SCOPE_KEYS
+          : [...TENANT_SCOPE_KEYS, "chat_id"],
+      ) ||
       tenant.organization_id !== execution.organization_id ||
       tenant.matter_id !== execution.matter_id ||
       tenant.project_id !== execution.project_id ||
+      tenant.chat_id !== execution.chat_id ||
+      (tenant.chat_id !== undefined && !identity(tenant.chat_id)) ||
       tenant.document_version_id !== execution.document_version_id ||
       !record(route) ||
       !exact(route, ROUTE_KEYS) ||
@@ -596,6 +614,14 @@ export function parseBoundEvidenceReceipt(
       !body.input_hashes.every(
         (hash) => typeof hash === "string" && SHA256_RE.test(hash),
       ) ||
+      !body.input_hashes.every(
+        (hash, index) =>
+          index === 0 ||
+          codeUnitCompare(
+            (body.input_hashes as string[])[index - 1],
+            hash as string,
+          ) <= 0,
+      ) ||
       !body.input_hashes.includes(execution.document_content_sha256) ||
       body.output_hash !== execution.output_sha256 ||
       !Array.isArray(body.page_hashes) ||
@@ -605,6 +631,7 @@ export function parseBoundEvidenceReceipt(
     )
       return null;
     const pageNumbers = new Set<number>();
+    let previousPage = 0;
     for (const page of body.page_hashes) {
       if (
         !record(page) ||
@@ -613,13 +640,17 @@ export function parseBoundEvidenceReceipt(
         page.document_version_id !== execution.document_version_id ||
         !Number.isInteger(page.page) ||
         (page.page as number) < 1 ||
+        (page.page as number) <= previousPage ||
         pageNumbers.has(page.page as number) ||
         typeof page.text_sha256 !== "string" ||
         !SHA256_RE.test(page.text_sha256)
       )
         return null;
       pageNumbers.add(page.page as number);
+      previousPage = page.page as number;
     }
+    const citationIds = new Set<string>();
+    let previousCitationId: string | null = null;
     for (const item of body.citation_hashes) {
       if (!record(item) || !exact(item, CITATION_HASH_KEYS)) return null;
       const citation = execution.citations.find(
@@ -627,6 +658,9 @@ export function parseBoundEvidenceReceipt(
       );
       if (
         !citation ||
+        citationIds.has(citation.citation_id) ||
+        (previousCitationId !== null &&
+          codeUnitCompare(previousCitationId, citation.citation_id) >= 0) ||
         item.document_id !== citation.document_id ||
         item.document_version_id !== citation.document_version_id ||
         item.page !== citation.page ||
@@ -639,6 +673,8 @@ export function parseBoundEvidenceReceipt(
         !pageNumbers.has(citation.page)
       )
         return null;
+      citationIds.add(citation.citation_id);
+      previousCitationId = citation.citation_id;
     }
     if (canonicalize(body) !== raw.canonical_json) return null;
     return deepFreeze(raw as CanonicalEvidenceReceipt);
@@ -770,29 +806,58 @@ export async function createHumanReview(input: {
   | { ok: true; review: HumanReview; receipt: HumanReviewMutationReceipt }
   | HumanReviewFailure
 > {
-  let create: HumanReviewMutationPort["create"];
+  let values;
   try {
-    create = input.mutation_port.create;
+    const {
+      identity: actor,
+      granted_scope,
+      tenancy_port,
+      resource_scope_port,
+      requires_mfa,
+      idempotency_key,
+      review_id,
+      execution: rawExecution,
+      evidence_receipt,
+      mutation_port,
+    } = input;
+    const create = mutation_port?.create;
+    values = {
+      actor,
+      granted_scope,
+      tenancy_port,
+      resource_scope_port,
+      requires_mfa,
+      idempotency_key,
+      review_id,
+      rawExecution,
+      evidence_receipt,
+      mutation_port,
+      create,
+    };
   } catch {
     return failure("invalid_review");
   }
-  const execution = parseHumanReviewExecution(input.execution);
+  const execution = parseHumanReviewExecution(values.rawExecution);
   if (
-    !validMutationContext(input) ||
-    !identity(input.review_id) ||
+    !validMutationContext({
+      identity: values.actor,
+      granted_scope: values.granted_scope,
+      idempotency_key: values.idempotency_key,
+    }) ||
+    !identity(values.review_id) ||
     !execution ||
-    !parseBoundEvidenceReceipt(input.evidence_receipt, execution) ||
-    execution.author_user_id === input.identity.user_id ||
-    execution.organization_id !== input.granted_scope.organization_id ||
-    execution.matter_id !== input.granted_scope.matter_id ||
-    !input.resource_scope_port ||
-    !input.mutation_port ||
-    typeof create !== "function"
+    !parseBoundEvidenceReceipt(values.evidence_receipt, execution) ||
+    execution.author_user_id === values.actor.user_id ||
+    execution.organization_id !== values.granted_scope.organization_id ||
+    execution.matter_id !== values.granted_scope.matter_id ||
+    !values.resource_scope_port ||
+    !values.mutation_port ||
+    typeof values.create !== "function"
   )
     return failure("invalid_review");
   const items = execution.citations.length
     ? execution.citations.map((citation) => ({
-        item_id: `${input.review_id}:${citation.citation_id}`,
+        item_id: `${values.review_id}:${citation.citation_id}`,
         item_key: citation.citation_id,
         original_text: citation.finding_text,
         finding_text: citation.finding_text,
@@ -802,7 +867,7 @@ export async function createHumanReview(input: {
       }))
     : [
         {
-          item_id: `${input.review_id}:finding-1`,
+          item_id: `${values.review_id}:finding-1`,
           item_key: "finding-1",
           original_text: execution.output_text,
           finding_text: execution.output_text,
@@ -812,11 +877,11 @@ export async function createHumanReview(input: {
         },
       ];
   const review = deepFreeze({
-    review_id: input.review_id,
+    review_id: values.review_id,
     revision: 1,
     execution_id: execution.execution_id,
     execution_author_user_id: execution.author_user_id,
-    reviewer_user_id: input.identity.user_id,
+    reviewer_user_id: values.actor.user_id,
     organization_id: execution.organization_id,
     matter_id: execution.matter_id,
     project_id: execution.project_id,
@@ -827,10 +892,15 @@ export async function createHumanReview(input: {
     status: "pending" as const,
     items,
   });
-  const denied = await authorize(input);
+  const denied = await authorize({
+    identity: values.actor,
+    granted_scope: values.granted_scope,
+    tenancy_port: values.tenancy_port,
+    requires_mfa: values.requires_mfa,
+  });
   if (denied) return denied;
   const resource = await recheckHumanReviewResourceScope(
-    input.resource_scope_port,
+    values.resource_scope_port,
     execution,
   );
   if (resource === "dependency_failed")
@@ -838,16 +908,16 @@ export async function createHumanReview(input: {
   if (resource !== "match") return failure("review_authorization_failed");
   let receipt: HumanReviewMutationReceipt | null;
   try {
-    const raw = await create.call(
-      input.mutation_port,
-      deepFreeze({ idempotency_key: input.idempotency_key, review }),
+    const raw = await values.create.call(
+      values.mutation_port,
+      deepFreeze({ idempotency_key: values.idempotency_key, review }),
     );
     receipt = parseReceipt(raw, {
       operation: "create",
       review_id: review.review_id,
       item_id: null,
       revision: review.revision,
-      idempotency_key: input.idempotency_key,
+      idempotency_key: values.idempotency_key,
     });
   } catch {
     receipt = null;
@@ -879,40 +949,78 @@ export async function decideHumanReviewItem(input: {
     }
   | HumanReviewFailure
 > {
-  let decision: HumanReviewDecision;
-  let decide: HumanReviewMutationPort["decide"];
+  let values;
   try {
-    decision = input.decision;
-    decide = input.mutation_port.decide;
+    const {
+      identity: actor,
+      granted_scope,
+      tenancy_port,
+      resource_scope_port,
+      requires_mfa,
+      idempotency_key,
+      review: rawReview,
+      item_id,
+      decision,
+      finding_text,
+      comment,
+      mutation_port,
+    } = input;
+    const decide = mutation_port?.decide;
+    values = {
+      actor,
+      granted_scope,
+      tenancy_port,
+      resource_scope_port,
+      requires_mfa,
+      idempotency_key,
+      rawReview,
+      item_id,
+      decision,
+      finding_text,
+      comment,
+      mutation_port,
+      decide,
+    };
   } catch {
     return failure("invalid_review");
   }
-  const review = parseHumanReview(input.review);
+  const review = parseHumanReview(values.rawReview);
   if (
-    !validMutationContext(input) ||
+    !validMutationContext({
+      identity: values.actor,
+      granted_scope: values.granted_scope,
+      idempotency_key: values.idempotency_key,
+    }) ||
     !review ||
     review.status !== "pending" ||
-    !reviewMatchesScope(review, input.granted_scope) ||
-    review.execution_author_user_id === input.identity.user_id ||
-    !(HUMAN_REVIEW_ITEM_STATUSES as readonly unknown[]).includes(decision) ||
-    decision === ("pending" as HumanReviewDecision) ||
-    !identity(input.item_id) ||
-    !input.mutation_port ||
-    typeof decide !== "function"
+    !reviewMatchesScope(review, values.granted_scope) ||
+    review.execution_author_user_id === values.actor.user_id ||
+    !(HUMAN_REVIEW_ITEM_STATUSES as readonly unknown[]).includes(
+      values.decision,
+    ) ||
+    values.decision === ("pending" as HumanReviewDecision) ||
+    !identity(values.item_id) ||
+    !values.mutation_port ||
+    typeof values.decide !== "function"
   )
     return failure("invalid_review");
-  const before = review.items.find((item) => item.item_id === input.item_id);
+  const decision = values.decision as HumanReviewDecision;
+  const before = review.items.find((item) => item.item_id === values.item_id);
   if (!before) return failure("invalid_review");
   let findingText = before.finding_text;
   if (decision === "edited") {
-    if (!text(input.finding_text)) return failure("invalid_review");
-    findingText = input.finding_text.trim();
-  } else if (input.finding_text !== undefined) return failure("invalid_review");
+    if (!text(values.finding_text)) return failure("invalid_review");
+    findingText = values.finding_text.trim();
+  } else if (values.finding_text !== undefined)
+    return failure("invalid_review");
   let comment: string | null = null;
-  if (input.comment !== undefined && input.comment !== null) {
-    if (typeof input.comment !== "string" || input.comment.length > MAX_COMMENT)
+  if (values.comment !== undefined && values.comment !== null) {
+    if (
+      typeof values.comment !== "string" ||
+      values.comment.length > MAX_COMMENT
+    )
       return failure("invalid_review");
-    comment = input.comment.trim() || null;
+    comment = values.comment.trim() || null;
   }
   const after = deepFreeze({
     ...before,
@@ -929,13 +1037,18 @@ export async function decideHumanReviewItem(input: {
     ...review,
     revision: review.revision + 1,
     items: review.items.map((item) =>
-      item.item_id === input.item_id ? after : item,
+      item.item_id === values.item_id ? after : item,
     ),
   });
-  const denied = await authorize(input);
+  const denied = await authorize({
+    identity: values.actor,
+    granted_scope: values.granted_scope,
+    tenancy_port: values.tenancy_port,
+    requires_mfa: values.requires_mfa,
+  });
   if (denied) return denied;
   const resource = await recheckHumanReviewResourceScope(
-    input.resource_scope_port,
+    values.resource_scope_port,
     review,
   );
   if (resource === "dependency_failed")
@@ -943,10 +1056,10 @@ export async function decideHumanReviewItem(input: {
   if (resource !== "match") return failure("review_authorization_failed");
   let receipt: HumanReviewMutationReceipt | null;
   try {
-    const raw = await decide.call(
-      input.mutation_port,
+    const raw = await values.decide.call(
+      values.mutation_port,
       deepFreeze({
-        idempotency_key: input.idempotency_key,
+        idempotency_key: values.idempotency_key,
         review: next,
         item: after,
         transition,
@@ -957,7 +1070,7 @@ export async function decideHumanReviewItem(input: {
       review_id: next.review_id,
       item_id: after.item_id,
       revision: next.revision,
-      idempotency_key: input.idempotency_key,
+      idempotency_key: values.idempotency_key,
     });
   } catch {
     receipt = null;
@@ -982,31 +1095,60 @@ export async function completeHumanReview(input: {
   | { ok: true; review: HumanReview; receipt: HumanReviewMutationReceipt }
   | HumanReviewFailure
 > {
-  let complete: HumanReviewMutationPort["complete"];
+  let values;
   try {
-    complete = input.mutation_port.complete;
+    const {
+      identity: actor,
+      granted_scope,
+      tenancy_port,
+      resource_scope_port,
+      requires_mfa,
+      idempotency_key,
+      review: rawReview,
+      execution: rawExecution,
+      terminal_state,
+      mutation_port,
+    } = input;
+    const complete = mutation_port?.complete;
+    values = {
+      actor,
+      granted_scope,
+      tenancy_port,
+      resource_scope_port,
+      requires_mfa,
+      idempotency_key,
+      rawReview,
+      rawExecution,
+      terminal_state,
+      mutation_port,
+      complete,
+    };
   } catch {
     return failure("invalid_review");
   }
-  const review = parseHumanReview(input.review);
-  const execution = parseHumanReviewExecution(input.execution);
+  const review = parseHumanReview(values.rawReview);
+  const execution = parseHumanReviewExecution(values.rawExecution);
   if (
-    !validMutationContext(input) ||
+    !validMutationContext({
+      identity: values.actor,
+      granted_scope: values.granted_scope,
+      idempotency_key: values.idempotency_key,
+    }) ||
     !review ||
     !execution ||
     review.status !== "pending" ||
-    !reviewMatchesScope(review, input.granted_scope) ||
+    !reviewMatchesScope(review, values.granted_scope) ||
     !reviewMatchesExecutionEvidence(review, execution) ||
-    review.execution_author_user_id === input.identity.user_id ||
+    review.execution_author_user_id === values.actor.user_id ||
     !(HUMAN_REVIEW_TERMINAL_STATES as readonly unknown[]).includes(
-      input.terminal_state,
+      values.terminal_state,
     ) ||
-    !input.mutation_port ||
-    typeof complete !== "function"
+    !values.mutation_port ||
+    typeof values.complete !== "function"
   )
     return failure("invalid_review");
   if (
-    input.terminal_state === "approved" &&
+    values.terminal_state === "approved" &&
     review.items.some(
       (item) =>
         item.status === "pending" ||
@@ -1017,12 +1159,17 @@ export async function completeHumanReview(input: {
   const next = deepFreeze({
     ...review,
     revision: review.revision + 1,
-    status: input.terminal_state,
+    status: values.terminal_state,
   });
-  const denied = await authorize(input);
+  const denied = await authorize({
+    identity: values.actor,
+    granted_scope: values.granted_scope,
+    tenancy_port: values.tenancy_port,
+    requires_mfa: values.requires_mfa,
+  });
   if (denied) return denied;
   const resource = await recheckHumanReviewResourceScope(
-    input.resource_scope_port,
+    values.resource_scope_port,
     review,
   );
   if (resource === "dependency_failed")
@@ -1030,16 +1177,16 @@ export async function completeHumanReview(input: {
   if (resource !== "match") return failure("review_authorization_failed");
   let receipt: HumanReviewMutationReceipt | null;
   try {
-    const raw = await complete.call(
-      input.mutation_port,
-      deepFreeze({ idempotency_key: input.idempotency_key, review: next }),
+    const raw = await values.complete.call(
+      values.mutation_port,
+      deepFreeze({ idempotency_key: values.idempotency_key, review: next }),
     );
     receipt = parseReceipt(raw, {
       operation: "complete",
       review_id: next.review_id,
       item_id: null,
       revision: next.revision,
-      idempotency_key: input.idempotency_key,
+      idempotency_key: values.idempotency_key,
     });
   } catch {
     receipt = null;
