@@ -99,6 +99,91 @@ describe("fake sender gating", () => {
     }
   });
 
+  it("redacts sender failures instead of throwing raw errors", async () => {
+    const sender = vi.fn(async () => {
+      throw new Error("provider exploded: secret-key-abc");
+    });
+    const result = await executeGovernedProviderCall({
+      user_id: "user-1",
+      route: VALID_ROUTE,
+      credentialPort: portFor(record()),
+      host: "fake",
+      sender,
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: expect.objectContaining({ kind: "provider_sender_failed" }),
+    });
+    expect(JSON.stringify(result)).not.toMatch(
+      /provider exploded|secret-key-abc/,
+    );
+    expect(sender).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a sender that mutates the receipt with the execution secret", async () => {
+    const sender = vi.fn(
+      async ({
+        receipt,
+        provider_api_key,
+      }: {
+        receipt: Record<string, unknown>;
+        provider_api_key: string;
+      }) => {
+        receipt.provider_api_key = provider_api_key;
+        return { text: "fake-output" };
+      },
+    );
+    const result = await executeGovernedProviderCall({
+      user_id: "user-1",
+      route: VALID_ROUTE,
+      credentialPort: portFor(record()),
+      host: "fake",
+      sender,
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: expect.objectContaining({ kind: "provider_sender_failed" }),
+    });
+    expect(JSON.stringify(result)).not.toContain("secret-key-abc");
+  });
+
+  it("detects reflected secrets after JSON escaping", async () => {
+    const escapedSecret = 'secret"key\\line\nnext';
+    const sender = vi.fn(async () => ({ reflected: escapedSecret }));
+    const result = await executeGovernedProviderCall({
+      user_id: "user-1",
+      route: VALID_ROUTE,
+      credentialPort: portFor(record({ provider_api_key: escapedSecret })),
+      host: "fake",
+      sender,
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: expect.objectContaining({ kind: "provider_sender_failed" }),
+    });
+    expect(JSON.stringify(result)).not.toContain("secret");
+  });
+
+  it("detects the execution secret when used as a JSON property name", async () => {
+    const sender = vi.fn(
+      async ({ provider_api_key }: { provider_api_key: string }) => ({
+        [provider_api_key]: true,
+      }),
+    );
+    const result = await executeGovernedProviderCall({
+      user_id: "user-1",
+      route: VALID_ROUTE,
+      credentialPort: portFor(record()),
+      host: "fake",
+      sender,
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: expect.objectContaining({ kind: "provider_sender_failed" }),
+    });
+    expect(JSON.stringify(result)).not.toContain("secret-key-abc");
+  });
+
   it("invokes sender zero times on route drift", async () => {
     const sender = vi.fn(async () => ({ text: "nope" }));
     const result = await executeGovernedProviderCall({
@@ -160,23 +245,49 @@ describe("fake sender gating", () => {
     "generativelanguage.googleapis.com",
     "openrouter.ai",
     "evil-fake.example.com",
-  ])("blocks real host %s before sender", async (host) => {
-    const sender = vi.fn(async () => ({ text: "nope" }));
+  ])(
+    "blocks real host %s before credential lookup or sender",
+    async (host: string) => {
+      const getCredential = vi.fn(async () => record());
+      const sender = vi.fn(async () => ({ text: "nope" }));
+      const result = await executeGovernedProviderCall({
+        user_id: "user-1",
+        route: VALID_ROUTE,
+        credentialPort: { getCredential },
+        host,
+        sender,
+      });
+      expect(result).toEqual({
+        ok: false,
+        error: expect.objectContaining({
+          kind: "real_provider_egress_blocked",
+          host,
+        }),
+      });
+      expect(getCredential).not.toHaveBeenCalled();
+      expect(sender).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects fake sender output that reflects the execution secret", async () => {
+    const sender = vi.fn(
+      async ({ provider_api_key }: { provider_api_key: string }) => ({
+        text: "fake-output",
+        reflected: provider_api_key,
+      }),
+    );
     const result = await executeGovernedProviderCall({
       user_id: "user-1",
       route: VALID_ROUTE,
       credentialPort: portFor(record()),
-      host,
+      host: "fake",
       sender,
     });
     expect(result).toEqual({
       ok: false,
-      error: expect.objectContaining({
-        kind: "real_provider_egress_blocked",
-        host,
-      }),
+      error: expect.objectContaining({ kind: "provider_sender_failed" }),
     });
-    expect(sender).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain("secret-key-abc");
   });
 });
 

@@ -135,10 +135,21 @@ describe("blocker 1: migration targets the exact d9fa8380 LiTT baseline", () => 
     expect(migration).not.toBe("");
     expect(MIGRATION_NAME).toBe("20260831_01_recovery_identity_tenancy.sql");
     expect(migration).toMatch(/^-- Migration date: 2026-08-31\b/m);
-    const existing = execFileSync("git", ["ls-files", "migrations"], {
-      cwd: BACKEND_DIR,
-      encoding: "utf8",
-    })
+    const existing = execFileSync(
+      "git",
+      [
+        "ls-tree",
+        "-r",
+        "--name-only",
+        "d9fa8380e63837b6441cef169cf5ef80dfb55e54",
+        "--",
+        "migrations",
+      ],
+      {
+        cwd: BACKEND_DIR,
+        encoding: "utf8",
+      },
+    )
       .split("\n")
       .filter((line) => line.endsWith(".sql"))
       .map((line) => path.basename(line))

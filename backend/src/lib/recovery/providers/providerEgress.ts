@@ -31,6 +31,7 @@ export type ProviderEgressErrorKind =
   | ExplicitRouteErrorKind
   | CredentialErrorKind
   | "real_provider_egress_blocked"
+  | "provider_sender_failed"
   | "stale_saved_preference";
 
 export type GovernedEgressResult =
@@ -70,8 +71,31 @@ export function resolveProviderEgressTarget(
   };
 }
 
+function containsSecret(value: unknown, secret: string): boolean {
+  if (typeof value === "string") return value.includes(secret);
+  if (Array.isArray(value)) {
+    return value.some((item) => containsSecret(item, secret));
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.entries(value).some(
+      ([key, item]) => key.includes(secret) || containsSecret(item, secret),
+    );
+  }
+  return false;
+}
+
+function senderResultIsSafe(value: unknown, secret: string): boolean {
+  try {
+    const serialized = JSON.stringify(value);
+    if (typeof serialized !== "string") return false;
+    return !containsSecret(JSON.parse(serialized), secret);
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Validate route, resolve the versioned credential, gate egress, then invoke
+ * Validate route, gate egress, resolve the versioned credential, then invoke
  * the fake sender exactly once. Any failure invokes the sender zero times.
  */
 export async function executeGovernedProviderCall(input: {
@@ -87,16 +111,6 @@ export async function executeGovernedProviderCall(input: {
     return { ok: false, error: { ...routeResult.error } };
   }
 
-  const credentialResult = await resolveGovernedCredential({
-    user_id: input.user_id,
-    route: routeResult.route,
-    port: input.credentialPort,
-    expected_credential_version: input.expected_credential_version,
-  });
-  if (!credentialResult.ok) {
-    return { ok: false, error: { ...credentialResult.error } };
-  }
-
   const egress = resolveProviderEgressTarget(input.host);
   if (!egress.allowed) {
     return {
@@ -109,11 +123,42 @@ export async function executeGovernedProviderCall(input: {
     };
   }
 
-  const senderResult = await input.sender({
-    route: { ...routeResult.route },
-    provider_api_key: credentialResult.execution.provider_api_key,
-    receipt: credentialResult.receipt,
+  const credentialResult = await resolveGovernedCredential({
+    user_id: input.user_id,
+    route: routeResult.route,
+    port: input.credentialPort,
+    expected_credential_version: input.expected_credential_version,
   });
+  if (!credentialResult.ok) {
+    return { ok: false, error: { ...credentialResult.error } };
+  }
+
+  const secret = credentialResult.execution.provider_api_key;
+  let senderResult: unknown;
+  try {
+    senderResult = await input.sender({
+      route: { ...routeResult.route },
+      provider_api_key: secret,
+      receipt: credentialResult.receipt,
+    });
+  } catch {
+    return {
+      ok: false,
+      error: {
+        kind: "provider_sender_failed",
+        message: "provider sender is unavailable",
+      },
+    };
+  }
+  if (!senderResultIsSafe(senderResult, secret)) {
+    return {
+      ok: false,
+      error: {
+        kind: "provider_sender_failed",
+        message: "provider sender returned an unsafe result",
+      },
+    };
+  }
   return {
     ok: true,
     host: "fake",

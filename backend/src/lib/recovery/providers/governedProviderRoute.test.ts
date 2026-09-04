@@ -233,7 +233,26 @@ describe("credential exact lookup and failures", () => {
       expect(result.route).toEqual(route);
       expect(result.actual_provider).toBe("claude");
       expect(result.actual_model).toBe("claude-sonnet-5");
+      expect(JSON.stringify(result)).not.toContain("secret-key-abc");
     }
+  });
+
+  it("rejects an invalid direct route before credential lookup", async () => {
+    const getCredential = vi.fn(async () => record());
+    const result = await resolveGovernedCredential({
+      user_id: "user-1",
+      route: {
+        provider: "claude",
+        model: "gpt-5.6-sol",
+        credential_ref: "user-key-1",
+      },
+      port: { getCredential },
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: expect.objectContaining({ kind: "provider_model_mismatch" }),
+    });
+    expect(getCredential).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -407,7 +426,7 @@ describe("router BYOK policy", () => {
 });
 
 describe("secret hygiene and provenance", () => {
-  it("keeps secrets out of receipts, JSON and errors", async () => {
+  it("rejects a record that mixes provider keys with other credential domains", async () => {
     const route = {
       provider: "claude",
       model: "claude-sonnet-5",
@@ -415,7 +434,6 @@ describe("secret hygiene and provenance", () => {
     };
     const { port } = capturingPort(
       record({
-        provider_api_key: "super-secret-xyz",
         oauth_access_token: "oauth-secret",
         oauth_refresh_token: "refresh-secret",
         membership_identity: "member-secret",
@@ -426,24 +444,37 @@ describe("secret hygiene and provenance", () => {
       route,
       port,
     });
+    expect(result).toEqual({
+      ok: false,
+      error: expect.objectContaining({ kind: "credential_wrong_domain" }),
+    });
+    expect(JSON.stringify(result)).not.toMatch(
+      /secret-key-abc|oauth-secret|refresh-secret|member-secret/,
+    );
+  });
+
+  it("keeps a single-domain secret out of receipts and serialized results", async () => {
+    const route = {
+      provider: "claude",
+      model: "claude-sonnet-5",
+      credential_ref: "user-key-1",
+    };
+    const { port } = capturingPort(
+      record({ provider_api_key: "super-secret-xyz" }),
+    );
+    const result = await resolveGovernedCredential({
+      user_id: "user-1",
+      route,
+      port,
+    });
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(JSON.stringify(result.receipt)).not.toContain("super-secret");
-      expect(JSON.stringify(result.receipt)).not.toContain("oauth-secret");
-      expect(JSON.stringify(result.receipt)).not.toContain("refresh-secret");
-      expect(JSON.stringify(result.receipt)).not.toContain("member-secret");
-      expect(Object.keys(result.receipt)).toEqual(
-        expect.arrayContaining([
-          "credential_ref",
-          "source",
-          "version",
-          "provider",
-          "model",
-        ]),
-      );
+      expect(JSON.stringify(result)).not.toContain("super-secret-xyz");
       expect(result.receipt).not.toHaveProperty("provider_api_key");
       expect(result.receipt).not.toHaveProperty("secret");
       expect(result.receipt.route).toEqual(route);
+      expect(Object.isFrozen(result.receipt)).toBe(true);
+      expect(Object.isFrozen(result.receipt.route)).toBe(true);
     }
   });
 });

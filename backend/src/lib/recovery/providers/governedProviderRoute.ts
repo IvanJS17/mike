@@ -111,7 +111,10 @@ export type GovernedCredentialResult =
     }
   | {
       ok: false;
-      error: { kind: CredentialErrorKind; message: string };
+      error: {
+        kind: CredentialErrorKind | ExplicitRouteErrorKind;
+        message: string;
+      };
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -269,6 +272,11 @@ export async function resolveGovernedCredential(input: {
     credential_ref: route.credential_ref,
   };
 
+  const routeResult = resolveExplicitInternal(validRoute);
+  if (!routeResult.ok) {
+    return routeResult;
+  }
+
   let record: GovernedCredentialRecord | null;
   try {
     record = await port.getCredential({
@@ -343,6 +351,16 @@ export async function resolveGovernedCredential(input: {
     );
   }
   if (
+    rec.membership_identity != null ||
+    rec.oauth_access_token != null ||
+    rec.oauth_refresh_token != null
+  ) {
+    return failCredential(
+      "credential_wrong_domain",
+      "credential record mixes separate credential domains",
+    );
+  }
+  if (
     typeof rec.source !== "string" ||
     (rec.source !== "user" && rec.source !== "env")
   ) {
@@ -400,18 +418,28 @@ export async function resolveGovernedCredential(input: {
   }
 
   const secret = (rec.provider_api_key as string).trim();
-  const receipt: GovernedCredentialReceipt = {
+  const receiptRoute = Object.freeze({ ...validRoute });
+  const receipt: GovernedCredentialReceipt = Object.freeze({
     credential_ref: validRoute.credential_ref,
     source,
     version,
     provider: rec.provider as string,
     model: validRoute.model,
     user_id: userId,
-    route: { ...validRoute },
-  };
+    route: receiptRoute,
+  });
+  const execution = {} as { provider_api_key: string };
+  Object.defineProperty(execution, "provider_api_key", {
+    value: secret,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+  Object.freeze(execution);
+
   return {
     ok: true,
-    execution: { provider_api_key: secret },
+    execution,
     receipt,
     route: { ...validRoute },
     actual_provider: validRoute.provider,
