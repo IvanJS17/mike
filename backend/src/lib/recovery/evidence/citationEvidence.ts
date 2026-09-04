@@ -72,6 +72,11 @@ function failure(): CitationFailure {
 function nonEmpty(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
+function canonicalIdentity(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.length > 0 && value.trim() === value
+  );
+}
 function codeUnitCompare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -80,8 +85,8 @@ function parseContext(value: unknown): CitationVerificationContext | null {
   if (
     !record(value) ||
     !exact(value, CONTEXT_KEYS) ||
-    !nonEmpty(value.document_id) ||
-    !nonEmpty(value.document_version_id)
+    !canonicalIdentity(value.document_id) ||
+    !canonicalIdentity(value.document_version_id)
   )
     return null;
   if (
@@ -135,7 +140,7 @@ export function verifyCitationCandidate(
     const start = span.start_char;
     const end = span.end_char;
     if (
-      !nonEmpty(candidate.citation_id) ||
+      !canonicalIdentity(candidate.citation_id) ||
       candidate.document_id !== context.document_id ||
       candidate.document_version_id !== context.document_version_id ||
       !Number.isInteger(candidate.page) ||

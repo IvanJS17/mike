@@ -7,6 +7,7 @@ import {
   buildCanonicalEvidenceReceipt,
   requestEvidenceDeletion,
   type AtomicEvidenceAppendPort,
+  type EvidenceResourceScopePort,
 } from "./appendOnlyEvidence";
 import type { TenancyReadPort } from "../authorization/tenancyReadPort";
 
@@ -87,6 +88,21 @@ const evidence = {
   ],
 };
 
+function verifiedCitation(
+  value: (typeof evidence.citation_candidates)[number],
+) {
+  return {
+    citation_id: value.citation_id,
+    document_id: value.document_id,
+    document_version_id: value.document_version_id,
+    page: value.page,
+    span: value.span,
+    quote_sha256: value.quote_sha256,
+    finding_text: value.finding_text,
+    verified: true as const,
+  };
+}
+
 function tenancy(overrides: Record<string, unknown> = {}): TenancyReadPort {
   return {
     getOrganizationMembership: vi.fn(async () => ({
@@ -112,11 +128,32 @@ function tenancy(overrides: Record<string, unknown> = {}): TenancyReadPort {
   };
 }
 
-function input(port: AtomicEvidenceAppendPort, reads = tenancy()) {
+function resourceScope(
+  overrides: Record<string, unknown> = {},
+): EvidenceResourceScopePort {
+  return {
+    getEvidenceResourceScope: vi.fn(async () => ({
+      organization_id: "org-1",
+      matter_id: "matter-1",
+      project_id: "project-1",
+      document_id: "doc-1",
+      document_version_id: "version-1",
+      document_content_sha256: "a".repeat(64),
+      ...overrides,
+    })),
+  };
+}
+
+function input(
+  port: AtomicEvidenceAppendPort,
+  reads = tenancy(),
+  resources = resourceScope(),
+) {
   return {
     identity,
     granted_scope: scope,
     tenancy_port: reads,
+    resource_scope_port: resources,
     requires_mfa: true,
     idempotency_key: "evidence:execution-1:v1",
     evidence,
@@ -139,15 +176,19 @@ describe("canonical receipt", () => {
       text: "ñ",
       text_sha256: sha("ñ"),
     };
+    const receiptProvenance = {
+      ...provenance,
+      citation_hashes: [sha("jurídico"), sha(quote)],
+    };
     const a = buildCanonicalEvidenceReceipt({
       execution_id: evidence.execution_id,
       idempotency_key: "evidence:execution-1:v1",
-      provenance,
+      provenance: receiptProvenance,
       pages: [page2, evidence.pages[0]],
       output: evidence.output,
       citations: [
-        { ...c2, verified: true as const, finding_text: "Ünico" },
-        { ...evidence.citation_candidates[0], verified: true as const },
+        verifiedCitation({ ...c2, finding_text: "Ünico" }),
+        verifiedCitation(evidence.citation_candidates[0]),
       ],
     });
     const locale = String.prototype.localeCompare;
@@ -156,12 +197,12 @@ describe("canonical receipt", () => {
       const b = buildCanonicalEvidenceReceipt({
         execution_id: evidence.execution_id,
         idempotency_key: "evidence:execution-1:v1",
-        provenance,
+        provenance: receiptProvenance,
         pages: [evidence.pages[0], page2],
         output: evidence.output,
         citations: [
-          { ...evidence.citation_candidates[0], verified: true as const },
-          { ...c2, verified: true as const, finding_text: "Ünico" },
+          verifiedCitation(evidence.citation_candidates[0]),
+          verifiedCitation({ ...c2, finding_text: "Ünico" }),
         ],
       });
       expect(a).toEqual(b);
@@ -170,9 +211,143 @@ describe("canonical receipt", () => {
       String.prototype.localeCompare = locale;
     }
   });
+
+  it("pins finding integrity by hash without storing finding text", () => {
+    const baseCitation = verifiedCitation(evidence.citation_candidates[0]);
+    const changedFinding = "Hallazgo distinto";
+    const first = buildCanonicalEvidenceReceipt({
+      execution_id: evidence.execution_id,
+      idempotency_key: "evidence:execution-1:v1",
+      provenance,
+      pages: evidence.pages,
+      output: evidence.output,
+      citations: [baseCitation],
+    });
+    const second = buildCanonicalEvidenceReceipt({
+      execution_id: evidence.execution_id,
+      idempotency_key: "evidence:execution-1:v1",
+      provenance,
+      pages: evidence.pages,
+      output: evidence.output,
+      citations: [{ ...baseCitation, finding_text: changedFinding }],
+    });
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(first.receipt.receipt_sha256).not.toBe(
+      second.receipt.receipt_sha256,
+    );
+    expect(second.receipt.canonical_json).toContain(sha(changedFinding));
+    expect(second.receipt.canonical_json).not.toContain(changedFinding);
+  });
+
+  it("rejects malformed direct receipt inputs instead of hashing declarations", () => {
+    const base = {
+      execution_id: evidence.execution_id,
+      idempotency_key: "evidence:execution-1:v1",
+      provenance,
+      pages: evidence.pages,
+      output: evidence.output,
+      citations: [verifiedCitation(evidence.citation_candidates[0])],
+    };
+    for (const invalid of [
+      { ...base, output: { ...base.output, output_text: "tampered" } },
+      {
+        ...base,
+        pages: [{ ...base.pages[0], text: "tampered" }],
+      },
+      {
+        ...base,
+        provenance: { ...base.provenance, output_hashes: ["0".repeat(64)] },
+      },
+    ]) {
+      expect(buildCanonicalEvidenceReceipt(invalid)).toEqual({
+        ok: false,
+        error_class: "invalid_evidence_append",
+      });
+    }
+  });
+
+  it("snapshots changing raw receipt getters exactly once before validation", () => {
+    let outputTextReads = 0;
+    const changingOutput = {
+      execution_id: evidence.execution_id,
+      output_sha256: evidence.output.output_sha256,
+    } as Record<string, unknown>;
+    Object.defineProperty(changingOutput, "output_text", {
+      enumerable: true,
+      get() {
+        outputTextReads += 1;
+        return outputTextReads < 3 ? evidence.output.output_text : "tampered";
+      },
+    });
+    const candidate = buildCanonicalEvidenceReceipt({
+      execution_id: evidence.execution_id,
+      idempotency_key: "evidence:execution-1:v1",
+      provenance,
+      pages: evidence.pages,
+      output: changingOutput,
+      citations: [verifiedCitation(evidence.citation_candidates[0])],
+    });
+    const honest = buildCanonicalEvidenceReceipt({
+      execution_id: evidence.execution_id,
+      idempotency_key: "evidence:execution-1:v1",
+      provenance,
+      pages: evidence.pages,
+      output: evidence.output,
+      citations: [verifiedCitation(evidence.citation_candidates[0])],
+    });
+
+    expect(outputTextReads).toBe(1);
+    expect(candidate).toEqual(honest);
+    expect(candidate.ok).toBe(true);
+  });
 });
 
 describe("atomic append boundary", () => {
+  it.each([
+    [
+      "execution id",
+      {
+        ...evidence,
+        execution_id: " execution-1",
+        output: { ...evidence.output, execution_id: " execution-1" },
+      },
+    ],
+    [
+      "document id",
+      {
+        ...evidence,
+        pages: [{ ...evidence.pages[0], document_id: "doc-1 " }],
+        citation_candidates: [
+          { ...evidence.citation_candidates[0], document_id: "doc-1 " },
+        ],
+      },
+    ],
+  ])(
+    "rejects whitespace alias in %s before append",
+    async (_label: string, aliased: unknown) => {
+      const append = vi.fn(
+        async (batch: Parameters<AtomicEvidenceAppendPort["append"]>[0]) => ({
+          disposition: "applied",
+          idempotency_key: batch.idempotency_key,
+          execution_id: batch.execution.execution_id,
+          receipt_sha256: batch.receipt.receipt_sha256,
+          counts: { pages: 1, outputs: 1, citations: 1 },
+        }),
+      );
+      const result = await appendEvidenceAtomically({
+        ...input({ append }),
+        evidence: aliased,
+      });
+      expect(result).toEqual({
+        ok: false,
+        error_class: "invalid_evidence_append",
+      });
+      expect(append).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(["applied", "replayed"] as const)(
     "accepts exact %s receipt with one append",
     async (disposition) => {
@@ -214,6 +389,74 @@ describe("atomic append boundary", () => {
       false,
     );
     expect(append).not.toHaveBeenCalled();
+  });
+
+  it("rejects internally consistent foreign resource scope with zero append", async () => {
+    const append = vi.fn();
+    const foreignVersion = "version-foreign";
+    const foreignDocument = "doc-foreign";
+    const foreignProject = "project-foreign";
+    const foreignEvidence = {
+      ...evidence,
+      provenance: {
+        ...provenance,
+        tenant_scope: {
+          ...provenance.tenant_scope,
+          project_id: foreignProject,
+          document_version_id: foreignVersion,
+        },
+      },
+      pages: [
+        {
+          ...evidence.pages[0],
+          document_id: foreignDocument,
+          document_version_id: foreignVersion,
+        },
+      ],
+      citation_candidates: [
+        {
+          ...evidence.citation_candidates[0],
+          document_id: foreignDocument,
+          document_version_id: foreignVersion,
+        },
+      ],
+    };
+    const request = input(
+      { append },
+      tenancy(),
+      resourceScope({
+        organization_id: "org-foreign",
+        matter_id: "matter-foreign",
+        project_id: foreignProject,
+        document_id: foreignDocument,
+        document_version_id: foreignVersion,
+      }),
+    );
+    request.evidence = foreignEvidence;
+    expect(await appendEvidenceAtomically(request)).toEqual({
+      ok: false,
+      error_class: "evidence_authorization_failed",
+    });
+    expect(append).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on malformed or throwing resource scope readback", async () => {
+    for (const resources of [
+      { getEvidenceResourceScope: vi.fn(async () => ({ nope: true })) },
+      {
+        getEvidenceResourceScope: vi.fn(async () => {
+          throw new Error("raw SECRET scope failure");
+        }),
+      },
+    ]) {
+      const append = vi.fn();
+      const result = await appendEvidenceAtomically(
+        input({ append }, tenancy(), resources),
+      );
+      expect(result.ok).toBe(false);
+      expect(JSON.stringify(result)).not.toContain("SECRET");
+      expect(append).not.toHaveBeenCalled();
+    }
   });
 
   it("MFA and dependency failures cause zero append", async () => {
@@ -262,6 +505,20 @@ describe("atomic append boundary", () => {
         status: "active",
       };
     });
+    const resources = resourceScope();
+    vi.mocked(resources.getEvidenceResourceScope).mockImplementation(
+      async () => {
+        order.push("resourceScope");
+        return {
+          organization_id: "org-1",
+          matter_id: "matter-1",
+          project_id: "project-1",
+          document_id: "doc-1",
+          document_version_id: "version-1",
+          document_content_sha256: "a".repeat(64),
+        };
+      },
+    );
     const append = vi.fn(async (batch) => {
       order.push("append");
       return {
@@ -272,12 +529,15 @@ describe("atomic append boundary", () => {
         counts: { pages: 1, outputs: 1, citations: 1 },
       };
     });
-    const result = await appendEvidenceAtomically(input({ append }, reads));
+    const result = await appendEvidenceAtomically(
+      input({ append }, reads, resources),
+    );
     expect(result.ok).toBe(true);
     expect(order).toEqual([
       "membership",
       "matter",
       "matterMembership",
+      "resourceScope",
       "append",
     ]);
     const invalid = input({ append }, reads);
@@ -313,6 +573,55 @@ describe("atomic append boundary", () => {
       expect(append).toHaveBeenCalledTimes(1);
     },
   );
+
+  it("snapshots hostile port receipts once and catches getters opaquely", async () => {
+    const throwing = vi.fn(
+      async (batch: Parameters<AtomicEvidenceAppendPort["append"]>[0]) => {
+        const receipt: Record<string, unknown> = {
+          idempotency_key: batch.idempotency_key,
+          execution_id: batch.execution.execution_id,
+          receipt_sha256: batch.receipt.receipt_sha256,
+          counts: { pages: 1, outputs: 1, citations: 1 },
+        };
+        Object.defineProperty(receipt, "disposition", {
+          enumerable: true,
+          get: () => {
+            throw new Error("raw SECRET getter");
+          },
+        });
+        return receipt;
+      },
+    );
+    await expect(
+      appendEvidenceAtomically(input({ append: throwing })),
+    ).resolves.toEqual({
+      ok: false,
+      error_class: "evidence_append_failed",
+    });
+
+    let reads = 0;
+    const changing = vi.fn(
+      async (batch: Parameters<AtomicEvidenceAppendPort["append"]>[0]) => {
+        const receipt: Record<string, unknown> = {
+          idempotency_key: batch.idempotency_key,
+          execution_id: batch.execution.execution_id,
+          receipt_sha256: batch.receipt.receipt_sha256,
+          counts: { pages: 1, outputs: 1, citations: 1 },
+        };
+        Object.defineProperty(receipt, "disposition", {
+          enumerable: true,
+          get: () => (++reads === 1 ? "applied" : "replayed"),
+        });
+        return receipt;
+      },
+    );
+    const result = await appendEvidenceAtomically(input({ append: changing }));
+    expect(result).toMatchObject({
+      ok: true,
+      receipt: { disposition: "applied" },
+    });
+    expect(reads).toBe(1);
+  });
 
   it("rejects every mismatched receipt identity/count without retry", async () => {
     for (const changed of [

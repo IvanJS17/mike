@@ -85,6 +85,24 @@ describe("citation verifier", () => {
     expect(JSON.stringify(result)).not.toContain("SECRET");
   });
 
+  it("rejects whitespace aliases for citation and scope identities", () => {
+    expect(
+      verifyCitationCandidate({ ...candidate, citation_id: " c-1" }, context),
+    ).toEqual(failure);
+    expect(
+      verifyCitationCandidate(
+        { ...candidate, document_id: " doc-1" },
+        { ...context, document_id: " doc-1" },
+      ),
+    ).toEqual(failure);
+    expect(
+      verifyCitationCandidate(
+        { ...candidate, document_version_id: "version-1 " },
+        { ...context, document_version_id: "version-1 " },
+      ),
+    ).toEqual(failure);
+  });
+
   it("sorts deterministically by code units and rejects duplicate ids atomically", () => {
     const z = { ...candidate, citation_id: "z" };
     const upper = { ...candidate, citation_id: "A" };
