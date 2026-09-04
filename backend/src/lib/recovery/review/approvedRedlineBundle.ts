@@ -9,10 +9,13 @@ import {
 import {
   parseHumanReview,
   parseHumanReviewExecution,
+  parseBoundEvidenceReceipt,
+  recheckHumanReviewResourceScope,
   reviewMatchesExecutionEvidence,
   type HumanReview,
   type HumanReviewExecution,
 } from "./humanReview";
+import type { EvidenceResourceScopePort } from "../evidence/appendOnlyEvidence";
 
 export type ApprovedRedlineAction = {
   action_id: string;
@@ -92,11 +95,7 @@ const PAGE_KEYS = [
   "content",
   "content_sha256",
 ] as const;
-const EVIDENCE_RECEIPT_KEYS = [
-  "receipt_version",
-  "canonical_json",
-  "receipt_sha256",
-] as const;
+
 const APPEND_RECEIPT_KEYS = [
   "disposition",
   "review_id",
@@ -194,34 +193,7 @@ function sameAuthority(
     review.items.every((item) => item.status !== "pending")
   );
 }
-function validEvidenceReceipt(
-  value: unknown,
-  execution: HumanReviewExecution,
-): boolean {
-  try {
-    const raw = snapshot(value);
-    if (
-      !record(raw) ||
-      !exact(raw, EVIDENCE_RECEIPT_KEYS) ||
-      raw.receipt_version !== "evidence-v1" ||
-      typeof raw.canonical_json !== "string" ||
-      typeof raw.receipt_sha256 !== "string" ||
-      !SHA256_RE.test(raw.receipt_sha256) ||
-      sha256(raw.canonical_json) !== raw.receipt_sha256 ||
-      raw.receipt_sha256 !== execution.evidence_receipt_sha256
-    )
-      return false;
-    const body = JSON.parse(raw.canonical_json) as unknown;
-    return (
-      record(body) &&
-      body.receipt_version === "evidence-v1" &&
-      body.execution_id === execution.execution_id &&
-      canonical(body) === raw.canonical_json
-    );
-  } catch {
-    return false;
-  }
-}
+
 function parsePages(
   value: unknown,
   execution: HumanReviewExecution,
@@ -380,10 +352,11 @@ export async function produceApprovedRedlineBundle(input: {
   identity: AuthenticatedIdentity;
   granted_scope: AuthorizationScope;
   tenancy_port: TenancyReadPort;
+  resource_scope_port: EvidenceResourceScopePort;
   requires_mfa: boolean;
   idempotency_key: string;
   revision: number;
-  expected_review_revision?: number;
+  expected_review_revision: number;
   review: unknown;
   execution: unknown;
   evidence_receipt: unknown;
@@ -398,30 +371,44 @@ export async function produceApprovedRedlineBundle(input: {
     }
   | ApprovedRedlineFailure
 > {
+  let revision: number;
+  let expectedReviewRevision: number;
+  let idempotencyKey: string;
+  let appendMethod: ApprovedRedlineAppendPort["append"];
+  try {
+    revision = input.revision;
+    expectedReviewRevision = input.expected_review_revision;
+    idempotencyKey = input.idempotency_key;
+    appendMethod = input.append_port.append;
+  } catch {
+    return failure("invalid_approved_redline");
+  }
   const review = parseHumanReview(input.review);
   const execution = parseHumanReviewExecution(input.execution);
   if (
     !review ||
     !execution ||
-    !Number.isInteger(input.revision) ||
-    input.revision < 1 ||
-    !IDEMPOTENCY_RE.test(input.idempotency_key) ||
-    (input.expected_review_revision !== undefined &&
-      input.expected_review_revision !== review.revision) ||
+    !Number.isInteger(revision) ||
+    revision < 1 ||
+    !Number.isInteger(expectedReviewRevision) ||
+    expectedReviewRevision < 1 ||
+    expectedReviewRevision !== review.revision ||
+    !IDEMPOTENCY_RE.test(idempotencyKey) ||
     !sameAuthority(review, execution, input.granted_scope) ||
-    !validEvidenceReceipt(input.evidence_receipt, execution) ||
+    !parseBoundEvidenceReceipt(input.evidence_receipt, execution) ||
     !validSource(input.source_version, execution) ||
     !input.append_port ||
-    typeof input.append_port.append !== "function"
+    !input.resource_scope_port ||
+    typeof appendMethod !== "function"
   )
     return failure("invalid_approved_redline");
   const pages = parsePages(input.pages, execution);
   if (!pages) return failure("invalid_approved_redline");
-  const actions = buildActions(review, pages, input.revision);
+  const actions = buildActions(review, pages, revision);
   if (!actions) return failure("invalid_approved_redline");
   const canonicalBody = {
     bundle_version: "approved-redline-v1",
-    revision: input.revision,
+    revision,
     review_id: review.review_id,
     review_revision: review.revision,
     execution_id: review.execution_id,
@@ -445,7 +432,7 @@ export async function produceApprovedRedlineBundle(input: {
   } as ApprovedRedlineBundle);
   const append = deepFreeze({
     ...bundle,
-    idempotency_key: input.idempotency_key,
+    idempotency_key: idempotencyKey,
   });
   let fresh;
   try {
@@ -461,10 +448,18 @@ export async function produceApprovedRedlineBundle(input: {
     return failure("authorization_dependency_failed");
   if (!fresh.result.fresh)
     return failure("approved_redline_authorization_failed");
+  const resource = await recheckHumanReviewResourceScope(
+    input.resource_scope_port,
+    review,
+  );
+  if (resource === "dependency_failed")
+    return failure("authorization_dependency_failed");
+  if (resource !== "match")
+    return failure("approved_redline_authorization_failed");
   let receipt: ApprovedRedlineAppendReceipt | null;
   try {
     receipt = parseAppendReceipt(
-      await input.append_port.append(append),
+      await appendMethod.call(input.append_port, append),
       append,
     );
   } catch {

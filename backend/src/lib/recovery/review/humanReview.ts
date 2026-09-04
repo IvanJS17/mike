@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { AuthenticatedIdentity } from "../identity/authStateMatrix";
 import type { AuthorizationScope } from "../authorization/evaluateAccess";
 import {
@@ -5,6 +7,11 @@ import {
   type TenancyReadPort,
 } from "../authorization/tenancyReadPort";
 import type { VerifiedCitation } from "../evidence/citationEvidence";
+import type {
+  CanonicalEvidenceReceipt,
+  EvidenceResourceScope,
+  EvidenceResourceScopePort,
+} from "../evidence/appendOnlyEvidence";
 
 export const HUMAN_REVIEW_ITEM_STATUSES = [
   "pending",
@@ -35,6 +42,7 @@ export type HumanReviewExecution = HumanReviewScope & {
   status: "succeeded";
   evidence_receipt_sha256: string;
   output_text: string;
+  output_sha256: string;
   citations: readonly VerifiedCitation[];
 };
 export type HumanReviewItem = {
@@ -111,6 +119,7 @@ const EXECUTION_KEYS = [
   "document_content_sha256",
   "evidence_receipt_sha256",
   "output_text",
+  "output_sha256",
   "citations",
 ] as const;
 const REVIEW_KEYS = [
@@ -149,6 +158,64 @@ const CITATION_KEYS = [
   "verified",
 ] as const;
 const SPAN_KEYS = ["start_char", "end_char"] as const;
+const EVIDENCE_RECEIPT_KEYS = [
+  "receipt_version",
+  "canonical_json",
+  "receipt_sha256",
+] as const;
+const EVIDENCE_BODY_KEYS = [
+  "receipt_version",
+  "idempotency_key",
+  "execution_id",
+  "tenant_scope",
+  "route",
+  "workflow",
+  "status",
+  "input_hashes",
+  "page_hashes",
+  "output_hash",
+  "citation_hashes",
+] as const;
+const TENANT_SCOPE_KEYS = [
+  "organization_id",
+  "matter_id",
+  "project_id",
+  "document_version_id",
+] as const;
+const ROUTE_KEYS = ["provider", "model", "credential_ref"] as const;
+const WORKFLOW_KEYS = [
+  "workflow_key",
+  "version",
+  "content_hash",
+  "source_commit",
+  "distribution",
+  "type",
+  "source",
+  "approval_provenance",
+] as const;
+const PAGE_HASH_KEYS = [
+  "document_id",
+  "document_version_id",
+  "page",
+  "text_sha256",
+] as const;
+const CITATION_HASH_KEYS = [
+  "citation_id",
+  "document_id",
+  "document_version_id",
+  "page",
+  "span",
+  "quote_sha256",
+  "finding_sha256",
+] as const;
+const RESOURCE_SCOPE_KEYS = [
+  "organization_id",
+  "matter_id",
+  "project_id",
+  "document_id",
+  "document_version_id",
+  "document_content_sha256",
+] as const;
 const RECEIPT_KEYS = [
   "disposition",
   "operation",
@@ -221,6 +288,17 @@ function failure(
 function codeUnitCompare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+function canonicalize(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalize).join(",")}]`;
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => codeUnitCompare(left, right))
+    .map(([key, item]) => `${JSON.stringify(key)}:${canonicalize(item)}`)
+    .join(",")}}`;
+}
 
 function parseCitation(value: unknown): VerifiedCitation | null {
   if (!record(value) || !exact(value, CITATION_KEYS)) return null;
@@ -278,6 +356,9 @@ export function parseHumanReviewExecution(
       typeof raw.evidence_receipt_sha256 !== "string" ||
       !SHA256_RE.test(raw.evidence_receipt_sha256) ||
       !text(raw.output_text) ||
+      typeof raw.output_sha256 !== "string" ||
+      !SHA256_RE.test(raw.output_sha256) ||
+      sha256(raw.output_text) !== raw.output_sha256 ||
       !Array.isArray(raw.citations) ||
       raw.citations.length > MAX_ITEMS
     )
@@ -311,6 +392,7 @@ export function parseHumanReviewExecution(
       document_content_sha256: raw.document_content_sha256,
       evidence_receipt_sha256: raw.evidence_receipt_sha256,
       output_text: raw.output_text.trim(),
+      output_sha256: raw.output_sha256,
       citations,
     });
   } catch {
@@ -336,6 +418,8 @@ function parseItem(value: unknown): HumanReviewItem | null {
         value.comment.length <= MAX_COMMENT)
     )
   )
+    return null;
+  if (value.status !== "edited" && value.finding_text !== value.original_text)
     return null;
   const citation =
     value.citation === null ? null : parseCitation(value.citation);
@@ -457,10 +541,144 @@ function executionMatchesReview(
   );
 }
 
+export function parseBoundEvidenceReceipt(
+  value: unknown,
+  execution: HumanReviewExecution,
+): Readonly<CanonicalEvidenceReceipt> | null {
+  try {
+    const raw = snapshot(value);
+    if (!record(raw) || !exact(raw, EVIDENCE_RECEIPT_KEYS)) return null;
+    if (
+      raw.receipt_version !== "evidence-v1" ||
+      typeof raw.canonical_json !== "string" ||
+      typeof raw.receipt_sha256 !== "string" ||
+      !SHA256_RE.test(raw.receipt_sha256) ||
+      sha256(raw.canonical_json) !== raw.receipt_sha256 ||
+      raw.receipt_sha256 !== execution.evidence_receipt_sha256
+    )
+      return null;
+    const body = JSON.parse(raw.canonical_json) as unknown;
+    if (!record(body) || !exact(body, EVIDENCE_BODY_KEYS)) return null;
+    const tenant = body.tenant_scope;
+    const route = body.route;
+    const workflow = body.workflow;
+    if (
+      body.receipt_version !== "evidence-v1" ||
+      body.execution_id !== execution.execution_id ||
+      body.status !== "completed" ||
+      typeof body.idempotency_key !== "string" ||
+      !IDEMPOTENCY_RE.test(body.idempotency_key) ||
+      !record(tenant) ||
+      !exact(tenant, TENANT_SCOPE_KEYS) ||
+      tenant.organization_id !== execution.organization_id ||
+      tenant.matter_id !== execution.matter_id ||
+      tenant.project_id !== execution.project_id ||
+      tenant.document_version_id !== execution.document_version_id ||
+      !record(route) ||
+      !exact(route, ROUTE_KEYS) ||
+      !identity(route.provider) ||
+      !identity(route.model) ||
+      !identity(route.credential_ref) ||
+      !record(workflow) ||
+      !exact(workflow, WORKFLOW_KEYS) ||
+      !identity(workflow.workflow_key) ||
+      !identity(workflow.version) ||
+      typeof workflow.content_hash !== "string" ||
+      !SHA256_RE.test(workflow.content_hash) ||
+      typeof workflow.source_commit !== "string" ||
+      !/^[0-9a-f]{40}$/.test(workflow.source_commit) ||
+      (workflow.distribution !== "default" &&
+        workflow.distribution !== "addon") ||
+      (workflow.type !== "assistant" && workflow.type !== "tabular") ||
+      !identity(workflow.source) ||
+      !identity(workflow.approval_provenance) ||
+      !Array.isArray(body.input_hashes) ||
+      !body.input_hashes.every(
+        (hash) => typeof hash === "string" && SHA256_RE.test(hash),
+      ) ||
+      !body.input_hashes.includes(execution.document_content_sha256) ||
+      body.output_hash !== execution.output_sha256 ||
+      !Array.isArray(body.page_hashes) ||
+      body.page_hashes.length === 0 ||
+      !Array.isArray(body.citation_hashes) ||
+      body.citation_hashes.length !== execution.citations.length
+    )
+      return null;
+    const pageNumbers = new Set<number>();
+    for (const page of body.page_hashes) {
+      if (
+        !record(page) ||
+        !exact(page, PAGE_HASH_KEYS) ||
+        page.document_id !== execution.document_id ||
+        page.document_version_id !== execution.document_version_id ||
+        !Number.isInteger(page.page) ||
+        (page.page as number) < 1 ||
+        pageNumbers.has(page.page as number) ||
+        typeof page.text_sha256 !== "string" ||
+        !SHA256_RE.test(page.text_sha256)
+      )
+        return null;
+      pageNumbers.add(page.page as number);
+    }
+    for (const item of body.citation_hashes) {
+      if (!record(item) || !exact(item, CITATION_HASH_KEYS)) return null;
+      const citation = execution.citations.find(
+        (candidate) => candidate.citation_id === item.citation_id,
+      );
+      if (
+        !citation ||
+        item.document_id !== citation.document_id ||
+        item.document_version_id !== citation.document_version_id ||
+        item.page !== citation.page ||
+        !record(item.span) ||
+        !exact(item.span, SPAN_KEYS) ||
+        item.span.start_char !== citation.span.start_char ||
+        item.span.end_char !== citation.span.end_char ||
+        item.quote_sha256 !== citation.quote_sha256 ||
+        item.finding_sha256 !== sha256(citation.finding_text) ||
+        !pageNumbers.has(citation.page)
+      )
+        return null;
+    }
+    if (canonicalize(body) !== raw.canonical_json) return null;
+    return deepFreeze(raw as CanonicalEvidenceReceipt);
+  } catch {
+    return null;
+  }
+}
+
+export async function recheckHumanReviewResourceScope(
+  port: EvidenceResourceScopePort,
+  expected: HumanReviewScope,
+): Promise<"match" | "mismatch" | "dependency_failed"> {
+  try {
+    const method = port.getEvidenceResourceScope;
+    if (typeof method !== "function") return "dependency_failed";
+    const raw = snapshot(
+      await method.call(port, {
+        document_version_id: expected.document_version_id,
+      }),
+    );
+    if (!record(raw) || !exact(raw, RESOURCE_SCOPE_KEYS)) return "mismatch";
+    for (const key of RESOURCE_SCOPE_KEYS)
+      if (raw[key] !== expected[key]) return "mismatch";
+    return "match";
+  } catch {
+    return "dependency_failed";
+  }
+}
+
 export function reviewMatchesExecutionEvidence(
   review: HumanReview,
   execution: HumanReviewExecution,
 ): boolean {
+  if (
+    review.items.some(
+      (item) =>
+        item.status !== "edited" && item.finding_text !== item.original_text,
+    )
+  )
+    return false;
   if (!executionMatchesReview(execution, review)) return false;
   if (execution.citations.length === 0) {
     return (
@@ -541,25 +759,35 @@ export async function createHumanReview(input: {
   identity: AuthenticatedIdentity;
   granted_scope: AuthorizationScope;
   tenancy_port: TenancyReadPort;
+  resource_scope_port: EvidenceResourceScopePort;
   requires_mfa: boolean;
   idempotency_key: string;
   review_id: string;
   execution: unknown;
+  evidence_receipt: unknown;
   mutation_port: HumanReviewMutationPort;
 }): Promise<
   | { ok: true; review: HumanReview; receipt: HumanReviewMutationReceipt }
   | HumanReviewFailure
 > {
+  let create: HumanReviewMutationPort["create"];
+  try {
+    create = input.mutation_port.create;
+  } catch {
+    return failure("invalid_review");
+  }
   const execution = parseHumanReviewExecution(input.execution);
   if (
     !validMutationContext(input) ||
     !identity(input.review_id) ||
     !execution ||
+    !parseBoundEvidenceReceipt(input.evidence_receipt, execution) ||
     execution.author_user_id === input.identity.user_id ||
     execution.organization_id !== input.granted_scope.organization_id ||
     execution.matter_id !== input.granted_scope.matter_id ||
+    !input.resource_scope_port ||
     !input.mutation_port ||
-    typeof input.mutation_port.create !== "function"
+    typeof create !== "function"
   )
     return failure("invalid_review");
   const items = execution.citations.length
@@ -601,9 +829,17 @@ export async function createHumanReview(input: {
   });
   const denied = await authorize(input);
   if (denied) return denied;
+  const resource = await recheckHumanReviewResourceScope(
+    input.resource_scope_port,
+    execution,
+  );
+  if (resource === "dependency_failed")
+    return failure("authorization_dependency_failed");
+  if (resource !== "match") return failure("review_authorization_failed");
   let receipt: HumanReviewMutationReceipt | null;
   try {
-    const raw = await input.mutation_port.create(
+    const raw = await create.call(
+      input.mutation_port,
       deepFreeze({ idempotency_key: input.idempotency_key, review }),
     );
     receipt = parseReceipt(raw, {
@@ -625,6 +861,7 @@ export async function decideHumanReviewItem(input: {
   identity: AuthenticatedIdentity;
   granted_scope: AuthorizationScope;
   tenancy_port: TenancyReadPort;
+  resource_scope_port: EvidenceResourceScopePort;
   requires_mfa: boolean;
   idempotency_key: string;
   review: unknown;
@@ -642,6 +879,14 @@ export async function decideHumanReviewItem(input: {
     }
   | HumanReviewFailure
 > {
+  let decision: HumanReviewDecision;
+  let decide: HumanReviewMutationPort["decide"];
+  try {
+    decision = input.decision;
+    decide = input.mutation_port.decide;
+  } catch {
+    return failure("invalid_review");
+  }
   const review = parseHumanReview(input.review);
   if (
     !validMutationContext(input) ||
@@ -649,19 +894,17 @@ export async function decideHumanReviewItem(input: {
     review.status !== "pending" ||
     !reviewMatchesScope(review, input.granted_scope) ||
     review.execution_author_user_id === input.identity.user_id ||
-    !(HUMAN_REVIEW_ITEM_STATUSES as readonly unknown[]).includes(
-      input.decision,
-    ) ||
-    input.decision === ("pending" as HumanReviewDecision) ||
+    !(HUMAN_REVIEW_ITEM_STATUSES as readonly unknown[]).includes(decision) ||
+    decision === ("pending" as HumanReviewDecision) ||
     !identity(input.item_id) ||
     !input.mutation_port ||
-    typeof input.mutation_port.decide !== "function"
+    typeof decide !== "function"
   )
     return failure("invalid_review");
   const before = review.items.find((item) => item.item_id === input.item_id);
   if (!before) return failure("invalid_review");
   let findingText = before.finding_text;
-  if (input.decision === "edited") {
+  if (decision === "edited") {
     if (!text(input.finding_text)) return failure("invalid_review");
     findingText = input.finding_text.trim();
   } else if (input.finding_text !== undefined) return failure("invalid_review");
@@ -673,12 +916,12 @@ export async function decideHumanReviewItem(input: {
   }
   const after = deepFreeze({
     ...before,
-    status: input.decision,
+    status: decision,
     finding_text: findingText,
     comment,
   });
   const transition = deepFreeze({
-    decision: input.decision,
+    decision,
     before,
     after,
   });
@@ -691,9 +934,17 @@ export async function decideHumanReviewItem(input: {
   });
   const denied = await authorize(input);
   if (denied) return denied;
+  const resource = await recheckHumanReviewResourceScope(
+    input.resource_scope_port,
+    review,
+  );
+  if (resource === "dependency_failed")
+    return failure("authorization_dependency_failed");
+  if (resource !== "match") return failure("review_authorization_failed");
   let receipt: HumanReviewMutationReceipt | null;
   try {
-    const raw = await input.mutation_port.decide(
+    const raw = await decide.call(
+      input.mutation_port,
       deepFreeze({
         idempotency_key: input.idempotency_key,
         review: next,
@@ -720,6 +971,7 @@ export async function completeHumanReview(input: {
   identity: AuthenticatedIdentity;
   granted_scope: AuthorizationScope;
   tenancy_port: TenancyReadPort;
+  resource_scope_port: EvidenceResourceScopePort;
   requires_mfa: boolean;
   idempotency_key: string;
   review: unknown;
@@ -730,6 +982,12 @@ export async function completeHumanReview(input: {
   | { ok: true; review: HumanReview; receipt: HumanReviewMutationReceipt }
   | HumanReviewFailure
 > {
+  let complete: HumanReviewMutationPort["complete"];
+  try {
+    complete = input.mutation_port.complete;
+  } catch {
+    return failure("invalid_review");
+  }
   const review = parseHumanReview(input.review);
   const execution = parseHumanReviewExecution(input.execution);
   if (
@@ -744,7 +1002,7 @@ export async function completeHumanReview(input: {
       input.terminal_state,
     ) ||
     !input.mutation_port ||
-    typeof input.mutation_port.complete !== "function"
+    typeof complete !== "function"
   )
     return failure("invalid_review");
   if (
@@ -763,9 +1021,17 @@ export async function completeHumanReview(input: {
   });
   const denied = await authorize(input);
   if (denied) return denied;
+  const resource = await recheckHumanReviewResourceScope(
+    input.resource_scope_port,
+    review,
+  );
+  if (resource === "dependency_failed")
+    return failure("authorization_dependency_failed");
+  if (resource !== "match") return failure("review_authorization_failed");
   let receipt: HumanReviewMutationReceipt | null;
   try {
-    const raw = await input.mutation_port.complete(
+    const raw = await complete.call(
+      input.mutation_port,
       deepFreeze({ idempotency_key: input.idempotency_key, review: next }),
     );
     receipt = parseReceipt(raw, {

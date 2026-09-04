@@ -6,11 +6,74 @@ import {
   type ApprovedRedlineAppendPort,
 } from "./approvedRedlineBundle";
 import type { TenancyReadPort } from "../authorization/tenancyReadPort";
+import type { EvidenceResourceScopePort } from "../evidence/appendOnlyEvidence";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
+const canonicalize = (value: unknown): string => {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalize).join(",")}]`;
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([key, item]) => `${JSON.stringify(key)}:${canonicalize(item)}`)
+    .join(",")}}`;
+};
 const pageText = "Árbol contrato cláusula";
-const canonical =
-  '{"execution_id":"execution","receipt_version":"evidence-v1"}';
+const outputText = "SECRET output";
+const outputSha = sha(outputText);
+const receiptBody = {
+  receipt_version: "evidence-v1",
+  idempotency_key: "evidence:execution:v1",
+  execution_id: "execution",
+  tenant_scope: {
+    organization_id: "org",
+    matter_id: "matter",
+    project_id: "project",
+    document_version_id: "version",
+  },
+  route: { provider: "openai", model: "gpt-5.6-sol", credential_ref: "key-v2" },
+  workflow: {
+    workflow_key: "civil-commercial-mx-triage",
+    version: "0.1.0",
+    content_hash: "c".repeat(64),
+    source_commit: "d".repeat(40),
+    distribution: "addon",
+    type: "assistant",
+    source: "playbook.md",
+    approval_provenance: "approved",
+  },
+  status: "completed",
+  input_hashes: ["a".repeat(64)],
+  page_hashes: [
+    {
+      document_id: "doc",
+      document_version_id: "version",
+      page: 1,
+      text_sha256: sha(pageText),
+    },
+  ],
+  output_hash: outputSha,
+  citation_hashes: [
+    {
+      citation_id: "c-1",
+      document_id: "doc",
+      document_version_id: "version",
+      page: 1,
+      span: { start_char: 0, end_char: 5 },
+      quote_sha256: sha("Árbol"),
+      finding_sha256: sha("Original"),
+    },
+    {
+      citation_id: "c-r",
+      document_id: "doc",
+      document_version_id: "version",
+      page: 1,
+      span: { start_char: 6, end_char: 14 },
+      quote_sha256: sha("contrato"),
+      finding_sha256: sha("Original"),
+    },
+  ],
+};
+const canonical = canonicalize(receiptBody);
 const receiptHash = sha(canonical);
 const citation = {
   citation_id: "c-1",
@@ -73,7 +136,8 @@ const execution = {
   document_version_id: "version",
   document_content_sha256: "a".repeat(64),
   evidence_receipt_sha256: receiptHash,
-  output_text: "SECRET output",
+  output_text: outputText,
+  output_sha256: outputSha,
   citations: review.items.map((item) => item.citation),
 };
 const evidenceReceipt = {
@@ -128,6 +192,21 @@ function tenancy(overrides: Record<string, unknown> = {}): TenancyReadPort {
     })),
   };
 }
+function resources(
+  overrides: Record<string, unknown> = {},
+): EvidenceResourceScopePort {
+  return {
+    getEvidenceResourceScope: vi.fn(async () => ({
+      organization_id: "org",
+      matter_id: "matter",
+      project_id: "project",
+      document_id: "doc",
+      document_version_id: "version",
+      document_content_sha256: "a".repeat(64),
+      ...overrides,
+    })),
+  };
+}
 function appendPort(): ApprovedRedlineAppendPort {
   return {
     append: vi.fn(async (bundle) => ({
@@ -145,9 +224,11 @@ const base = {
   identity,
   granted_scope: scope,
   tenancy_port: tenancy(),
+  resource_scope_port: resources(),
   requires_mfa: true,
   idempotency_key: "redline:review:4",
   revision: 1,
+  expected_review_revision: 4,
   review,
   execution,
   evidence_receipt: evidenceReceipt,

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import JSZip from "jszip";
 
 import type { AuthenticatedIdentity } from "../identity/authStateMatrix";
 import type { AuthorizationScope } from "../authorization/evaluateAccess";
@@ -9,10 +10,13 @@ import {
 import {
   parseHumanReview,
   parseHumanReviewExecution,
+  parseBoundEvidenceReceipt,
+  recheckHumanReviewResourceScope,
   reviewMatchesExecutionEvidence,
   type HumanReview,
   type HumanReviewExecution,
 } from "./humanReview";
+import type { EvidenceResourceScopePort } from "../evidence/appendOnlyEvidence";
 
 export const APPROVED_REVIEW_REPORT_FILENAME =
   "Informe de revision humana.docx" as const;
@@ -90,11 +94,6 @@ export type ApprovedReportFailure = {
 
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const IDEMPOTENCY_RE = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/;
-const RECEIPT_KEYS = [
-  "receipt_version",
-  "canonical_json",
-  "receipt_sha256",
-] as const;
 const APPEND_RECEIPT_KEYS = [
   "disposition",
   "review_id",
@@ -160,14 +159,7 @@ function sha256(value: string | Uint8Array): string {
 function codeUnitCompare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
-function canonicalize(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalize).join(",")}]`;
-  return `{${Object.entries(value as Record<string, unknown>)
-    .sort(([left], [right]) => codeUnitCompare(left, right))
-    .map(([key, item]) => `${JSON.stringify(key)}:${canonicalize(item)}`)
-    .join(",")}}`;
-}
+
 function failure(
   error_class: ApprovedReportFailure["error_class"],
 ): ApprovedReportFailure {
@@ -195,35 +187,6 @@ function sameAuthority(
     reviewMatchesExecutionEvidence(review, execution) &&
     review.items.every((item) => item.status !== "pending")
   );
-}
-function parseEvidenceReceipt(
-  value: unknown,
-  execution: HumanReviewExecution,
-): { receipt_sha256: string } | null {
-  try {
-    const raw = snapshot(value);
-    if (!record(raw) || !exact(raw, RECEIPT_KEYS)) return null;
-    if (
-      raw.receipt_version !== "evidence-v1" ||
-      typeof raw.canonical_json !== "string" ||
-      typeof raw.receipt_sha256 !== "string" ||
-      !SHA256_RE.test(raw.receipt_sha256) ||
-      sha256(raw.canonical_json) !== raw.receipt_sha256 ||
-      raw.receipt_sha256 !== execution.evidence_receipt_sha256
-    )
-      return null;
-    const body = JSON.parse(raw.canonical_json) as unknown;
-    if (
-      !record(body) ||
-      body.receipt_version !== "evidence-v1" ||
-      body.execution_id !== execution.execution_id ||
-      canonicalize(body) !== raw.canonical_json
-    )
-      return null;
-    return { receipt_sha256: raw.receipt_sha256 };
-  } catch {
-    return null;
-  }
 }
 function buildPlan(review: HumanReview): ApprovedReviewReportPlan | null {
   const retained = review.items
@@ -311,12 +274,43 @@ function parseAppendReceipt(
   }
 }
 
+async function validateDocx(value: unknown): Promise<Uint8Array | null> {
+  try {
+    const bytes = snapshot(value);
+    if (
+      !(bytes instanceof Uint8Array) ||
+      bytes.length === 0 ||
+      bytes.length > 25_000_000
+    )
+      return null;
+    const zip = await JSZip.loadAsync(bytes);
+    const required = [
+      "[Content_Types].xml",
+      "_rels/.rels",
+      "word/document.xml",
+    ];
+    let total = 0;
+    for (const path of required) {
+      const entry = zip.file(path);
+      if (!entry) return null;
+      const content = await entry.async("uint8array");
+      total += content.length;
+      if (content.length === 0 || total > 5_000_000) return null;
+    }
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
 export async function produceApprovedReviewReport(input: {
   identity: AuthenticatedIdentity;
   granted_scope: AuthorizationScope;
   tenancy_port: TenancyReadPort;
+  resource_scope_port: EvidenceResourceScopePort;
   requires_mfa: boolean;
   idempotency_key: string;
+  expected_review_revision: number;
   review: unknown;
   execution: unknown;
   evidence_receipt: unknown;
@@ -331,41 +325,94 @@ export async function produceApprovedReviewReport(input: {
     }
   | ApprovedReportFailure
 > {
-  const review = parseHumanReview(input.review);
-  const execution = parseHumanReviewExecution(input.execution);
+  let values;
+  try {
+    const {
+      identity,
+      granted_scope,
+      tenancy_port,
+      resource_scope_port,
+      requires_mfa,
+      idempotency_key,
+      expected_review_revision,
+      review: rawReview,
+      execution: rawExecution,
+      evidence_receipt,
+      renderer,
+      append_port,
+    } = input;
+    const render = renderer?.render;
+    const append = append_port?.append;
+    values = {
+      identity,
+      granted_scope,
+      tenancy_port,
+      resource_scope_port,
+      requires_mfa,
+      idempotency_key,
+      expected_review_revision,
+      rawReview,
+      rawExecution,
+      evidence_receipt,
+      renderer,
+      render,
+      append_port,
+      append,
+    };
+  } catch {
+    return failure("invalid_approved_report");
+  }
+  const review = parseHumanReview(values.rawReview);
+  const execution = parseHumanReviewExecution(values.rawExecution);
   if (
     !review ||
     !execution ||
-    !IDEMPOTENCY_RE.test(input.idempotency_key) ||
-    !sameAuthority(review, execution, input.granted_scope) ||
-    !parseEvidenceReceipt(input.evidence_receipt, execution) ||
-    !input.renderer ||
-    typeof input.renderer.render !== "function" ||
-    !input.append_port ||
-    typeof input.append_port.append !== "function"
+    !Number.isInteger(values.expected_review_revision) ||
+    values.expected_review_revision < 1 ||
+    values.expected_review_revision !== review.revision ||
+    !IDEMPOTENCY_RE.test(values.idempotency_key) ||
+    !sameAuthority(review, execution, values.granted_scope) ||
+    !parseBoundEvidenceReceipt(values.evidence_receipt, execution) ||
+    !values.resource_scope_port ||
+    typeof values.render !== "function" ||
+    typeof values.append !== "function"
   )
     return failure("invalid_approved_report");
   const plan = buildPlan(review);
   if (!plan) return failure("invalid_approved_report");
-  let bytes: Uint8Array;
+  let fresh;
   try {
-    const raw = await input.renderer.render(plan);
-    const snapped = snapshot(raw);
-    if (
-      !(snapped instanceof Uint8Array) ||
-      snapped.length < 3 ||
-      snapped[0] !== 0x50 ||
-      snapped[1] !== 0x4b
-    )
-      return failure("approved_report_render_failed");
-    bytes = snapped;
+    fresh = await recheckFreshAccessViaPort(values.tenancy_port, {
+      scope: values.granted_scope,
+      identity: values.identity,
+      requiresMfa: values.requires_mfa,
+    });
   } catch {
-    return failure("approved_report_render_failed");
+    return failure("authorization_dependency_failed");
   }
+  if (fresh.kind === "authorization_dependency_failed")
+    return failure("authorization_dependency_failed");
+  if (!fresh.result.fresh)
+    return failure("approved_report_authorization_failed");
+  const resource = await recheckHumanReviewResourceScope(
+    values.resource_scope_port,
+    review,
+  );
+  if (resource === "dependency_failed")
+    return failure("authorization_dependency_failed");
+  if (resource !== "match")
+    return failure("approved_report_authorization_failed");
+  let bytes: Uint8Array | null;
+  try {
+    bytes = await validateDocx(await values.render.call(values.renderer, plan));
+  } catch {
+    bytes = null;
+  }
+  if (!bytes) return failure("approved_report_render_failed");
   const artifact = deepFreeze({
-    idempotency_key: input.idempotency_key,
+    idempotency_key: values.idempotency_key,
     review_id: review.review_id,
-    review_revision: review.revision,
+    review_revision: values.expected_review_revision,
     execution_id: execution.execution_id,
     organization_id: review.organization_id,
     matter_id: review.matter_id,
@@ -379,24 +426,10 @@ export async function produceApprovedReviewReport(input: {
     artifact_sha256: sha256(bytes),
     docx_bytes: bytes,
   });
-  let fresh;
-  try {
-    fresh = await recheckFreshAccessViaPort(input.tenancy_port, {
-      scope: input.granted_scope,
-      identity: input.identity,
-      requiresMfa: input.requires_mfa,
-    });
-  } catch {
-    return failure("authorization_dependency_failed");
-  }
-  if (fresh.kind === "authorization_dependency_failed")
-    return failure("authorization_dependency_failed");
-  if (!fresh.result.fresh)
-    return failure("approved_report_authorization_failed");
   let receipt: ApprovedArtifactAppendReceipt | null;
   try {
     receipt = parseAppendReceipt(
-      await input.append_port.append(artifact),
+      await values.append.call(values.append_port, artifact),
       artifact,
     );
   } catch {
