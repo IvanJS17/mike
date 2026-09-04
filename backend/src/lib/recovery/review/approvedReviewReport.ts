@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
-import JSZip from "jszip";
+import JSZip, { type JSZipObject } from "jszip";
 
 import type { AuthenticatedIdentity } from "../identity/authStateMatrix";
 import type { AuthorizationScope } from "../authorization/evaluateAccess";
@@ -275,6 +275,17 @@ function parseAppendReceipt(
   }
 }
 
+function declaredEntrySize(entry: JSZipObject): number | null {
+  const data = (
+    entry as JSZipObject & {
+      _data?: { uncompressedSize?: unknown };
+    }
+  )._data;
+  return typeof data?.uncompressedSize === "number"
+    ? data.uncompressedSize
+    : null;
+}
+
 async function validateDocx(value: unknown): Promise<Uint8Array | null> {
   try {
     const bytes = snapshot(value);
@@ -290,15 +301,36 @@ async function validateDocx(value: unknown): Promise<Uint8Array | null> {
       "_rels/.rels",
       "word/document.xml",
     ];
-    let total = 0;
-    const contents: string[] = [];
-    const decoder = new TextDecoder("utf-8", { fatal: true });
+    let declaredTotal = 0;
+    const entries: JSZipObject[] = [];
     for (const path of required) {
       const entry = zip.file(path);
       if (!entry) return null;
+      const size = declaredEntrySize(entry);
+      if (
+        size === null ||
+        !Number.isFinite(size) ||
+        !Number.isInteger(size) ||
+        size <= 0 ||
+        size > 5_000_000
+      )
+        return null;
+      declaredTotal += size;
+      if (declaredTotal > 5_000_000) return null;
+      entries.push(entry);
+    }
+    let total = 0;
+    const contents: string[] = [];
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    for (const entry of entries) {
       const content = await entry.async("uint8array");
       total += content.length;
-      if (content.length === 0 || total > 5_000_000) return null;
+      if (
+        content.length === 0 ||
+        content.length > 5_000_000 ||
+        total > 5_000_000
+      )
+        return null;
       const xml = decoder.decode(content);
       if (XMLValidator.validate(xml) !== true) return null;
       contents.push(xml);

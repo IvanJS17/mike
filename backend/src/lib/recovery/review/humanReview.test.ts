@@ -254,17 +254,21 @@ describe("human review", () => {
     expect(parsedExecution && sha(parsedExecution.output_text)).toBe(
       parsedExecution?.output_sha256,
     );
-    expect(
+    const boundReceipt =
       parsedExecution &&
-        parseBoundEvidenceReceipt(
-          {
-            receipt_version: "evidence-v1",
-            canonical_json: canonical,
-            receipt_sha256: sha(canonical),
-          },
-          parsedExecution,
-        ),
-    ).not.toBeNull();
+      parseBoundEvidenceReceipt(
+        {
+          receipt_version: "evidence-v1",
+          canonical_json: canonical,
+          receipt_sha256: sha(canonical),
+        },
+        parsedExecution,
+      );
+    expect(boundReceipt).not.toBeNull();
+    expect(boundReceipt?.receipt_sha256).toBe(sha(canonical));
+    expect(boundReceipt?.page_hashes).toEqual(chatBody.page_hashes);
+    expect(Object.isFrozen(boundReceipt?.page_hashes)).toBe(true);
+    expect(Object.isFrozen(boundReceipt?.page_hashes[0])).toBe(true);
 
     for (const invalidBody of [
       {
@@ -543,6 +547,62 @@ describe("human review", () => {
         })
       ).ok,
     ).toBe(false);
+  });
+
+  it("round-trips repeated decisions with canonical accepted/rejected text and explicit edits", async () => {
+    const writes = port();
+    const created = await createHumanReview({
+      ...auth,
+      tenancy_port: tenancy(),
+      idempotency_key: "review:create:redecision",
+      review_id: "review-redecision",
+      execution,
+      mutation_port: writes,
+    });
+    if (!created.ok) throw new Error("fixture");
+    const edited = await decideHumanReviewItem({
+      ...auth,
+      tenancy_port: tenancy(),
+      idempotency_key: "review:decide:edited",
+      review: created.review,
+      item_id: created.review.items[0].item_id,
+      decision: "edited",
+      finding_text: "Explicit replacement",
+      mutation_port: writes,
+    });
+    if (!edited.ok) throw new Error("fixture");
+
+    for (const decision of ["accepted", "rejected"] as const) {
+      const terminalDecision = await decideHumanReviewItem({
+        ...auth,
+        tenancy_port: tenancy(),
+        idempotency_key: `review:decide:${decision}`,
+        review: edited.review,
+        item_id: edited.review.items[0].item_id,
+        decision,
+        mutation_port: writes,
+      });
+      expect(terminalDecision.ok).toBe(true);
+      if (!terminalDecision.ok) continue;
+      expect(terminalDecision.review.items[0].finding_text).toBe("Original");
+      expect(parseHumanReview(terminalDecision.review)).not.toBeNull();
+
+      const reedited = await decideHumanReviewItem({
+        ...auth,
+        tenancy_port: tenancy(),
+        idempotency_key: `review:decide:${decision}:edited`,
+        review: terminalDecision.review,
+        item_id: terminalDecision.review.items[0].item_id,
+        decision: "edited",
+        finding_text: `Explicit ${decision} replacement`,
+        mutation_port: writes,
+      });
+      expect(reedited.ok).toBe(true);
+      if (reedited.ok)
+        expect(reedited.review.items[0].finding_text).toBe(
+          `Explicit ${decision} replacement`,
+        );
+    }
   });
 
   it("approves only fully resolved exact verified state; changes_requested is terminal but not approval authority", async () => {

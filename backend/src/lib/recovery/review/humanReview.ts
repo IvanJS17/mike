@@ -46,6 +46,15 @@ export type HumanReviewExecution = HumanReviewScope & {
   output_sha256: string;
   citations: readonly VerifiedCitation[];
 };
+export type BoundEvidencePageHash = {
+  document_id: string;
+  document_version_id: string;
+  page: number;
+  text_sha256: string;
+};
+export type BoundEvidenceReceipt = Readonly<CanonicalEvidenceReceipt> & {
+  readonly page_hashes: readonly Readonly<BoundEvidencePageHash>[];
+};
 export type HumanReviewItem = {
   item_id: string;
   item_key: string;
@@ -555,7 +564,7 @@ function executionMatchesReview(
 export function parseBoundEvidenceReceipt(
   value: unknown,
   execution: HumanReviewExecution,
-): Readonly<CanonicalEvidenceReceipt> | null {
+): BoundEvidenceReceipt | null {
   try {
     const raw = snapshot(value);
     if (!record(raw) || !exact(raw, EVIDENCE_RECEIPT_KEYS)) return null;
@@ -677,7 +686,17 @@ export function parseBoundEvidenceReceipt(
       previousCitationId = citation.citation_id;
     }
     if (canonicalize(body) !== raw.canonical_json) return null;
-    return deepFreeze(raw as CanonicalEvidenceReceipt);
+    return deepFreeze({
+      ...(raw as CanonicalEvidenceReceipt),
+      page_hashes: (body.page_hashes as BoundEvidencePageHash[]).map(
+        (page) => ({
+          document_id: page.document_id,
+          document_version_id: page.document_version_id,
+          page: page.page,
+          text_sha256: page.text_sha256,
+        }),
+      ),
+    });
   } catch {
     return null;
   }
@@ -1007,7 +1026,7 @@ export async function decideHumanReviewItem(input: {
   const decision = values.decision as HumanReviewDecision;
   const before = review.items.find((item) => item.item_id === values.item_id);
   if (!before) return failure("invalid_review");
-  let findingText = before.finding_text;
+  let findingText = before.original_text;
   if (decision === "edited") {
     if (!text(values.finding_text)) return failure("invalid_review");
     findingText = values.finding_text.trim();
@@ -1022,23 +1041,26 @@ export async function decideHumanReviewItem(input: {
       return failure("invalid_review");
     comment = values.comment.trim() || null;
   }
-  const after = deepFreeze({
+  const candidateAfter = {
     ...before,
     status: decision,
     finding_text: findingText,
     comment,
+  };
+  const next = parseHumanReview({
+    ...review,
+    revision: review.revision + 1,
+    items: review.items.map((item) =>
+      item.item_id === values.item_id ? candidateAfter : item,
+    ),
   });
+  if (!next) return failure("invalid_review");
+  const after = next.items.find((item) => item.item_id === values.item_id);
+  if (!after) return failure("invalid_review");
   const transition = deepFreeze({
     decision,
     before,
     after,
-  });
-  const next = deepFreeze({
-    ...review,
-    revision: review.revision + 1,
-    items: review.items.map((item) =>
-      item.item_id === values.item_id ? after : item,
-    ),
   });
   const denied = await authorize({
     identity: values.actor,

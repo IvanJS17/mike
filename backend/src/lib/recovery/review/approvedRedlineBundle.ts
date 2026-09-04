@@ -12,6 +12,7 @@ import {
   parseBoundEvidenceReceipt,
   recheckHumanReviewResourceScope,
   reviewMatchesExecutionEvidence,
+  type BoundEvidencePageHash,
   type HumanReview,
   type HumanReviewExecution,
 } from "./humanReview";
@@ -197,6 +198,7 @@ function sameAuthority(
 function parsePages(
   value: unknown,
   execution: HumanReviewExecution,
+  receiptPages: readonly BoundEvidencePageHash[],
 ): SourcePage[] | null {
   try {
     const raw = snapshot(value);
@@ -229,6 +231,19 @@ function parsePages(
       });
     }
     pages.sort((left, right) => left.page - right.page);
+    if (
+      pages.length !== receiptPages.length ||
+      pages.some((page, index) => {
+        const expected = receiptPages[index];
+        return (
+          page.document_id !== expected.document_id ||
+          page.document_version_id !== expected.document_version_id ||
+          page.page !== expected.page ||
+          page.content_sha256 !== expected.text_sha256
+        );
+      })
+    )
+      return null;
     return pages;
   } catch {
     return null;
@@ -412,6 +427,9 @@ export async function produceApprovedRedlineBundle(input: {
   }
   const review = parseHumanReview(values.rawReview);
   const execution = parseHumanReviewExecution(values.rawExecution);
+  const evidenceReceipt = execution
+    ? parseBoundEvidenceReceipt(values.evidence_receipt, execution)
+    : null;
   if (
     !review ||
     !execution ||
@@ -423,7 +441,7 @@ export async function produceApprovedRedlineBundle(input: {
     typeof values.idempotency_key !== "string" ||
     !IDEMPOTENCY_RE.test(values.idempotency_key) ||
     !sameAuthority(review, execution, values.granted_scope) ||
-    !parseBoundEvidenceReceipt(values.evidence_receipt, execution) ||
+    !evidenceReceipt ||
     !validSource(values.source_version, execution) ||
     !values.append_port ||
     !values.resource_scope_port ||
@@ -431,7 +449,11 @@ export async function produceApprovedRedlineBundle(input: {
   )
     return failure("invalid_approved_redline");
   const revision = values.revision as number;
-  const pages = parsePages(values.rawPages, execution);
+  const pages = parsePages(
+    values.rawPages,
+    execution,
+    evidenceReceipt.page_hashes,
+  );
   if (!pages) return failure("invalid_approved_redline");
   const actions = buildActions(review, pages, revision);
   if (!actions) return failure("invalid_approved_redline");

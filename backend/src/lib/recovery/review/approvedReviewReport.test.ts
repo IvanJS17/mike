@@ -273,6 +273,57 @@ describe("approved review report", () => {
     }
   });
 
+  it("rejects oversized declared DOCX entries before inflating them", async () => {
+    const xml = {
+      "[Content_Types].xml":
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+      "_rels/.rels":
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+      "word/document.xml":
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>',
+    };
+    const entries = Object.fromEntries(
+      Object.entries(xml).map(([path, content]) => {
+        const bytes = new TextEncoder().encode(content);
+        return [
+          path,
+          {
+            _data: {
+              uncompressedSize:
+                path === "word/document.xml" ? 5_000_001 : bytes.length,
+            },
+            async: vi.fn(async () => bytes),
+          },
+        ];
+      }),
+    );
+    const load = vi.spyOn(JSZip, "loadAsync").mockResolvedValue({
+      file: (path: string) => entries[path] ?? null,
+    } as never);
+    const append = vi.fn();
+    try {
+      const result = await produceApprovedReviewReport({
+        identity,
+        granted_scope: scope,
+        tenancy_port: tenancy(),
+        resource_scope_port: resources(),
+        requires_mfa: true,
+        idempotency_key: "report:declared-size",
+        expected_review_revision: 4,
+        review,
+        execution,
+        evidence_receipt: evidenceReceipt,
+        renderer: { render: vi.fn(async () => Uint8Array.from([0x50, 0x4b])) },
+        append_port: { append },
+      });
+      expect(result.ok).toBe(false);
+      expect(entries["word/document.xml"].async).not.toHaveBeenCalled();
+      expect(append).not.toHaveBeenCalled();
+    } finally {
+      load.mockRestore();
+    }
+  });
+
   it("fails closed before render for scope drift, revocation, fake evidence and missing revision", async () => {
     const safeReview = {
       ...review,

@@ -347,6 +347,43 @@ describe("approved redline bundle", () => {
     }
   });
 
+  it("rejects altered, omitted, or extra pages against receipt hashes before resource checks", async () => {
+    const variants = [
+      [
+        {
+          ...pages[0],
+          content: `${pageText} alterado fuera de la cita`,
+          content_sha256: sha(`${pageText} alterado fuera de la cita`),
+        },
+      ],
+      [],
+      [
+        ...pages,
+        {
+          document_id: "doc",
+          document_version_id: "version",
+          page: 2,
+          content: "extra",
+          content_sha256: sha("extra"),
+        },
+      ],
+    ];
+    for (const [index, candidatePages] of variants.entries()) {
+      const resource = resources();
+      const append = vi.fn();
+      const result = await produceApprovedRedlineBundle({
+        ...base,
+        idempotency_key: `redline:page-bind:${index}`,
+        resource_scope_port: resource,
+        pages: candidatePages,
+        append_port: { append },
+      });
+      expect(result.ok).toBe(false);
+      expect(resource.getEvidenceResourceScope).not.toHaveBeenCalled();
+      expect(append).not.toHaveBeenCalled();
+    }
+  });
+
   it("accepts exact replay once and contains hostile receipts without raw errors or retry", async () => {
     const replay = appendPort();
     vi.mocked(replay.append).mockImplementationOnce(async (bundle) => ({
