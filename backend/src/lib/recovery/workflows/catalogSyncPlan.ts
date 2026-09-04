@@ -135,6 +135,12 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function compareCanonicalText(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
 function canonicalReference(
   value: unknown,
 ): Readonly<GovernedReferenceAsset> | CatalogSyncFailure {
@@ -144,6 +150,8 @@ function canonicalReference(
   if (
     typeof value.filename !== "string" ||
     !value.filename ||
+    value.filename !== value.filename.trim() ||
+    /[\u0000-\u001f\u007f]/.test(value.filename) ||
     value.filename.length > 255 ||
     value.filename.startsWith(".") ||
     value.filename.includes("/") ||
@@ -202,7 +210,9 @@ function canonicalWorkflow(
     filenames.add(reference.filename);
     references.push(reference);
   }
-  references.sort((left, right) => left.filename.localeCompare(right.filename));
+  references.sort((left, right) =>
+    compareCanonicalText(left.filename, right.filename),
+  );
 
   return Object.freeze({
     workflow_key: value.workflow_key,
@@ -250,7 +260,7 @@ export function canonicalizeCatalogSyncInput(
     workflows.push(workflow);
   }
   workflows.sort((left, right) =>
-    left.workflow_key.localeCompare(right.workflow_key),
+    compareCanonicalText(left.workflow_key, right.workflow_key),
   );
 
   const catalog: CanonicalCatalogSyncInput = Object.freeze({
@@ -262,21 +272,6 @@ export function canonicalizeCatalogSyncInput(
     catalog,
     catalog_hash: sha256(JSON.stringify(catalog)),
   };
-}
-
-function hasSameSourceAndContent(
-  current: CanonicalCatalogSyncInput,
-  incoming: CanonicalCatalogSyncInput,
-): boolean {
-  return (
-    current.source_commit === incoming.source_commit &&
-    current.workflows.length === incoming.workflows.length &&
-    current.workflows.every(
-      (workflow, index) =>
-        workflow.workflow_key === incoming.workflows[index].workflow_key &&
-        workflow.content_hash === incoming.workflows[index].content_hash,
-    )
-  );
 }
 
 function validReceipt(
@@ -320,7 +315,7 @@ export async function executeCatalogSyncPlan(input: {
     catalog_hash: incoming.catalog_hash,
     workflow_count: incoming.catalog.workflows.length,
   };
-  if (hasSameSourceAndContent(current.catalog, incoming.catalog)) {
+  if (current.catalog_hash === incoming.catalog_hash) {
     return { ok: true, status: "noop", ...outcome };
   }
 

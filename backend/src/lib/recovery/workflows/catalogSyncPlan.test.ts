@@ -91,6 +91,41 @@ describe("catalog sync canonicalization", () => {
     expect(original.workflows[0].workflow_key).toBe("zeta");
   });
 
+  it("uses locale-independent code-unit ordering and a pinned canonical hash", () => {
+    const result = canonicalizeCatalogSyncInput(
+      input({
+        workflows: [
+          workflow({
+            reference_assets: [
+              {
+                filename: "ä.txt",
+                size_bytes: 2,
+                file_type: "text/plain",
+                content_hash: "f".repeat(64),
+              },
+              {
+                filename: "z.txt",
+                size_bytes: 1,
+                file_type: "text/plain",
+                content_hash: ASSET_HASH,
+              },
+            ],
+          }),
+        ],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      result.catalog.workflows[0].reference_assets.map(
+        (asset) => asset.filename,
+      ),
+    ).toEqual(["z.txt", "ä.txt"]);
+    expect(result.catalog_hash).toBe(
+      "2c5e06a2e5221b61665aa20c91c92da3f084a75126aee8cd26f5c7dffa9dacdd",
+    );
+  });
+
   it.each([
     ["identical duplicate", [workflow(), workflow()]],
     [
@@ -112,6 +147,9 @@ describe("catalog sync canonicalization", () => {
 
   it.each([
     ["unsafe filename", { filename: "../secret.txt" }],
+    ["control character", { filename: "authority\u0000map.json" }],
+    ["leading whitespace", { filename: " authority-map.json" }],
+    ["trailing whitespace", { filename: "authority-map.json " }],
     ["nested filename", { filename: "folder/secret.txt" }],
     ["empty filename", { filename: "" }],
     ["negative size", { size_bytes: -1 }],
@@ -195,6 +233,40 @@ describe("atomic idempotent sync", () => {
       catalog: canonical.catalog,
     });
   });
+
+  it.each([
+    ["version", { version: "0.1.1" }],
+    ["approval provenance", { approval_provenance: "legally validated" }],
+    [
+      "reference asset metadata",
+      {
+        reference_assets: [
+          {
+            ...workflow().reference_assets[0],
+            size_bytes: 124,
+          },
+        ],
+      },
+    ],
+  ])(
+    "atomically replaces same-commit catalogs with changed %s",
+    async (_label, override) => {
+      const atomicReplace = vi.fn(async (request) => ({
+        applied: true,
+        source_commit: request.catalog.source_commit,
+        catalog_hash: request.catalog_hash,
+        workflow_count: request.catalog.workflows.length,
+      }));
+      const result = await executeCatalogSyncPlan({
+        current: input(),
+        incoming: input({ workflows: [workflow(override)] }),
+        port: { atomicReplace },
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.status).toBe("replaced");
+      expect(atomicReplace).toHaveBeenCalledOnce();
+    },
+  );
 
   it("treats same commit with changed content hash as changed", async () => {
     const atomicReplace = vi.fn(async (request) => ({
