@@ -102,7 +102,7 @@ export function transitionStreamIdentity(
   }
 
   for (const key of SCOPE_KEYS) {
-    if (frame[key] !== undefined && frame[key] !== state[key]) {
+    if (frame[key] !== state[key]) {
       return result(state, false);
     }
   }

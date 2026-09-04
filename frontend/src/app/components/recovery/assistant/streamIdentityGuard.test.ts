@@ -45,6 +45,24 @@ describe("stream identity guard", () => {
     expect(result).toEqual({ accepted: false, state });
   });
 
+  it.each(["matter_id", "project_id", "document_version_id"] as const)(
+    "rejects a frame that omits active %s scope",
+    (missingKey: "matter_id" | "project_id" | "document_version_id") => {
+      const state = createStreamIdentity(scope);
+      const frame: Record<string, unknown> = {
+        kind: "content",
+        generation: 0,
+        ...scope,
+      };
+      delete frame[missingKey];
+
+      expect(transitionStreamIdentity(state, frame)).toEqual({
+        accepted: false,
+        state,
+      });
+    },
+  );
+
   it("switches chat and rejects late content, citation and provenance frames", () => {
     const initial = createStreamIdentity(scope);
     const switched = transitionStreamIdentity(initial, {

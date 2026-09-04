@@ -1,9 +1,66 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import * as moduleExports from "./executionProvenance";
 import { parseExecutionProvenance } from "./executionProvenance";
 
 const HASH = "a".repeat(64);
 const COMMIT = "b".repeat(40);
+
+type ForbiddenArchitectureUsage =
+  | "backend"
+  | "contexts"
+  | "hooks"
+  | "mikeApi"
+  | "network"
+  | "ui-components";
+
+const HEADLESS_MODULES = [
+  "src/app/components/recovery/assistant/executionProvenance.ts",
+  "src/app/components/recovery/assistant/streamIdentityGuard.ts",
+  "src/app/components/recovery/review/reviewPresentation.ts",
+] as const;
+
+function findForbiddenArchitectureUsage(
+  source: string,
+): ForbiddenArchitectureUsage[] {
+  const moduleSpecifiers = Array.from(
+    source.matchAll(
+      /\b(?:import|export)\s+(?:type\s+)?(?:[^;"']*?\s+from\s+)?["']([^"']+)["']|\b(?:import|require)\s*\(\s*["']([^"']+)["']\s*\)/g,
+    ),
+    (match) => match[1] ?? match[2],
+  );
+  const usesPathSegment = (segment: string) =>
+    moduleSpecifiers.some((specifier) =>
+      specifier.split("/").includes(segment),
+    );
+  const violations = new Set<ForbiddenArchitectureUsage>();
+
+  if (moduleSpecifiers.some((specifier) => specifier.includes("mikeApi"))) {
+    violations.add("mikeApi");
+  }
+  if (usesPathSegment("contexts")) violations.add("contexts");
+  if (usesPathSegment("hooks")) violations.add("hooks");
+  if (usesPathSegment("backend")) violations.add("backend");
+  if (
+    /\b(?:fetch|WebSocket|EventSource|XMLHttpRequest)\s*\(/.test(source) ||
+    moduleSpecifiers.some((specifier) =>
+      /^(?:node:)?(?:http|https|net)$|^(?:axios|got|ky|undici)$/.test(specifier),
+    )
+  ) {
+    violations.add("network");
+  }
+  if (
+    moduleSpecifiers.some((specifier) =>
+      specifier.split("/").some((segment) =>
+        ["components", "modals", "popups", "ui"].includes(segment),
+      ),
+    )
+  ) {
+    violations.add("ui-components");
+  }
+
+  return [...violations];
+}
 
 function validPayload() {
   return {
@@ -117,5 +174,23 @@ describe("parseExecutionProvenance", () => {
 
   it("locks the runtime export surface", () => {
     expect(Object.keys(moduleExports)).toEqual(["parseExecutionProvenance"]);
+  });
+
+  it.each([
+    ["mikeApi", 'import { streamChat } from "@/app/lib/mikeApi";'],
+    ["contexts", 'import { useUser } from "@/app/contexts/UserContext";'],
+    ["hooks", 'import { useAssistantChat } from "@/app/hooks/useAssistantChat";'],
+    ["backend", 'import type { Route } from "../../../../../../../backend/src/routes";'],
+    ["network", 'const response = fetch("/api/recovery");'],
+    ["ui-components", 'import { Button } from "@/app/components/ui/button";'],
+  ] as const)("detects forbidden %s architecture usage", (category, source) => {
+    expect(findForbiddenArchitectureUsage(source)).toEqual([category]);
+  });
+
+  it("keeps every recovery presentation module headless", () => {
+    for (const modulePath of HEADLESS_MODULES) {
+      const source = readFileSync(modulePath, "utf8");
+      expect(findForbiddenArchitectureUsage(source), modulePath).toEqual([]);
+    }
   });
 });
