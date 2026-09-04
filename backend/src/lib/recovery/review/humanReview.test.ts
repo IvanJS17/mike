@@ -352,6 +352,86 @@ describe("human review", () => {
     expect(terminalReads).toBe(1);
   });
 
+  it("round-trips completion before authorization and writes only the parsed projection", async () => {
+    const setupWrites = port();
+    const created = await createHumanReview({
+      ...auth,
+      tenancy_port: tenancy(),
+      resource_scope_port: resources(),
+      idempotency_key: "review:create:complete-round-trip",
+      review_id: "review-complete-round-trip",
+      execution,
+      mutation_port: setupWrites,
+    });
+    if (!created.ok) throw new Error("fixture");
+    const decided = await decideHumanReviewItem({
+      ...auth,
+      tenancy_port: tenancy(),
+      resource_scope_port: resources(),
+      idempotency_key: "review:decide:complete-round-trip",
+      review: created.review,
+      item_id: created.review.items[0].item_id,
+      decision: "accepted",
+      mutation_port: setupWrites,
+    });
+    if (!decided.ok) throw new Error("fixture");
+
+    const invalidTenancy = tenancy();
+    const invalidResources = resources();
+    const invalidWrites = port();
+    const objectKeys = Object.keys;
+    const keysSpy = vi.spyOn(Object, "keys").mockImplementation(((
+      value: object,
+    ) => {
+      const keys = objectKeys(value);
+      return (value as { status?: unknown }).status === "approved" &&
+        keys.includes("review_id")
+        ? [...keys, "unexpected"]
+        : keys;
+    }) as typeof Object.keys);
+    let invalidCompletion;
+    try {
+      invalidCompletion = await completeHumanReview({
+        ...auth,
+        tenancy_port: invalidTenancy,
+        resource_scope_port: invalidResources,
+        idempotency_key: "review:complete:invalid-round-trip",
+        review: decided.review,
+        execution,
+        terminal_state: "approved",
+        mutation_port: invalidWrites,
+      });
+    } finally {
+      keysSpy.mockRestore();
+    }
+    expect(invalidCompletion).toEqual({
+      ok: false,
+      error_class: "invalid_review",
+    });
+    expect(invalidTenancy.getOrganizationMembership).not.toHaveBeenCalled();
+    expect(invalidResources.getEvidenceResourceScope).not.toHaveBeenCalled();
+    expect(invalidWrites.complete).not.toHaveBeenCalled();
+
+    const successWrites = port();
+    const completed = await completeHumanReview({
+      ...auth,
+      tenancy_port: tenancy(),
+      resource_scope_port: resources(),
+      idempotency_key: "review:complete:valid-round-trip",
+      review: decided.review,
+      execution,
+      terminal_state: "approved",
+      mutation_port: successWrites,
+    });
+    if (!completed.ok) throw new Error("completion");
+    const sentReview = vi.mocked(successWrites.complete).mock.calls[0][0]
+      .review;
+    expect(sentReview.items).not.toBe(decided.review.items);
+    expect(sentReview.items[0]).not.toBe(decided.review.items[0]);
+    expect(completed.review).toBe(sentReview);
+    expect(Object.isFrozen(completed.review.items[0])).toBe(true);
+  });
+
   it("rejects forged accepted-state content centrally", () => {
     const forged = {
       review_id: "review-forged",

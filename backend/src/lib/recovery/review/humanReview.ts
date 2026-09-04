@@ -1178,11 +1178,13 @@ export async function completeHumanReview(input: {
     )
   )
     return failure("invalid_review");
-  const next = deepFreeze({
+  const candidateNext = {
     ...review,
     revision: review.revision + 1,
     status: values.terminal_state,
-  });
+  };
+  const next = parseHumanReview(candidateNext);
+  if (!next) return failure("invalid_review");
   const denied = await authorize({
     identity: values.actor,
     granted_scope: values.granted_scope,
@@ -1192,7 +1194,7 @@ export async function completeHumanReview(input: {
   if (denied) return denied;
   const resource = await recheckHumanReviewResourceScope(
     values.resource_scope_port,
-    review,
+    next,
   );
   if (resource === "dependency_failed")
     return failure("authorization_dependency_failed");
