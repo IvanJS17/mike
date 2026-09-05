@@ -2,6 +2,7 @@ import React, { useCallback, useState } from "react";
 import { useAuth } from "./auth/useAuth";
 import { LoginPage } from "./auth/LoginPage";
 import { ApiKeyBanner } from "./components/shell/ApiKeyBanner";
+import { ApprovedRedlinePanel } from "./components/approved-redline/ApprovedRedlinePanel";
 import { ChatPanel } from "./components/assistant/ChatPanel";
 import { DocumentActions } from "./components/quick-actions/DocumentActions";
 import { ChatHistoryPage } from "./components/history/ChatHistoryPage";
@@ -94,6 +95,8 @@ export default function App(): React.ReactElement {
 
   const renderSection = (): React.ReactElement => {
     switch (selectedSection) {
+      case "approved-redline":
+        return <ApprovedRedlinePanel key={wordDocumentId} wordDocumentId={wordDocumentId} />;
       case "chat":
         return <></>;
       case "actions":
