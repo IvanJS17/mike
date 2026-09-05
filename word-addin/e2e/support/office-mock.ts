@@ -242,8 +242,7 @@ export function installOfficeMock(seed: OfficeSeed): void {
           key.startsWith(chatStorageModePrefix) &&
           (savedValue === "cloud" || savedValue === "local")
         ) {
-          storedOfficeValues[key] =
-            savedValue === "local" ? "local" : "cloud";
+          storedOfficeValues[key] = savedValue === "local" ? "local" : "cloud";
         }
       }
     } catch {
@@ -283,8 +282,7 @@ export function installOfficeMock(seed: OfficeSeed): void {
           key === editApplyModeKey &&
           (value === "approval" || value === "direct")
         ) {
-          storedOfficeValues[key] =
-            value === "direct" ? "direct" : "approval";
+          storedOfficeValues[key] = value === "direct" ? "direct" : "approval";
           persistOfficeValues();
         } else if (
           key.startsWith(chatStorageModePrefix) &&
@@ -367,7 +365,7 @@ export function installOfficeMock(seed: OfficeSeed): void {
     displayDialogAsync: (
       url: string,
       options: Record<string, unknown>,
-      callback: (result: any) => void
+      callback: (result: any) => void,
     ) => {
       oauthDialog.url = url;
       oauthDialog.options = clone(options);
@@ -772,7 +770,7 @@ export function installOfficeMock(seed: OfficeSeed): void {
     // revision covering the passage, mirroring real Word.
     const createFormattedRevisionGroup = (
       entry: WordCall,
-      text: string
+      text: string,
     ): string[] => {
       documentState.groupSequence++;
       const groupId = `revision-group-${documentState.groupSequence}`;
@@ -806,7 +804,7 @@ export function installOfficeMock(seed: OfficeSeed): void {
         makeTrackedChangeCollection(
           Object.values(documentState.revisions)
             .filter((revision) => revision.resolution === null)
-            .map((revision) => makeStoredTrackedChange(revision.id))
+            .map((revision) => makeStoredTrackedChange(revision.id)),
         ),
       search: (query: string, options?: any) => {
         wordCalls.searches++;
@@ -897,7 +895,7 @@ export function installOfficeMock(seed: OfficeSeed): void {
             const stale =
               label === "Inserted" &&
               (seed.staleInsertedRangeOriginals ?? []).includes(query);
-            return makeRange({
+            const searchRange = makeRange({
               label,
               entry: () =>
                 lastWrite ?? {
@@ -915,6 +913,12 @@ export function installOfficeMock(seed: OfficeSeed): void {
               stale,
               cannotSelect: (seed.unselectableOriginals ?? []).includes(query),
             });
+            Object.defineProperty(searchRange, "text", {
+              enumerable: true,
+              get: () =>
+                label === "Inserted" ? (lastWrite?.text ?? query) : query,
+            });
+            return searchRange;
           };
 
           const range = makeSearchRange("Select");
