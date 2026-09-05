@@ -97,6 +97,42 @@ export async function downloadFile(key: string): Promise<ArrayBuffer | null> {
   }
 }
 
+// Approved artifacts need create-only writes and a read that does not turn
+// dependency failures into absence. Ordinary mutable-document helpers below
+// retain their separate semantics.
+export async function uploadFileIfAbsent(
+  key: string,
+  bytes: Uint8Array,
+  contentType: string,
+): Promise<"created" | "exists"> {
+  requireStorageConfig();
+  const body = Buffer.from(bytes);
+  try {
+    await getClient().send(new PutObjectCommand({
+      Bucket: BUCKET, Key: key, Body: body, ContentType: contentType,
+      IfNoneMatch: "*",
+    }));
+    return "created";
+  } catch (error) {
+    if ((error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode === 412)
+      return "exists";
+    throw new Error("Artifact storage write failed");
+  }
+}
+
+export async function downloadFileStrict(key: string): Promise<Uint8Array | null> {
+  requireStorageConfig();
+  try {
+    const response = await getClient().send(new S3Commands.GetObjectCommand({ Bucket: BUCKET, Key: key }));
+    if (!response.Body) throw new Error("Missing object body");
+    return new Uint8Array(await response.Body.transformToByteArray());
+  } catch (error) {
+    if ((error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode === 404)
+      return null;
+    throw new Error("Artifact storage read failed");
+  }
+}
+
 export async function listFiles(prefix: string): Promise<string[]> {
   if (!storageEnabled) return [];
   const client = getClient();

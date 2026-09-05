@@ -201,6 +201,17 @@ describe("GET /projects/:projectId/ai-executions", () => {
     expect(from).not.toHaveBeenCalled();
   });
 
+  it("rejects an approved-report body before loading evidence or storage", async () => {
+    const response = await request(makeApp())
+      .post("/projects/00000000-0000-4000-8000-000000000001/ai-executions/00000000-0000-4000-8000-000000000002/review/approved-report")
+      .set("x-test-auth", "yes")
+      .send({ expected_review_revision: 1 });
+
+    expect(response.status).toBe(400);
+    expect(from).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
   it("filters current evidence, selects an explicit summary, authorizes, and preserves newest order", async () => {
     const olderRow = {
       ...visibleRow,

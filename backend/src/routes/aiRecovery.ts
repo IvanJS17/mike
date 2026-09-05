@@ -4,7 +4,10 @@ import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
 import { sendInternalError } from "../lib/httpError";
 import { createSupabaseTenancyReadPort } from "../lib/recovery/authorization/supabaseTenancyReadPort";
-import { evaluateInitialAccess } from "../lib/recovery/authorization/tenancyReadPort";
+import {
+  evaluateInitialAccess,
+  recheckFreshAccessViaPort,
+} from "../lib/recovery/authorization/tenancyReadPort";
 import type { AuthenticatedIdentity } from "../lib/recovery/identity/authStateMatrix";
 import {
   createSupabaseAiReadRepository,
@@ -15,8 +18,19 @@ import {
   completeHumanReview,
   decideHumanReviewItem,
   createHumanReview,
+  recheckHumanReviewResourceScope,
+  type HumanReview,
+  type HumanReviewExecution,
 } from "../lib/recovery/review/humanReview";
 import { produceApprovedRedlineBundle } from "../lib/recovery/review/approvedRedlineBundle";
+import { produceApprovedReviewReport } from "../lib/recovery/review/approvedReviewReport";
+import { approvedDocxRenderer } from "../lib/recovery/review/approvedDocxRenderer";
+import {
+  createApprovedArtifactPersistence,
+  type ApprovedArtifactPersistenceClient,
+  type ApprovedArtifactReadExpectation,
+} from "../lib/recovery/persistence/approvedArtifactPersistence";
+import { uploadFileIfAbsent, downloadFileStrict } from "../lib/storage";
 
 export const aiRecoveryRouter = Router({ mergeParams: true });
 
@@ -75,6 +89,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
+}
+
+function isUuid(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    )
+  );
 }
 
 function isSha256(value: unknown): value is string {
@@ -947,6 +970,394 @@ aiRecoveryRouter.post(
       return res
         .status(result.receipt.disposition === "applied" ? 201 : 200)
         .json({ bundle: result.bundle, receipt: result.receipt });
+    } catch (error) {
+      return sendInternalError(res, error);
+    }
+  },
+);
+
+const APPROVED_REPORT_IDEMPOTENCY_RE = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/;
+
+function reportExpectation(
+  review: HumanReview,
+  execution: HumanReviewExecution,
+  idempotencyKey?: string,
+): ApprovedArtifactReadExpectation {
+  return {
+    ...(idempotencyKey === undefined
+      ? {}
+      : { idempotency_key: idempotencyKey }),
+    review_id: review.review_id,
+    review_revision: review.revision,
+    execution_id: execution.execution_id,
+    organization_id: review.organization_id,
+    matter_id: review.matter_id,
+    project_id: review.project_id,
+    source_document_id: review.document_id,
+    source_document_version_id: review.document_version_id,
+    source_document_sha256: review.document_content_sha256,
+    evidence_receipt_sha256: review.evidence_receipt_sha256,
+    filename: "Informe de revision humana.docx",
+    mime_type:
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  };
+}
+
+function sameReportAuthority(
+  expected: {
+    review_id: string;
+    revision: number;
+    status: string;
+    execution_id: string;
+    organization_id: string;
+    matter_id: string;
+    project_id: string;
+    document_id: string;
+    document_version_id: string;
+    document_content_sha256: string;
+    evidence_receipt_sha256: string;
+  },
+  current: typeof expected,
+): boolean {
+  return (
+    current.review_id === expected.review_id &&
+    current.revision === expected.revision &&
+    current.status === "approved" &&
+    expected.status === "approved" &&
+    current.execution_id === expected.execution_id &&
+    current.organization_id === expected.organization_id &&
+    current.matter_id === expected.matter_id &&
+    current.project_id === expected.project_id &&
+    current.document_id === expected.document_id &&
+    current.document_version_id === expected.document_version_id &&
+    current.document_content_sha256 === expected.document_content_sha256 &&
+    current.evidence_receipt_sha256 === expected.evidence_receipt_sha256
+  );
+}
+
+aiRecoveryRouter.post(
+  "/:executionId/review/approved-report",
+  requireAuth,
+  async (req, res) => {
+    const body = req.body;
+    if (
+      !isRecord(body) ||
+      !hasExactKeys(body, ["expected_review_revision", "idempotency_key"]) ||
+      !isNonEmptyString(body.idempotency_key) ||
+      !APPROVED_REPORT_IDEMPOTENCY_RE.test(body.idempotency_key) ||
+      !Number.isSafeInteger(body.expected_review_revision) ||
+      (body.expected_review_revision as number) < 1
+    )
+      return res.status(400).json({
+        code: "invalid_approved_report",
+        detail: "Invalid approved report.",
+      });
+
+    const projectId = req.params.projectId;
+    const executionId = req.params.executionId;
+    const identity = res.locals.authenticatedIdentity as
+      | AuthenticatedIdentity
+      | undefined;
+    if (!isUuid(projectId) || !isUuid(executionId) || !identity)
+      return res.status(400).json({
+        code: "invalid_approved_report",
+        detail: "Invalid approved report.",
+      });
+    const idempotencyKey = body.idempotency_key as string;
+    try {
+      const db = createServerSupabase();
+      const repository = createSupabaseAiReadRepository(db);
+      const evidence = await repository.loadExecutionEvidence({
+        project_id: projectId,
+        execution_id: executionId,
+      });
+      if (!evidence) return opaqueNotFound(res);
+      const tenancyPort = createSupabaseTenancyReadPort(db);
+      const access = await evaluateInitialAccess(tenancyPort, {
+        identity,
+        organization_id: evidence.execution.organization_id,
+        matter_id: evidence.execution.matter_id,
+        requiresMfa: true,
+      });
+      if (access.kind === "authorization_dependency_failed")
+        throw new Error("AI approved report authorization failed");
+      if (access.decision.outcome === "not_found") return opaqueNotFound(res);
+      if (access.decision.outcome === "denied")
+        return res.status(403).json({
+          code:
+            access.decision.code === "mfa_required"
+              ? "mfa_required"
+              : "authorization_revoked",
+          detail:
+            access.decision.code === "mfa_required"
+              ? "MFA required."
+              : "Authorization revoked.",
+        });
+      const grantedScope = access.decision.scope;
+      const review = await repository.loadReview({
+        project_id: projectId,
+        execution_id: executionId,
+      });
+      if (!review) return opaqueNotFound(res);
+      if (
+        review.status !== "approved" ||
+        review.revision !== body.expected_review_revision
+      )
+        return res.status(409).json({
+          code: "invalid_approved_report",
+          detail: "Invalid approved report.",
+        });
+      const resourceScopePort = createBoundEvidenceResourceScopePort(db, {
+        organization_id: evidence.execution.organization_id,
+        matter_id: evidence.execution.matter_id,
+        project_id: projectId,
+      });
+      const storage = {
+        putIfAbsent: (key: string, bytes: Uint8Array, mimeType: string) =>
+          uploadFileIfAbsent(key, bytes, mimeType),
+        getStrict: (key: string) => downloadFileStrict(key),
+      };
+      const revalidateCurrent = async () => {
+        const fresh = await recheckFreshAccessViaPort(tenancyPort, {
+          scope: grantedScope,
+          identity,
+          requiresMfa: true,
+        });
+        if (
+          fresh.kind === "authorization_dependency_failed" ||
+          !fresh.result.fresh
+        )
+          return false;
+        const currentEvidence = await repository.loadExecutionEvidence({
+          project_id: projectId,
+          execution_id: executionId,
+        });
+        const currentReview = await repository.loadReview({
+          project_id: projectId,
+          execution_id: executionId,
+        });
+        if (
+          !currentEvidence ||
+          !currentReview ||
+          !sameReportAuthority(review, currentReview) ||
+          currentEvidence.execution.execution_id !==
+            evidence.execution.execution_id ||
+          currentEvidence.execution.organization_id !==
+            evidence.execution.organization_id ||
+          currentEvidence.execution.matter_id !==
+            evidence.execution.matter_id ||
+          currentEvidence.execution.project_id !==
+            evidence.execution.project_id ||
+          currentEvidence.execution.document_id !==
+            evidence.execution.document_id ||
+          currentEvidence.execution.document_version_id !==
+            evidence.execution.document_version_id ||
+          currentEvidence.execution.document_content_sha256 !==
+            evidence.execution.document_content_sha256 ||
+          currentEvidence.execution.evidence_receipt_sha256 !==
+            evidence.execution.evidence_receipt_sha256
+        )
+          return false;
+        return (
+          (await recheckHumanReviewResourceScope(
+            resourceScopePort,
+            currentReview,
+          )) === "match"
+        );
+      };
+      const persistence = createApprovedArtifactPersistence({
+        client: db as unknown as ApprovedArtifactPersistenceClient,
+        context: {
+          actor_user_id: identity.user_id,
+          organization_id: grantedScope.organization_id,
+          authorization_epoch: grantedScope.authorization_epoch,
+        },
+        storage,
+        revalidateBeforeUpload: revalidateCurrent,
+      });
+      const expected = reportExpectation(
+        review,
+        evidence.execution,
+        idempotencyKey,
+      );
+      const replayAwareRenderer = {
+        render: async (
+          plan: Parameters<typeof approvedDocxRenderer.render>[0],
+        ) => {
+          if (!(await revalidateCurrent()))
+            throw new Error("report superseded");
+          const existing = await persistence.read({
+            idempotency_key: idempotencyKey,
+            expected,
+          });
+          return existing ?? approvedDocxRenderer.render(plan);
+        },
+      };
+      const result = await produceApprovedReviewReport({
+        identity,
+        granted_scope: grantedScope,
+        tenancy_port: tenancyPort,
+        resource_scope_port: resourceScopePort,
+        requires_mfa: true,
+        idempotency_key: idempotencyKey,
+        expected_review_revision: body.expected_review_revision as number,
+        review,
+        execution: evidence.execution,
+        evidence_receipt: evidence.evidence_receipt,
+        renderer: replayAwareRenderer,
+        append_port: persistence,
+      });
+      if (!result.ok) {
+        if (result.error_class === "invalid_approved_report")
+          return res.status(409).json({
+            code: "invalid_approved_report",
+            detail: "Invalid approved report.",
+          });
+        if (result.error_class === "approved_report_authorization_failed")
+          return res.status(403).json({
+            code: "authorization_revoked",
+            detail: "Authorization revoked.",
+          });
+        throw new Error("AI approved report operation failed");
+      }
+      return res
+        .status(result.receipt.disposition === "applied" ? 201 : 200)
+        .json({ artifact: result.artifact, receipt: result.receipt });
+    } catch (error) {
+      return sendInternalError(res, error);
+    }
+  },
+);
+
+aiRecoveryRouter.get(
+  "/:executionId/review/approved-report",
+  requireAuth,
+  async (req, res) => {
+    const projectId = req.params.projectId;
+    const executionId = req.params.executionId;
+    const rawRevision = req.query.revision;
+    const revision =
+      rawRevision === undefined || Array.isArray(rawRevision)
+        ? undefined
+        : Number(rawRevision);
+    const identity = res.locals.authenticatedIdentity as
+      | AuthenticatedIdentity
+      | undefined;
+    if (
+      Object.keys(req.query).some((key) => key !== "revision") ||
+      !isUuid(projectId) ||
+      !isUuid(executionId) ||
+      !identity ||
+      (revision !== undefined &&
+        (!Number.isSafeInteger(revision) ||
+          revision < 1 ||
+          !/^[1-9][0-9]*$/.test(rawRevision as string)))
+    )
+      return res.status(400).json({
+        code: "invalid_approved_report",
+        detail: "Invalid approved report.",
+      });
+    try {
+      const db = createServerSupabase();
+      const repository = createSupabaseAiReadRepository(db);
+      const evidence = await repository.loadExecutionEvidence({
+        project_id: projectId,
+        execution_id: executionId,
+      });
+      if (!evidence) return opaqueNotFound(res);
+      const tenancyPort = createSupabaseTenancyReadPort(db);
+      const access = await evaluateInitialAccess(tenancyPort, {
+        identity,
+        organization_id: evidence.execution.organization_id,
+        matter_id: evidence.execution.matter_id,
+        requiresMfa: true,
+      });
+      if (access.kind === "authorization_dependency_failed")
+        throw new Error("AI approved report authorization failed");
+      if (access.decision.outcome !== "allow") return opaqueNotFound(res);
+      const grantedScope = access.decision.scope;
+      const review = await repository.loadReview({
+        project_id: projectId,
+        execution_id: executionId,
+      });
+      if (
+        !review ||
+        review.status !== "approved" ||
+        (revision !== undefined && review.revision !== revision)
+      )
+        return opaqueNotFound(res);
+      const resourceScopePort = createBoundEvidenceResourceScopePort(db, {
+        organization_id: evidence.execution.organization_id,
+        matter_id: evidence.execution.matter_id,
+        project_id: projectId,
+      });
+      const revalidateCurrent = async () => {
+        const fresh = await recheckFreshAccessViaPort(tenancyPort, {
+          scope: grantedScope,
+          identity,
+          requiresMfa: true,
+        });
+        if (
+          fresh.kind === "authorization_dependency_failed" ||
+          !fresh.result.fresh
+        )
+          return false;
+        const currentEvidence = await repository.loadExecutionEvidence({
+          project_id: projectId,
+          execution_id: executionId,
+        });
+        const currentReview = await repository.loadReview({
+          project_id: projectId,
+          execution_id: executionId,
+        });
+        return (
+          !!currentEvidence &&
+          !!currentReview &&
+          sameReportAuthority(review, currentReview) &&
+          currentEvidence.execution.execution_id ===
+            evidence.execution.execution_id &&
+          currentEvidence.execution.document_content_sha256 ===
+            evidence.execution.document_content_sha256 &&
+          currentEvidence.execution.evidence_receipt_sha256 ===
+            evidence.execution.evidence_receipt_sha256 &&
+          (await recheckHumanReviewResourceScope(
+            resourceScopePort,
+            currentReview,
+          )) === "match"
+        );
+      };
+      const storage = {
+        putIfAbsent: (key: string, bytes: Uint8Array, mimeType: string) =>
+          uploadFileIfAbsent(key, bytes, mimeType),
+        getStrict: (key: string) => downloadFileStrict(key),
+      };
+      const persistence = createApprovedArtifactPersistence({
+        client: db as unknown as ApprovedArtifactPersistenceClient,
+        context: {
+          actor_user_id: identity.user_id,
+          organization_id: access.decision.scope.organization_id,
+          authorization_epoch: access.decision.scope.authorization_epoch,
+        },
+        storage,
+        revalidateBeforeUpload: revalidateCurrent,
+      });
+      const bytes = await persistence.read({
+        project_id: projectId,
+        execution_id: executionId,
+        ...(revision === undefined ? {} : { review_revision: revision }),
+        expected: reportExpectation(review, evidence.execution),
+        revalidateAfterRead: revalidateCurrent,
+      });
+      if (!bytes) return opaqueNotFound(res);
+      return res
+        .type(
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        .set(
+          "Content-Disposition",
+          'attachment; filename="Informe de revision humana.docx"',
+        )
+        .send(Buffer.from(bytes));
     } catch (error) {
       return sendInternalError(res, error);
     }

@@ -4098,6 +4098,8 @@ create table if not exists public.ai_review_exports (
   filename text not null,
   mime_type text not null,
   artifact_sha256 text not null,
+  storage_path text,
+  size_bytes integer,
   created_at timestamptz not null default now(),
   constraint ai_review_exports_review_id_fkey
     foreign key (review_id) references public.ai_reviews(id) on delete restrict,
@@ -4137,7 +4139,13 @@ create table if not exists public.ai_review_exports (
   ),
   constraint ai_review_exports_artifact_hash_check check (
     artifact_sha256 ~ '^[0-9a-f]{64}$'
-  )
+  ),
+  constraint ai_review_exports_storage_metadata_check check (
+    (storage_path is null and size_bytes is null)
+    or (storage_path is not null and size_bytes is not null)
+  ),
+  constraint ai_review_exports_size_check check (size_bytes is null or size_bytes > 0),
+  constraint ai_review_exports_storage_path_check check (storage_path is null or storage_path <> '')
 );
 create index if not exists ai_review_exports_matter_created_idx
   on public.ai_review_exports(matter_id, created_at desc);
@@ -5792,12 +5800,24 @@ declare
 begin
   if not public.ai_jsonb_exact_keys(
     p_artifact,
-    array['idempotency_key','review_id','review_revision','execution_id','organization_id','matter_id','project_id','document_id','document_version_id','source_document_sha256','evidence_receipt_sha256','filename','mime_type','artifact_sha256','artifact_document_id','artifact_document_version_id']
+    array['idempotency_key','review_id','review_revision','execution_id','organization_id','matter_id','project_id','document_id','document_version_id','source_document_sha256','evidence_receipt_sha256','filename','mime_type','artifact_sha256','artifact_document_id','artifact_document_version_id','storage_path','size_bytes']
   )
      or not public.ai_valid_idempotency_key(p_artifact->>'idempotency_key')
      or not public.ai_valid_sha256(p_artifact->>'source_document_sha256')
      or not public.ai_valid_sha256(p_artifact->>'evidence_receipt_sha256')
      or not public.ai_valid_sha256(p_artifact->>'artifact_sha256')
+     or p_artifact->>'filename' is distinct from 'Informe de revision humana.docx'
+     or p_artifact->>'mime_type' is distinct from 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+     or p_artifact->>'size_bytes' !~ '^[1-9][0-9]*$'
+     or (p_artifact->>'size_bytes')::bigint > 2147483647
+     or p_artifact->>'storage_path' is distinct from format(
+       'orgs/%s/matters/%s/projects/%s/documents/%s/%s.docx',
+       (p_artifact->>'organization_id')::uuid,
+       (p_artifact->>'matter_id')::uuid,
+       (p_artifact->>'project_id')::uuid,
+       (p_artifact->>'artifact_document_id')::uuid,
+       p_artifact->>'artifact_sha256'
+     )
   then
     raise exception 'Invalid AI review export contract';
   end if;
@@ -5860,6 +5880,21 @@ begin
        or v_existing.filename is distinct from p_artifact->>'filename'
        or v_existing.mime_type is distinct from p_artifact->>'mime_type'
        or v_existing.artifact_sha256 is distinct from p_artifact->>'artifact_sha256'
+       or v_existing.storage_path is distinct from p_artifact->>'storage_path'
+       or v_existing.size_bytes is distinct from (p_artifact->>'size_bytes')::integer
+       or not exists (
+         select 1 from public.document_versions v
+         join public.documents d on d.id = v.document_id
+         where v.id = v_artifact_version_id
+           and v.document_id = v_artifact_document_id
+           and d.project_id = v_review.project_id
+           and v.storage_path = p_artifact->>'storage_path'
+           and v.filename = p_artifact->>'filename'
+           and v.file_type = p_artifact->>'mime_type'
+           and v.size_bytes = (p_artifact->>'size_bytes')::integer
+           and v.content_sha256 = p_artifact->>'artifact_sha256'
+           and v.source = 'ai_review_report'
+       )
     then
       raise exception 'AI review export idempotency conflict';
     end if;
@@ -5869,12 +5904,6 @@ begin
       'artifact_sha256',v_existing.artifact_sha256,
       'idempotency_key',v_existing.idempotency_key
     );
-  end if;
-
-  if p_artifact->>'filename' is distinct from 'Informe de revision humana.docx'
-     or p_artifact->>'mime_type' is distinct from 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-  then
-    raise exception 'Invalid AI review export contract';
   end if;
 
   insert into public.documents(id, project_id, user_id, status)
@@ -5887,15 +5916,22 @@ begin
     raise exception 'AI review export artifact document conflict';
   end if;
   insert into public.document_versions(
-    id, document_id, content_sha256, source, created_at
+    id, document_id, storage_path, filename, file_type, size_bytes,
+    content_sha256, source, created_at
   ) values (
     v_artifact_version_id, v_artifact_document_id,
+    p_artifact->>'storage_path', p_artifact->>'filename',
+    p_artifact->>'mime_type', (p_artifact->>'size_bytes')::integer,
     p_artifact->>'artifact_sha256', 'ai_review_report', now()
   ) on conflict (id) do nothing;
   if not exists (
     select 1 from public.document_versions
-     where id = v_artifact_version_id
+       where id = v_artifact_version_id
        and document_id = v_artifact_document_id
+       and storage_path = p_artifact->>'storage_path'
+       and filename = p_artifact->>'filename'
+       and file_type = p_artifact->>'mime_type'
+       and size_bytes = (p_artifact->>'size_bytes')::integer
        and content_sha256 = p_artifact->>'artifact_sha256'
        and source = 'ai_review_report'
   ) then
@@ -5908,7 +5944,7 @@ begin
     source_document_id, source_document_version_id,
     artifact_document_id, artifact_document_version_id,
     source_document_sha256, evidence_receipt_sha256,
-    filename, mime_type, artifact_sha256
+    filename, mime_type, artifact_sha256, storage_path, size_bytes
   ) values (
     p_artifact->>'idempotency_key', v_review.id, v_review.revision,
     v_review.execution_id, v_review.organization_id, v_review.matter_id,
@@ -5916,7 +5952,8 @@ begin
     v_artifact_document_id, v_artifact_version_id,
     v_review.document_content_sha256, v_review.evidence_receipt_sha256,
     p_artifact->>'filename', p_artifact->>'mime_type',
-    p_artifact->>'artifact_sha256'
+    p_artifact->>'artifact_sha256', p_artifact->>'storage_path',
+    (p_artifact->>'size_bytes')::integer
   );
 
   return jsonb_build_object(

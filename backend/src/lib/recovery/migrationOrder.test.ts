@@ -105,37 +105,36 @@ describe("recovery migration ordering contract", () => {
 });
 
 describe("recovery migration ledger state", () => {
-  it("tracks integrated migrations and the optional E2a candidate before or after staging", () => {
+  it("tracks the approved-artifact candidate before and after staging without ignoring collisions", () => {
     const integrated = [
       "20260831_01_recovery_identity_tenancy.sql",
       "20260902_01_recovery_onboarding_organization.sql",
+      "20260904_01_recovery_ai_evidence_review.sql",
+      "20260905_01_recovery_core_convergence.sql",
     ];
-    const candidate = "20260904_01_recovery_ai_evidence_review.sql";
-    const convergence = "20260905_01_recovery_core_convergence.sql";
-    const committed = gitLsMigrations().filter((name) =>
+    const candidate = "20260905_02_recovery_approved_artifact_storage.sql";
+    const tracked = gitLsMigrations().filter((name) =>
       name.includes(RECOVERY_MIGRATION_TAG),
     );
-    expect(committed).toEqual([
+    expect(tracked).toEqual([
       ...integrated,
-      ...(committed.includes(candidate) ? [candidate] : []),
-      ...(committed.includes(convergence) ? [convergence] : []),
+      ...(tracked.includes(candidate) ? [candidate] : []),
     ]);
-
-    const onDisk = listRecoveryMigrations(MIGRATIONS_DIR);
-    expect(onDisk).toEqual([
-      ...integrated,
-      ...(onDisk.includes(candidate) ? [candidate] : []),
-      ...(onDisk.includes(convergence) ? [convergence] : []),
-    ]);
-    expect(sortRecoveryMigrations([...integrated, candidate, convergence])).toEqual([
+    expect(listRecoveryMigrations(MIGRATIONS_DIR)).toEqual([
       ...integrated,
       candidate,
-      convergence,
     ]);
+    expect(sortRecoveryMigrations([...integrated, candidate])).toEqual([
+      ...integrated,
+      candidate,
+    ]);
+    expect(() =>
+      assertRecoveryMigrationName(candidate, integrated),
+    ).not.toThrow();
     expect(() =>
       assertRecoveryMigrationName(candidate, [
         ...integrated,
-        "20260904_01_upstream_collision.sql",
+        "20260905_02_upstream_collision.sql",
       ]),
     ).toThrow(/collides/);
     expect(RECOVERY_SCHEMA_FINGERPRINT_MARKER).toMatch(
