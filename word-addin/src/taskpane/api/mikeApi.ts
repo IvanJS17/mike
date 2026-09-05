@@ -87,6 +87,26 @@ export type AiExecutionSummary = {
   finished_at: string | null;
 };
 
+export type AiReviewScope = {
+  organization_id: string;
+  matter_id: string;
+  project_id: string;
+  document_id: string;
+  document_version_id: string;
+  document_content_sha256: string;
+  review_id: string;
+  revision: number;
+  execution_id: string;
+  status: "pending" | "approved" | "changes_requested";
+};
+
+type AiReviewResponse = AiReviewScope & {
+  execution_author_user_id: string;
+  reviewer_user_id: string;
+  evidence_receipt_sha256: string;
+  items: unknown[];
+};
+
 export class WordAddinApiError extends Error {
   readonly status: number;
   readonly code: string | null;
@@ -111,6 +131,22 @@ const AI_EXECUTION_SUMMARY_KEYS = [
   "created_at",
   "started_at",
   "finished_at",
+] as const;
+const AI_REVIEW_KEYS = [
+  "organization_id",
+  "matter_id",
+  "project_id",
+  "document_id",
+  "document_version_id",
+  "document_content_sha256",
+  "review_id",
+  "revision",
+  "execution_id",
+  "execution_author_user_id",
+  "reviewer_user_id",
+  "evidence_receipt_sha256",
+  "status",
+  "items",
 ] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -162,6 +198,35 @@ function isAiExecutionSummary(
     value.created_at.trim() !== "" &&
     isNullableString(value.started_at) &&
     isNullableString(value.finished_at)
+  );
+}
+
+function isAiReviewResponse(
+  value: unknown,
+  projectId: string,
+  executionId: string,
+): value is AiReviewResponse {
+  if (!isRecord(value) || !hasExactKeys(value, AI_REVIEW_KEYS)) return false;
+  return (
+    isCanonicalId(value.organization_id) &&
+    isCanonicalId(value.matter_id) &&
+    value.project_id === projectId &&
+    isCanonicalId(value.document_id) &&
+    isCanonicalId(value.document_version_id) &&
+    typeof value.document_content_sha256 === "string" &&
+    /^[0-9a-f]{64}$/.test(value.document_content_sha256) &&
+    isCanonicalId(value.review_id) &&
+    Number.isSafeInteger(value.revision) &&
+    (value.revision as number) >= 1 &&
+    value.execution_id === executionId &&
+    isCanonicalId(value.execution_author_user_id) &&
+    isCanonicalId(value.reviewer_user_id) &&
+    typeof value.evidence_receipt_sha256 === "string" &&
+    /^[0-9a-f]{64}$/.test(value.evidence_receipt_sha256) &&
+    (value.status === "pending" ||
+      value.status === "approved" ||
+      value.status === "changes_requested") &&
+    Array.isArray(value.items)
   );
 }
 
@@ -232,6 +297,52 @@ export async function listAiExecutions(
     });
   }
   return body;
+}
+
+export async function getAiReviewScope(
+  projectId: string,
+  executionId: string,
+): Promise<AiReviewScope> {
+  requireNonBlankId(projectId, "projectId");
+  requireNonBlankId(executionId, "executionId");
+  const response = await fetchWithRefresh(
+    `${BASE_URL}/projects/${encodeURIComponent(projectId)}/ai-executions/${encodeURIComponent(executionId)}/review`,
+    {
+      cache: "no-store",
+      headers: { Accept: "application/json", ...(await getAuthHeaders()) },
+    },
+  );
+  if (!response.ok) await throwAiApiError(response);
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new WordAddinApiError({
+      status: 502,
+      code: "invalid_response",
+      message: "Invalid API response.",
+    });
+  }
+  if (!isAiReviewResponse(body, projectId, executionId)) {
+    throw new WordAddinApiError({
+      status: 502,
+      code: "invalid_response",
+      message: "Invalid API response.",
+    });
+  }
+  return {
+    organization_id: body.organization_id,
+    matter_id: body.matter_id,
+    project_id: body.project_id,
+    document_id: body.document_id,
+    document_version_id: body.document_version_id,
+    document_content_sha256: body.document_content_sha256,
+    review_id: body.review_id,
+    revision: body.revision,
+    execution_id: body.execution_id,
+    status: body.status,
+  };
 }
 
 export async function getApprovedRedlineBundle(

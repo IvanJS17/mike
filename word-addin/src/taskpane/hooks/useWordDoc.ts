@@ -218,6 +218,11 @@ function serializeWordMutation<T>(operation: () => Promise<T>): Promise<T> {
   return result;
 }
 
+export interface ApprovedRedlineDocumentSnapshot {
+  readonly text: string;
+  readonly contentSha256: string;
+}
+
 async function sha256(value: string): Promise<string> {
   const digest = await globalThis.crypto.subtle.digest(
     "SHA-256",
@@ -226,6 +231,199 @@ async function sha256(value: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
+}
+
+async function sha256Bytes(bytes: Uint8Array): Promise<string> {
+  const buffer = new Uint8Array(bytes).buffer;
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+const APPROVED_REDLINE_SLICE_SIZE = 64 * 1024;
+const APPROVED_REDLINE_MAX_BYTES = 100 * 1024 * 1024;
+const APPROVED_REDLINE_MAX_SLICES = Math.ceil(
+  APPROVED_REDLINE_MAX_BYTES / APPROVED_REDLINE_SLICE_SIZE,
+);
+
+function snapshotReadError(): Error {
+  return new Error("Word document snapshot could not be read.");
+}
+
+function readCompressedWordFile(): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (): void => {
+      if (!settled) {
+        settled = true;
+        reject(snapshotReadError());
+      }
+    };
+    const succeed = (bytes: Uint8Array): void => {
+      if (!settled) {
+        settled = true;
+        resolve(bytes);
+      }
+    };
+
+    try {
+      Office.context.document.getFileAsync(
+        Office.FileType.Compressed,
+        { sliceSize: APPROVED_REDLINE_SLICE_SIZE },
+        (result) => {
+          if (
+            !result ||
+            result.status !== Office.AsyncResultStatus.Succeeded ||
+            !result.value
+          ) {
+            fail();
+            return;
+          }
+
+          const file = result.value;
+          const closeFile = (): void => {
+            try {
+              file.closeAsync();
+            } catch {
+              // The handle has still been closed exactly once from our side.
+            }
+          };
+
+          const read = async (): Promise<void> => {
+            try {
+              if (
+                !Number.isSafeInteger(file.sliceCount) ||
+                file.sliceCount < 1 ||
+                file.sliceCount > APPROVED_REDLINE_MAX_SLICES
+              ) {
+                throw snapshotReadError();
+              }
+
+              const reads = Array.from(
+                { length: file.sliceCount },
+                (_, index) =>
+                  new Promise<{ index: number; data: Uint8Array }>(
+                    (resolveSlice, rejectSlice) => {
+                      try {
+                        file.getSliceAsync(index, (sliceResult) => {
+                          if (
+                            !sliceResult ||
+                            sliceResult.status !==
+                              Office.AsyncResultStatus.Succeeded ||
+                            !sliceResult.value ||
+                            !Number.isSafeInteger(sliceResult.value.index) ||
+                            sliceResult.value.index < 0 ||
+                            sliceResult.value.index >= file.sliceCount
+                          ) {
+                            rejectSlice(snapshotReadError());
+                            return;
+                          }
+
+                          const data = sliceResult.value.data;
+                          const bytes =
+                            data instanceof Uint8Array
+                              ? new Uint8Array(data)
+                              : Array.isArray(data) &&
+                                  data.every(
+                                    (byte) =>
+                                      typeof byte === "number" &&
+                                      Number.isInteger(byte) &&
+                                      byte >= 0 &&
+                                      byte <= 255,
+                                  )
+                                ? Uint8Array.from(data as number[])
+                                : null;
+                          if (!bytes) {
+                            rejectSlice(snapshotReadError());
+                            return;
+                          }
+                          if (
+                            bytes.length < 1 ||
+                            bytes.length > APPROVED_REDLINE_SLICE_SIZE
+                          ) {
+                            rejectSlice(snapshotReadError());
+                            return;
+                          }
+                          resolveSlice({
+                            index: sliceResult.value.index,
+                            data: bytes,
+                          });
+                        });
+                      } catch {
+                        rejectSlice(snapshotReadError());
+                      }
+                    },
+                  ),
+              );
+              const results = await Promise.all(
+                reads.map((promise) =>
+                  promise.then(
+                    (value) => ({ value }),
+                    () => ({ value: null }),
+                  ),
+                ),
+              );
+              if (results.some((result) => result.value === null)) {
+                throw snapshotReadError();
+              }
+
+              const ordered = results
+                .map(
+                  (result) =>
+                    result.value as { index: number; data: Uint8Array },
+                )
+                .sort((left, right) => left.index - right.index);
+              if (ordered.some((slice, index) => slice.index !== index)) {
+                throw snapshotReadError();
+              }
+              const totalLength = ordered.reduce(
+                (total, slice) => total + slice.data.length,
+                0,
+              );
+              if (totalLength < 1 || totalLength > APPROVED_REDLINE_MAX_BYTES) {
+                throw snapshotReadError();
+              }
+              const bytes = new Uint8Array(totalLength);
+              let offset = 0;
+              for (const slice of ordered) {
+                bytes.set(slice.data, offset);
+                offset += slice.data.length;
+              }
+              succeed(bytes);
+            } catch {
+              fail();
+            } finally {
+              closeFile();
+            }
+          };
+          void read();
+        },
+      );
+    } catch {
+      fail();
+    }
+  });
+}
+
+export function readApprovedRedlineDocumentSnapshot(): Promise<ApprovedRedlineDocumentSnapshot> {
+  return serializeWordMutation(async () => {
+    try {
+      const firstHash = await sha256Bytes(await readCompressedWordFile());
+      const text = await Word.run(async (context) => {
+        const body = context.document.body;
+        body.load("text");
+        await context.sync();
+        if (typeof body.text !== "string") throw snapshotReadError();
+        return body.text;
+      });
+      const secondHash = await sha256Bytes(await readCompressedWordFile());
+      if (firstHash !== secondHash) throw snapshotReadError();
+      return Object.freeze({ text, contentSha256: firstHash });
+    } catch {
+      throw snapshotReadError();
+    }
+  });
 }
 
 /** Apply one coordinator-approved action, after revalidating its live target. */
@@ -3008,6 +3206,7 @@ export function useWordDoc() {
 
   return {
     readDocumentMarkdown,
+    readApprovedRedlineDocumentSnapshot,
     applyApprovedRedlineAction,
     applyTrackedEdits,
     acceptPendingRevisionsForEdit,
