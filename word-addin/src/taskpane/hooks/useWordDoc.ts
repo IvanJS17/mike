@@ -9,6 +9,7 @@ import {
 } from "../lib/documentMarkdown";
 import type { RedlineEdit } from "../lib/redline";
 import { isParagraphStyleFormat } from "../lib/redline";
+import type { PreparedApprovedRedlineAction } from "../lib/approvedRedline";
 import { createSecureUuid } from "../lib/secureUuid";
 import {
   bookmarkNameForEdit,
@@ -40,7 +41,11 @@ export type TrackedEditHandle = string & {
 };
 
 type TrackedEditApplyStatus =
-  "applied" | "applied-unmanaged" | "skipped" | "not-found" | "error";
+  | "applied"
+  | "applied-unmanaged"
+  | "skipped"
+  | "not-found"
+  | "error";
 
 type TrackedEditApplyReason =
   | "unsearchable"
@@ -93,7 +98,11 @@ interface TrackedEditResolutionResult {
 }
 
 type TrackedEditRevealStatus =
-  "revealed" | "already-resolved" | "released" | "not-found" | "error";
+  | "revealed"
+  | "already-resolved"
+  | "released"
+  | "not-found"
+  | "error";
 
 interface TrackedEditRevealResult {
   handle: TrackedEditHandle;
@@ -103,7 +112,11 @@ interface TrackedEditRevealResult {
 }
 
 type TrackedEditRestoreStatus =
-  "restored" | "view-only" | "not-found" | "resolved" | "error";
+  | "restored"
+  | "view-only"
+  | "not-found"
+  | "resolved"
+  | "error";
 
 interface TrackedEditRestoreResult {
   stableEditId: string;
@@ -119,7 +132,10 @@ export interface TrackedEditRestoreDescriptor {
 }
 
 type PersistedTrackedEditRevealStatus =
-  "revealed" | "not-found" | "resolved" | "error";
+  | "revealed"
+  | "not-found"
+  | "resolved"
+  | "error";
 
 interface PersistedTrackedEditRevealResult {
   stableEditId: string;
@@ -128,7 +144,11 @@ interface PersistedTrackedEditRevealResult {
 }
 
 type TrackedEditReleaseStatus =
-  "released" | "already-released" | "already-resolved" | "not-found" | "error";
+  | "released"
+  | "already-released"
+  | "already-resolved"
+  | "not-found"
+  | "error";
 
 interface TrackedEditReleaseResult {
   handle: TrackedEditHandle;
@@ -198,6 +218,109 @@ function serializeWordMutation<T>(operation: () => Promise<T>): Promise<T> {
   return result;
 }
 
+async function sha256(value: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+/** Apply one coordinator-approved action, after revalidating its live target. */
+export function applyApprovedRedlineAction(
+  action: PreparedApprovedRedlineAction,
+): Promise<void> {
+  return serializeWordMutation(async () => {
+    if (
+      !isSearchableOriginal(action.original) ||
+      !Number.isSafeInteger(action.start) ||
+      !Number.isSafeInteger(action.end) ||
+      action.start < 0 ||
+      action.end <= action.start ||
+      (await sha256(action.original)) !== action.before_text_sha256
+    ) {
+      throw new Error("Approved redline original is invalid.");
+    }
+
+    return Word.run(async (context) => {
+      const doc = context.document;
+      const body = doc.body;
+      doc.load("changeTrackingMode");
+      body.load("text");
+      await context.sync();
+
+      const originalMode = doc.changeTrackingMode;
+      const validateBody = (text: string): void => {
+        if (
+          action.end > text.length ||
+          text.slice(action.start, action.end) !== action.original
+        ) {
+          throw new Error(
+            "Approved redline target no longer matches the document.",
+          );
+        }
+      };
+
+      validateBody(body.text);
+
+      // Create the search only after a fresh body read so concurrent duplicate
+      // text or revision state is visible to the final host snapshot.
+      body.load("text");
+      await context.sync();
+      validateBody(body.text);
+
+      const matches = body.search(action.original, { matchCase: true });
+      matches.load("items");
+      await context.sync();
+      if (matches.items.length !== 1) {
+        throw new Error(
+          `Approved redline expected one exact match; found ${matches.items.length}.`,
+        );
+      }
+
+      const match = matches.items[0];
+      if (!match) {
+        throw new Error("Approved redline match disappeared.");
+      }
+      const revisions = match.getTrackedChanges();
+      // Reload every fail-closed predicate together. No await occurs between
+      // checking this snapshot and queuing the first document write.
+      body.load("text");
+      matches.load("items");
+      match.load("text");
+      revisions.load("items");
+      await context.sync();
+      validateBody(body.text);
+      if (
+        matches.items.length !== 1 ||
+        match.text !== action.original ||
+        revisions.items.length > 0
+      ) {
+        throw new Error("Approved redline target is stale or already revised.");
+      }
+
+      let trackingModeChanged = false;
+      try {
+        doc.changeTrackingMode = Word.ChangeTrackingMode.trackAll;
+        trackingModeChanged = true;
+        const replacement = toWordText(action.replacement);
+        if (replacement.length > 0) {
+          match.insertText(replacement, Word.InsertLocation.after);
+        }
+        match.delete();
+        await context.sync();
+      } finally {
+        if (trackingModeChanged) {
+          doc.changeTrackingMode = originalMode;
+          await context.sync();
+        }
+      }
+    });
+  });
+}
+
 function createTrackedEditHandle(): TrackedEditHandle {
   nextTrackedEditHandle += 1;
   return `mike-edit-${Date.now().toString(36)}-${nextTrackedEditHandle.toString(36)}-${createSecureUuid()}` as TrackedEditHandle;
@@ -210,7 +333,8 @@ function rememberTerminalState(
   terminalTrackedEdits.set(handle, state);
   if (terminalTrackedEdits.size <= MAX_TERMINAL_HANDLE_HISTORY) return;
   const oldest = terminalTrackedEdits.keys().next().value as
-    TrackedEditHandle | undefined;
+    | TrackedEditHandle
+    | undefined;
   if (oldest) terminalTrackedEdits.delete(oldest);
 }
 
@@ -1867,13 +1991,19 @@ export function revealPersistedTrackedEdit(
 export type DocumentTextRevealStatus = "selected" | "not-found" | "error";
 
 export type TrackedEditValidationStatus =
-  "ready" | "not-found" | "skipped" | "error";
+  | "ready"
+  | "not-found"
+  | "skipped"
+  | "error";
 
 export interface TrackedEditValidationResult {
   status: TrackedEditValidationStatus;
   matches: number;
   reason?:
-    "unsearchable" | "ambiguous" | "pre-existing-revisions" | "word-error";
+    | "unsearchable"
+    | "ambiguous"
+    | "pre-existing-revisions"
+    | "word-error";
   error?: string;
 }
 
@@ -1972,7 +2102,10 @@ export function validateTrackedEdit(
 }
 
 export type ProposedEditRevealStatus =
-  "revealed" | "not-found" | "ambiguous" | "error";
+  | "revealed"
+  | "not-found"
+  | "ambiguous"
+  | "error";
 
 export interface ProposedEditRevealResult {
   status: ProposedEditRevealStatus;
@@ -2875,6 +3008,7 @@ export function useWordDoc() {
 
   return {
     readDocumentMarkdown,
+    applyApprovedRedlineAction,
     applyTrackedEdits,
     acceptPendingRevisionsForEdit,
   };

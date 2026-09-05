@@ -73,6 +73,200 @@ export {
 } from "./client";
 export type { ApiKeyStatus } from "./client";
 
+export type AiExecutionSummary = {
+  id: string;
+  project_id: string;
+  matter_id: string;
+  document_id: string;
+  document_version_id: string;
+  document_content_sha256: string;
+  status: "pending" | "running" | "succeeded" | "failed";
+  error_class: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export class WordAddinApiError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+
+  constructor(args: { message: string; status: number; code?: string | null }) {
+    super(args.message);
+    this.name = "WordAddinApiError";
+    this.status = args.status;
+    this.code = args.code ?? null;
+  }
+}
+
+const AI_EXECUTION_SUMMARY_KEYS = [
+  "id",
+  "project_id",
+  "matter_id",
+  "document_id",
+  "document_version_id",
+  "document_content_sha256",
+  "status",
+  "error_class",
+  "created_at",
+  "started_at",
+  "finished_at",
+] as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): boolean {
+  const actualKeys = Object.keys(value);
+  return (
+    actualKeys.length === keys.length &&
+    keys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+  );
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || (typeof value === "string" && value.trim() !== "");
+}
+
+function isCanonicalId(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.length > 0 && value.trim() === value
+  );
+}
+
+function isAiExecutionSummary(
+  value: unknown,
+  projectId: string,
+): value is AiExecutionSummary {
+  if (!isRecord(value) || !hasExactKeys(value, AI_EXECUTION_SUMMARY_KEYS)) {
+    return false;
+  }
+  return (
+    isCanonicalId(value.id) &&
+    value.project_id === projectId &&
+    isCanonicalId(value.matter_id) &&
+    isCanonicalId(value.document_id) &&
+    isCanonicalId(value.document_version_id) &&
+    typeof value.document_content_sha256 === "string" &&
+    /^[0-9a-f]{64}$/.test(value.document_content_sha256) &&
+    (value.status === "pending" ||
+      value.status === "running" ||
+      value.status === "succeeded" ||
+      value.status === "failed") &&
+    isNullableString(value.error_class) &&
+    typeof value.created_at === "string" &&
+    value.created_at.trim() !== "" &&
+    isNullableString(value.started_at) &&
+    isNullableString(value.finished_at)
+  );
+}
+
+function requireNonBlankId(value: string, name: string): void {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.trim() !== value
+  ) {
+    throw new WordAddinApiError({
+      status: 400,
+      code: "invalid_request",
+      message: `${name} is required.`,
+    });
+  }
+}
+
+async function throwAiApiError(response: Response): Promise<never> {
+  let code: string | null = null;
+  let detail: string | null = null;
+  try {
+    const body: unknown = await response.json();
+    if (isRecord(body)) {
+      code = typeof body.code === "string" ? body.code : null;
+      detail = typeof body.detail === "string" ? body.detail : null;
+    }
+  } catch {
+    // Non-JSON responses are intentionally reduced to the generic error.
+  }
+  throw new WordAddinApiError({
+    status: response.status,
+    code,
+    message: detail || `API error: ${response.status}`,
+  });
+}
+
+export async function listAiExecutions(
+  projectId: string,
+): Promise<AiExecutionSummary[]> {
+  requireNonBlankId(projectId, "projectId");
+  const response = await fetchWithRefresh(
+    `${BASE_URL}/projects/${encodeURIComponent(projectId)}/ai-executions`,
+    {
+      cache: "no-store",
+      headers: { Accept: "application/json", ...(await getAuthHeaders()) },
+    },
+  );
+  if (!response.ok) await throwAiApiError(response);
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new WordAddinApiError({
+      status: 502,
+      code: "invalid_response",
+      message: "Invalid API response.",
+    });
+  }
+  if (
+    !Array.isArray(body) ||
+    !body.every((item) => isAiExecutionSummary(item, projectId))
+  ) {
+    throw new WordAddinApiError({
+      status: 502,
+      code: "invalid_response",
+      message: "Invalid API response.",
+    });
+  }
+  return body;
+}
+
+export async function getApprovedRedlineBundle(
+  projectId: string,
+  executionId: string,
+  revision = 1,
+): Promise<unknown> {
+  requireNonBlankId(projectId, "projectId");
+  requireNonBlankId(executionId, "executionId");
+  if (!Number.isSafeInteger(revision) || revision < 1) {
+    throw new WordAddinApiError({
+      status: 400,
+      code: "invalid_request",
+      message: "revision must be a positive safe integer.",
+    });
+  }
+  const response = await fetchWithRefresh(
+    `${BASE_URL}/projects/${encodeURIComponent(projectId)}/ai-executions/${encodeURIComponent(executionId)}/review/redline-bundle?revision=${revision}`,
+    {
+      cache: "no-store",
+      headers: { Accept: "application/json", ...(await getAuthHeaders()) },
+    },
+  );
+  if (!response.ok) await throwAiApiError(response);
+  try {
+    return (await response.json()) as unknown;
+  } catch {
+    throw new WordAddinApiError({
+      status: 502,
+      code: "invalid_response",
+      message: "Invalid API response.",
+    });
+  }
+}
+
 /**
  * List a project's documents (GET /projects/:id/documents). The base client
  * exposes no wrapper for this endpoint (the web app reads project.documents off
