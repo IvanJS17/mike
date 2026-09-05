@@ -16,6 +16,7 @@ const BACKEND_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
   "..",
+  "..",
 );
 const MIGRATIONS_DIR = path.join(BACKEND_DIR, "migrations");
 
@@ -104,13 +105,35 @@ describe("recovery migration ordering contract", () => {
 });
 
 describe("recovery migration ledger state", () => {
-  it("starts with zero recovery migrations and a pending fresh-schema fingerprint", () => {
+  it("tracks integrated migrations and the optional E2a candidate before or after staging", () => {
+    const integrated = [
+      "20260831_01_recovery_identity_tenancy.sql",
+      "20260902_01_recovery_onboarding_organization.sql",
+    ];
+    const candidate = "20260904_01_recovery_ai_evidence_review.sql";
     const committed = gitLsMigrations().filter((name) =>
       name.includes(RECOVERY_MIGRATION_TAG),
     );
-    expect(committed).toEqual([]);
+    expect(committed).toEqual([
+      ...integrated,
+      ...(committed.includes(candidate) ? [candidate] : []),
+    ]);
+
     const onDisk = listRecoveryMigrations(MIGRATIONS_DIR);
-    expect(onDisk).toEqual([]);
+    expect(onDisk).toEqual([
+      ...integrated,
+      ...(onDisk.includes(candidate) ? [candidate] : []),
+    ]);
+    expect(sortRecoveryMigrations([...integrated, candidate])).toEqual([
+      ...integrated,
+      candidate,
+    ]);
+    expect(() =>
+      assertRecoveryMigrationName(candidate, [
+        ...integrated,
+        "20260904_01_upstream_collision.sql",
+      ]),
+    ).toThrow(/collides/);
     expect(RECOVERY_SCHEMA_FINGERPRINT_MARKER).toMatch(
       /^RECOVERY_SCHEMA_FINGERPRINT:/,
     );

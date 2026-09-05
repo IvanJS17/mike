@@ -39,11 +39,17 @@ describe("recovery onboarding organization migration", () => {
   it("uses one collision-free dated migration", () => {
     expect(migration).not.toBe("");
     expect(migration).toMatch(/^-- Migration date: 2026-09-02\b/m);
-    const existing = fs
+    const candidateStem = MIGRATION_NAME.slice(0, 11);
+    const existingAtIntroduction = fs
       .readdirSync(path.join(BACKEND_DIR, "migrations"))
-      .filter((name) => name.endsWith(".sql") && name !== MIGRATION_NAME);
+      .filter(
+        (name) =>
+          name.endsWith(".sql") &&
+          name !== MIGRATION_NAME &&
+          name.slice(0, 11) <= candidateStem,
+      );
     expect(() =>
-      assertRecoveryMigrationName(MIGRATION_NAME, existing),
+      assertRecoveryMigrationName(MIGRATION_NAME, existingAtIntroduction),
     ).not.toThrow();
   });
 
