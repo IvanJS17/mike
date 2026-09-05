@@ -218,9 +218,17 @@ function serializeWordMutation<T>(operation: () => Promise<T>): Promise<T> {
   return result;
 }
 
+declare const approvedRedlineDocumentIdentityBrand: unique symbol;
+
+/** Opaque identity captured from the persisted and live Word document URLs. */
+export type ApprovedRedlineDocumentIdentity = string & {
+  readonly [approvedRedlineDocumentIdentityBrand]: true;
+};
+
 export interface ApprovedRedlineDocumentSnapshot {
   readonly text: string;
   readonly contentSha256: string;
+  readonly identity: ApprovedRedlineDocumentIdentity;
 }
 
 async function sha256(value: string): Promise<string> {
@@ -249,6 +257,71 @@ const APPROVED_REDLINE_MAX_SLICES = Math.ceil(
 
 function snapshotReadError(): Error {
   return new Error("Word document snapshot could not be read.");
+}
+
+function documentIdentityError(): Error {
+  return new Error("Word document identity could not be verified.");
+}
+
+function normalizeDocumentUrl(value: string): string {
+  return value.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+/** Read and validate the synchronous identity boundary used by approved redlines. */
+export function readApprovedRedlineDocumentIdentity(
+  expectedDocumentId: string,
+): ApprovedRedlineDocumentIdentity {
+  try {
+    const document = Office.context.document;
+    const persistedId: unknown = document.settings.get(
+      "mike.word.documentId.v1",
+    );
+    const persistedUrl: unknown = document.settings.get(
+      "mike.word.documentUrl.v1",
+    );
+    const liveUrl: unknown = document.url;
+    if (
+      typeof expectedDocumentId !== "string" ||
+      !expectedDocumentId.trim() ||
+      persistedId !== expectedDocumentId ||
+      typeof persistedUrl !== "string" ||
+      !persistedUrl.trim() ||
+      typeof liveUrl !== "string" ||
+      !liveUrl.trim()
+    ) {
+      throw documentIdentityError();
+    }
+    const stored = normalizeDocumentUrl(persistedUrl);
+    const live = normalizeDocumentUrl(liveUrl);
+    if (!stored || stored !== live) throw documentIdentityError();
+    return JSON.stringify({
+      id: expectedDocumentId,
+      stored,
+      live,
+    }) as ApprovedRedlineDocumentIdentity;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "Word document identity could not be verified."
+    ) {
+      throw error;
+    }
+    throw documentIdentityError();
+  }
+}
+
+function requireApprovedRedlineIdentity(
+  expectedIdentity: ApprovedRedlineDocumentIdentity,
+): void {
+  const persistedId = Office.context.document.settings.get(
+    "mike.word.documentId.v1",
+  );
+  if (
+    typeof persistedId !== "string" ||
+    readApprovedRedlineDocumentIdentity(persistedId) !== expectedIdentity
+  ) {
+    throw documentIdentityError();
+  }
 }
 
 function readCompressedWordFile(): Promise<Uint8Array> {
@@ -406,10 +479,16 @@ function readCompressedWordFile(): Promise<Uint8Array> {
   });
 }
 
-export function readApprovedRedlineDocumentSnapshot(): Promise<ApprovedRedlineDocumentSnapshot> {
+export function readApprovedRedlineDocumentSnapshot(
+  expectedDocumentId: string,
+): Promise<ApprovedRedlineDocumentSnapshot> {
   return serializeWordMutation(async () => {
     try {
-      const firstHash = await sha256Bytes(await readCompressedWordFile());
+      const identity = readApprovedRedlineDocumentIdentity(expectedDocumentId);
+      const firstBytes = await readCompressedWordFile();
+      requireApprovedRedlineIdentity(identity);
+      const firstHash = await sha256Bytes(firstBytes);
+      requireApprovedRedlineIdentity(identity);
       const text = await Word.run(async (context) => {
         const body = context.document.body;
         body.load("text");
@@ -417,9 +496,13 @@ export function readApprovedRedlineDocumentSnapshot(): Promise<ApprovedRedlineDo
         if (typeof body.text !== "string") throw snapshotReadError();
         return body.text;
       });
-      const secondHash = await sha256Bytes(await readCompressedWordFile());
+      requireApprovedRedlineIdentity(identity);
+      const secondBytes = await readCompressedWordFile();
+      requireApprovedRedlineIdentity(identity);
+      const secondHash = await sha256Bytes(secondBytes);
+      requireApprovedRedlineIdentity(identity);
       if (firstHash !== secondHash) throw snapshotReadError();
-      return Object.freeze({ text, contentSha256: firstHash });
+      return Object.freeze({ text, contentSha256: firstHash, identity });
     } catch {
       throw snapshotReadError();
     }
@@ -429,8 +512,10 @@ export function readApprovedRedlineDocumentSnapshot(): Promise<ApprovedRedlineDo
 /** Apply one coordinator-approved action, after revalidating its live target. */
 export function applyApprovedRedlineAction(
   action: PreparedApprovedRedlineAction,
+  expectedIdentity: ApprovedRedlineDocumentIdentity,
 ): Promise<void> {
   return serializeWordMutation(async () => {
+    requireApprovedRedlineIdentity(expectedIdentity);
     if (
       !isSearchableOriginal(action.original) ||
       !Number.isSafeInteger(action.start) ||
@@ -441,6 +526,7 @@ export function applyApprovedRedlineAction(
     ) {
       throw new Error("Approved redline original is invalid.");
     }
+    requireApprovedRedlineIdentity(expectedIdentity);
 
     return Word.run(async (context) => {
       const doc = context.document;
@@ -498,6 +584,7 @@ export function applyApprovedRedlineAction(
       ) {
         throw new Error("Approved redline target is stale or already revised.");
       }
+      requireApprovedRedlineIdentity(expectedIdentity);
 
       let trackingModeChanged = false;
       try {
