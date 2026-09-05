@@ -63,10 +63,7 @@ export type ParseQueryResult =
   | { ok: false; error: string };
 
 export function escapeLikePattern(value: string): string {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/%/g, "\\%")
-    .replace(/_/g, "\\_");
+  return value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
 
 export function parseQuery(
@@ -131,13 +128,15 @@ export async function queryEvents(
   let query = db
     .from("audit_events")
     .select(
-      "id, created_at, user_id, user_email, action, status, title, surface, project_id, chat_id, document_id, review_id, model, detail",
+      "id, created_at, user_id:actor_user_id, user_email, action:event_type, status, title, surface, project_id, chat_id, document_id, review_id, model, detail:event_detail",
       { count: "exact" },
     );
   query = projectIds.length
-    ? query.or(`user_id.eq.${userId},project_id.in.(${projectIds.join(",")})`)
-    : query.eq("user_id", userId);
-  if (q.action) query = query.eq("action", q.action);
+    ? query.or(
+        `actor_user_id.eq.${userId},project_id.in.(${projectIds.join(",")})`,
+      )
+    : query.eq("actor_user_id", userId);
+  if (q.action) query = query.eq("event_type", q.action);
   if (q.status) query = query.eq("status", q.status);
   if (q.surface) query = query.eq("surface", q.surface);
   if (q.q) query = query.ilike("title", `%${escapeLikePattern(q.q)}%`);

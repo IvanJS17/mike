@@ -226,7 +226,7 @@ describe("queryEvents visibility scoping", () => {
     it("scopes to own events OR accessible project events (owned + shared)", async () => {
         const { db, calls } = makeDb(["p-own"], ["p-shared"]);
         await queryEvents(db, "u1", "u1@example.com", query);
-        expect(calls.or).toBe("user_id.eq.u1,project_id.in.(p-own,p-shared)");
+        expect(calls.or).toBe("actor_user_id.eq.u1,project_id.in.(p-own,p-shared)");
         expect(calls.eq).toEqual([]);
     });
 
@@ -234,7 +234,7 @@ describe("queryEvents visibility scoping", () => {
         const { db, calls } = makeDb([], []);
         await queryEvents(db, "u1", "u1@example.com", query);
         expect(calls.or).toBeUndefined();
-        expect(calls.eq).toContainEqual(["user_id", "u1"]);
+        expect(calls.eq).toContainEqual(["actor_user_id", "u1"]);
     });
 
     it("de-duplicates owned and shared project ids", async () => {
@@ -260,8 +260,8 @@ describe("queryEvents visibility scoping", () => {
 
         expect(calls.eq).toEqual(
             expect.arrayContaining([
-                ["user_id", "u1"],
-                ["action", "document.uploaded"],
+                ["actor_user_id", "u1"],
+                ["event_type", "document.uploaded"],
                 ["status", "completed"],
                 ["surface", "project"],
             ]),

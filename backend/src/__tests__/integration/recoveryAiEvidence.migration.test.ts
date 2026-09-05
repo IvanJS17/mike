@@ -95,7 +95,7 @@ describe("Slice E2a AI evidence/review persistence migration", () => {
     expect(migration).toMatch(/^-- migration date: 2026-09-04\b/m);
     const existing = fs
       .readdirSync(MIGRATIONS_DIR)
-      .filter((name) => name.endsWith(".sql") && name !== CANDIDATE);
+      .filter((name) => name.endsWith(".sql") && name < CANDIDATE);
     expect(() =>
       assertRecoveryMigrationName(CANDIDATE, existing),
     ).not.toThrow();

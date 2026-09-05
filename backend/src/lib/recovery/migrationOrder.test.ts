@@ -111,22 +111,26 @@ describe("recovery migration ledger state", () => {
       "20260902_01_recovery_onboarding_organization.sql",
     ];
     const candidate = "20260904_01_recovery_ai_evidence_review.sql";
+    const convergence = "20260905_01_recovery_core_convergence.sql";
     const committed = gitLsMigrations().filter((name) =>
       name.includes(RECOVERY_MIGRATION_TAG),
     );
     expect(committed).toEqual([
       ...integrated,
       ...(committed.includes(candidate) ? [candidate] : []),
+      ...(committed.includes(convergence) ? [convergence] : []),
     ]);
 
     const onDisk = listRecoveryMigrations(MIGRATIONS_DIR);
     expect(onDisk).toEqual([
       ...integrated,
       ...(onDisk.includes(candidate) ? [candidate] : []),
+      ...(onDisk.includes(convergence) ? [convergence] : []),
     ]);
-    expect(sortRecoveryMigrations([...integrated, candidate])).toEqual([
+    expect(sortRecoveryMigrations([...integrated, candidate, convergence])).toEqual([
       ...integrated,
       candidate,
+      convergence,
     ]);
     expect(() =>
       assertRecoveryMigrationName(candidate, [

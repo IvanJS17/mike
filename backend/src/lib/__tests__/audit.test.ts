@@ -40,7 +40,7 @@ describe("recordChatTurn artifact mining", () => {
             { type: "workflow_applied", workflow_id: "wf1", title: "Cleanup" },
         ]);
 
-        expect(inserts.map((r) => r.action)).toEqual([
+        expect(inserts.map((r) => r.event_type)).toEqual([
             "chat.message",
             "document.generated",
             "document.edited",
@@ -48,8 +48,8 @@ describe("recordChatTurn artifact mining", () => {
         ]);
         expect(inserts[1]).toMatchObject({ title: "brief.docx", document_id: "d1" });
         expect(inserts[3]).toMatchObject({
-            action: "workflow.applied",
-            detail: { workflow_id: "wf1" },
+            event_type: "workflow.applied",
+            event_detail: { workflow_id: "wf1" },
         });
     });
 
@@ -68,7 +68,7 @@ describe("recordChatTurn artifact mining", () => {
         ]);
 
         // chat.message + one document.generated per copy.
-        const artifacts = inserts.filter((r) => r.action === "document.generated");
+        const artifacts = inserts.filter((r) => r.event_type === "document.generated");
         expect(artifacts).toHaveLength(2);
         expect(artifacts.map((r) => r.title)).toEqual(["copy-a.docx", "copy-b.docx"]);
         expect(artifacts.map((r) => r.document_id)).toEqual(["da", "db"]);
@@ -82,6 +82,6 @@ describe("recordChatTurn artifact mining", () => {
         await recordChatTurn(db, base, [
             { type: "doc_replicated", filename: "src.docx", count: 0, copies: [] },
         ]);
-        expect(inserts.map((r) => r.action)).toEqual(["chat.message"]);
+        expect(inserts.map((r) => r.event_type)).toEqual(["chat.message"]);
     });
 });

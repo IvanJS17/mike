@@ -44,11 +44,11 @@ create table if not exists public.user_profiles (
   message_credits_used integer not null default 0,
   credits_reset_date timestamptz not null default (now() + interval '30 days'),
   title_model text,
-  tabular_model text,
+  tabular_model text not null default 'gemini-3-flash-preview',
   last_selected_chat_model text,
   last_selected_reasoning_level text check (last_selected_reasoning_level in ('none', 'low', 'medium', 'high', 'xhigh', 'max')),
   quote_model text,
-  mfa_on_login boolean not null default false,
+  mfa_on_login boolean not null default true,
   legal_research_us boolean not null default true,
   quick_actions_visible boolean not null default true,
   dark_mode boolean not null default false,
@@ -191,14 +191,46 @@ alter table public.auth_handoff_tickets enable row level security;
 create table if not exists public.user_api_keys (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
-  provider text not null check (provider in ('claude', 'gemini', 'openai', 'openrouter', 'vercel', 'opencode-go', 'courtlistener')),
+  provider text not null check (provider in ('claude', 'gemini', 'openai', 'openrouter', 'deepseek', 'opencode-zen', 'opencode-go', 'vercel')),
   encrypted_key text not null,
   iv text not null,
   auth_tag text not null,
+  credential_ref text not null,
+  enabled boolean not null default true,
+  version integer not null default 1,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique(user_id, provider)
+  unique(user_id, provider),
+  unique(user_id, credential_ref)
 );
+
+create or replace function public.assign_user_api_key_credential_ref()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if TG_OP = 'INSERT' then
+    new.version := 1;
+  elsif new.enabled and (
+    not old.enabled
+    or new.encrypted_key is distinct from old.encrypted_key
+    or new.iv is distinct from old.iv
+    or new.auth_tag is distinct from old.auth_tag
+  ) then
+    new.version := old.version + 1;
+  else
+    new.version := old.version;
+  end if;
+
+  new.credential_ref := new.provider || ':v' || new.version::text;
+  return new;
+end;
+$$;
+drop trigger if exists assign_user_api_key_credential_ref on public.user_api_keys;
+create trigger assign_user_api_key_credential_ref
+  before insert or update on public.user_api_keys
+  for each row execute function public.assign_user_api_key_credential_ref();
 
 create index if not exists idx_user_api_keys_user
   on public.user_api_keys(user_id);
@@ -521,6 +553,25 @@ begin
   end if;
 end;
 $$;
+
+-- Historical LiTT download grants remain the authoritative single-use,
+-- expiring storage capability; Slice G may extend but must not replace them.
+create table if not exists public.document_download_grants (
+  id uuid primary key default gen_random_uuid(),
+  document_id uuid not null references public.documents(id) on delete cascade,
+  document_version_id uuid not null references public.document_versions(id) on delete cascade,
+  issued_to_user text not null,
+  token_hash text not null unique,
+  storage_path text not null,
+  filename text not null,
+  expires_at timestamptz not null,
+  consumed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists document_download_grants_expiry_idx
+  on public.document_download_grants(expires_at)
+  where consumed_at is null;
+alter table public.document_download_grants enable row level security;
 
 alter table public.documents
   add column if not exists current_version_id uuid
@@ -1268,9 +1319,15 @@ create table if not exists public.chats (
   project_id uuid references public.projects(id) on delete cascade,
   user_id uuid not null references auth.users(id) on delete cascade,
   title text,
+  model_provider text,
   model text,
+  credential_ref text,
   reasoning_level text check (reasoning_level in ('none', 'low', 'medium', 'high', 'xhigh', 'max')),
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  constraint chats_model_route_consistent check (
+    (model_provider is null and model is null and credential_ref is null)
+    or (model_provider is not null and model is not null and credential_ref is not null)
+  )
 );
 
 create index if not exists idx_chats_user
@@ -1992,45 +2049,6 @@ create table if not exists public.tabular_review_chat_messages (
 
 create index if not exists tabular_review_chat_messages_chat_idx
   on public.tabular_review_chat_messages(chat_id, created_at);
-
--- ---------------------------------------------------------------------------
--- CourtListener bulk-data indexes
--- ---------------------------------------------------------------------------
-
-create table if not exists public.courtlistener_citation_index (
-  id bigint primary key,
-  volume text not null,
-  reporter text not null,
-  page text not null,
-  type integer,
-  cluster_id bigint not null,
-  date_created timestamptz,
-  date_modified timestamptz
-);
-
-create index if not exists courtlistener_citation_lookup_idx
-  on public.courtlistener_citation_index(volume, reporter, page);
-
-create index if not exists courtlistener_citation_cluster_idx
-  on public.courtlistener_citation_index(cluster_id);
-
-alter table public.courtlistener_citation_index enable row level security;
-
-create table if not exists public.courtlistener_opinion_cluster_index (
-  id bigint primary key,
-  case_name text,
-  case_name_short text,
-  case_name_full text,
-  slug text,
-  date_filed date,
-  citation_count integer,
-  precedential_status text,
-  filepath_pdf_harvard text,
-  filepath_json_harvard text,
-  docket_id bigint
-);
-
-alter table public.courtlistener_opinion_cluster_index enable row level security;
 
 -- ---------------------------------------------------------------------------
 -- Library search and lightweight overview facets
@@ -3019,24 +3037,36 @@ grant execute on function public.resolve_library_folder_path(uuid, text, uuid, t
 -- backend-owned table, direct browser roles are revoked and RLS is enabled with
 -- no policies (defense in depth; service_role bypasses RLS for the backend path).
 create table if not exists public.audit_events (
-  id uuid primary key default gen_random_uuid(),
+  id bigint generated always as identity primary key,
+  actor_user_id uuid references auth.users(id) on delete set null,
+  organization_id uuid,
+  event_type text not null,
+  event_detail jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
-  user_id uuid not null references auth.users(id) on delete cascade,
+  -- Optional metadata for new upstream-style actions; legacy evidence is unchanged.
   user_email text,
-  action text not null,
-  status text not null default 'completed',
+  status text,
   title text,
   surface text,
   project_id uuid,
   chat_id uuid,
   document_id uuid,
   review_id uuid,
-  model text,
-  detail jsonb
+  model text
 );
-create index if not exists audit_events_user_created on public.audit_events (user_id, created_at desc);
-create index if not exists audit_events_project_created on public.audit_events (project_id, created_at desc);
+create index if not exists audit_events_org_created_idx on public.audit_events(organization_id, created_at desc);
+create index if not exists audit_events_type_idx on public.audit_events(event_type);
 alter table public.audit_events enable row level security;
+create or replace function public.audit_events_insert_only()
+returns trigger language plpgsql as $$
+begin
+  raise exception 'audit_events is insert-only; UPDATE/DELETE are forbidden (W1.13)';
+end;
+$$;
+drop trigger if exists audit_events_insert_only_trigger on public.audit_events;
+create trigger audit_events_insert_only_trigger
+  before update or delete on public.audit_events
+  for each row execute function public.audit_events_insert_only();
 
 revoke all on public.user_profiles from anon, authenticated;
 revoke all on public.projects from anon, authenticated;
@@ -3073,8 +3103,6 @@ revoke all on public.user_mcp_oauth_tokens from anon, authenticated;
 revoke all on public.user_mcp_oauth_states from anon, authenticated;
 revoke all on public.user_mcp_connector_tools from anon, authenticated;
 revoke all on public.user_mcp_tool_audit_logs from anon, authenticated;
-revoke all on public.courtlistener_citation_index from anon, authenticated;
-revoke all on public.courtlistener_opinion_cluster_index from anon, authenticated;
 revoke all on public.audit_events from anon, authenticated;
 revoke all on function public.replace_mike_workflows(text, jsonb)
   from public, anon, authenticated;
@@ -3499,6 +3527,21 @@ grant execute on function public.is_organization_member(uuid) to authenticated;
 grant execute on function public.is_workspace_admin(uuid) to authenticated;
 grant execute on function public.matter_role(uuid) to authenticated;
 grant execute on function public.matters_select_visible(uuid) to authenticated;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'audit_events_organization_id_fkey'
+      and conrelid = 'public.audit_events'::regclass
+  ) then
+    alter table public.audit_events
+      add constraint audit_events_organization_id_fkey
+      foreign key (organization_id) references public.organizations(id)
+      on delete set null;
+  end if;
+end;
+$$;
 
 -- ---------------------------------------------------------------------------
 -- 3. Policies: keep the six LiTT SELECT policies (active-membership gated),
@@ -6271,3 +6314,63 @@ revoke all on function public.assert_ai_redline_bundle_access(uuid, uuid, uuid, 
   from public, anon, authenticated, service_role;
 grant execute on function public.assert_ai_redline_bundle_access(uuid, uuid, uuid, bigint, text)
   to service_role;
+
+-- Recovery target keeps RLS enabled on every application relation. Backend
+-- mutations use service_role; browser roles retain no direct table privileges.
+alter table public.user_profiles enable row level security;
+alter table public.auth_handoff_tickets enable row level security;
+alter table public.user_api_keys enable row level security;
+alter table public.user_router_models enable row level security;
+alter table public.projects enable row level security;
+alter table public.project_subfolders enable row level security;
+alter table public.library_folders enable row level security;
+alter table public.documents enable row level security;
+alter table public.document_versions enable row level security;
+alter table public.document_download_grants enable row level security;
+alter table public.document_edits enable row level security;
+alter table public.workflows enable row level security;
+alter table public.hidden_workflows enable row level security;
+alter table public.workflow_shares enable row level security;
+alter table public.default_workflow_installations enable row level security;
+alter table public.quick_actions enable row level security;
+alter table public.mike_workflows enable row level security;
+alter table public.workflow_reference_documents enable row level security;
+alter table public.mike_workflow_reference_files enable row level security;
+alter table public.workflow_addons enable row level security;
+alter table public.workflow_addon_reference_files enable row level security;
+alter table public.workflow_open_source_submissions enable row level security;
+alter table public.chats enable row level security;
+alter table public.chat_messages enable row level security;
+alter table public.word_documents enable row level security;
+alter table public.word_chats enable row level security;
+alter table public.word_chat_messages enable row level security;
+alter table public.word_document_edits enable row level security;
+alter table public.tabular_reviews enable row level security;
+alter table public.tabular_review_rows enable row level security;
+alter table public.tabular_review_row_sources enable row level security;
+alter table public.tabular_cells enable row level security;
+alter table public.tabular_review_chats enable row level security;
+alter table public.tabular_review_chat_messages enable row level security;
+
+-- Catalog, routing, folder-resolution, generation, and password helpers are
+-- backend-only; do not inherit PUBLIC EXECUTE on fresh installs.
+revoke all on function public.begin_tabular_review_generation(uuid, timestamptz, uuid, integer) from public, anon, authenticated;
+grant execute on function public.begin_tabular_review_generation(uuid, timestamptz, uuid, integer) to service_role;
+revoke all on function public.finish_tabular_review_generation(uuid, uuid) from public, anon, authenticated;
+grant execute on function public.finish_tabular_review_generation(uuid, uuid) to service_role;
+revoke all on function public.install_missing_default_workflows(text) from public, anon, authenticated;
+grant execute on function public.install_missing_default_workflows(text) to service_role;
+revoke all on function public.install_missing_default_workflows(text, jsonb) from public, anon, authenticated;
+grant execute on function public.install_missing_default_workflows(text, jsonb) to service_role;
+revoke all on function public.renew_tabular_review_generation(uuid, uuid, integer) from public, anon, authenticated;
+grant execute on function public.renew_tabular_review_generation(uuid, uuid, integer) to service_role;
+revoke all on function public.replace_mike_workflows(text, jsonb) from public, anon, authenticated;
+grant execute on function public.replace_mike_workflows(text, jsonb) to service_role;
+revoke all on function public.replace_user_router_models(uuid, text, text[]) from public, anon, authenticated;
+grant execute on function public.replace_user_router_models(uuid, text, text[]) to service_role;
+revoke all on function public.resolve_library_folder_path(uuid, text, uuid, text[], text) from public, anon, authenticated;
+grant execute on function public.resolve_library_folder_path(uuid, text, uuid, text[], text) to service_role;
+revoke all on function public.resolve_project_folder_path(uuid, uuid, uuid, text[], text) from public, anon, authenticated;
+grant execute on function public.resolve_project_folder_path(uuid, uuid, uuid, text[], text) to service_role;
+revoke all on function public.sync_user_password_set(uuid) from public, anon, authenticated;
+grant execute on function public.sync_user_password_set(uuid) to service_role;

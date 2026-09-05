@@ -23,12 +23,15 @@ export type AuditEventInput = {
   detail?: Record<string, unknown> | null;
 };
 
-export async function recordAudit(db: Db, event: AuditEventInput): Promise<void> {
+export async function recordAudit(
+  db: Db,
+  event: AuditEventInput,
+): Promise<void> {
   try {
     const { error } = await db.from("audit_events").insert({
-      user_id: event.userId,
+      actor_user_id: event.userId,
       user_email: event.userEmail ?? null,
-      action: event.action,
+      event_type: event.action,
       status: event.status ?? "completed",
       title: event.title?.slice(0, 300) ?? null,
       surface: event.surface ?? null,
@@ -37,11 +40,14 @@ export async function recordAudit(db: Db, event: AuditEventInput): Promise<void>
       document_id: event.documentId ?? null,
       review_id: event.reviewId ?? null,
       model: event.model ?? null,
-      detail: event.detail ?? null,
+      event_detail: event.detail ?? {},
     });
     if (error) console.error("[audit] insert failed:", error.message);
   } catch (err) {
-    console.error("[audit] insert threw:", err instanceof Error ? err.message : err);
+    console.error(
+      "[audit] insert threw:",
+      err instanceof Error ? err.message : err,
+    );
   }
 }
 
