@@ -139,6 +139,19 @@ export interface DrivePublicationStatus {
     failure_code: string | null;
 }
 
+export type DrivePublicationDisposition =
+    | "uploaded"
+    | "replayed"
+    | "reconciled"
+    | "failed"
+    | "unknown_outcome";
+
+export interface DrivePublicationWriteResult {
+    outcome: DrivePublicationOutcome;
+    disposition: DrivePublicationDisposition;
+    publication: DrivePublicationStatus;
+}
+
 export function isMfaRequiredError(error: unknown) {
     return (
         error instanceof MikeApiError &&
@@ -833,6 +846,36 @@ export async function getDrivePublicationStatus(
 ): Promise<DrivePublicationStatus> {
     const path = `/projects/${encodeURIComponent(projectId)}/ai-executions/${encodeURIComponent(executionId)}/review/drive-publications/${encodeURIComponent(publicationId)}`;
     return apiRequest<DrivePublicationStatus>(path);
+}
+
+export async function publishDrivePublication(
+    projectId: string,
+    executionId: string,
+    exportId: string,
+    expectedReviewRevision: number,
+): Promise<DrivePublicationWriteResult> {
+    const path = `/projects/${encodeURIComponent(projectId)}/ai-executions/${encodeURIComponent(executionId)}/review/drive-publications`;
+    return apiRequest<DrivePublicationWriteResult>(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            export_id: exportId,
+            expected_review_revision: expectedReviewRevision,
+        }),
+    });
+}
+
+export async function reconcileDrivePublication(
+    projectId: string,
+    executionId: string,
+    publicationId: string,
+): Promise<DrivePublicationWriteResult> {
+    const path = `/projects/${encodeURIComponent(projectId)}/ai-executions/${encodeURIComponent(executionId)}/review/drive-publications/${encodeURIComponent(publicationId)}/reconcile`;
+    return apiRequest<DrivePublicationWriteResult>(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+    });
 }
 
 export async function updateProject(

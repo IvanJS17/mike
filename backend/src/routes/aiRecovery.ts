@@ -34,6 +34,10 @@ import {
   createDrivePublicationPersistence,
   type DrivePublicationIntentDto,
 } from "../lib/recovery/persistence/drivePublicationPersistence";
+import {
+  createApprovedArtifactPublicationService,
+  type ApprovedArtifactDriveTransport,
+} from "../lib/recovery/drive/approvedArtifactPublication";
 import type { EvidenceResourceScopePort } from "../lib/recovery/evidence/appendOnlyEvidence";
 import { uploadFileIfAbsent, downloadFileStrict } from "../lib/storage";
 
@@ -309,6 +313,253 @@ function publicDrivePublication(intent: DrivePublicationIntentDto) {
   };
 }
 
+const APPROVED_ARTIFACT_EXPORT_COLUMNS =
+  "id,idempotency_key,review_id,review_revision,execution_id,organization_id,matter_id,project_id,source_document_id,source_document_version_id,artifact_document_id,artifact_document_version_id,source_document_sha256,evidence_receipt_sha256,filename,mime_type,artifact_sha256,storage_path,size_bytes";
+const APPROVED_ARTIFACT_EXPORT_KEYS =
+  APPROVED_ARTIFACT_EXPORT_COLUMNS.split(",");
+const DRIVE_PUBLICATION_OUTCOMES = [
+  "pending",
+  "uploaded",
+  "unknown_outcome",
+  "reconciled",
+  "failed",
+] as const;
+const DRIVE_PUBLICATION_DISPOSITIONS = [
+  "uploaded",
+  "replayed",
+  "reconciled",
+  "failed",
+  "unknown_outcome",
+] as const;
+
+function isFakeDriveTransport(
+  value: unknown,
+): value is ApprovedArtifactDriveTransport {
+  return (
+    isRecord(value) &&
+    value.kind === "fake" &&
+    value.host === "fake" &&
+    typeof value.upload === "function" &&
+    typeof value.find === "function"
+  );
+}
+
+function isApprovedArtifactExportRow(
+  value: unknown,
+  input: {
+    export_id: string;
+    project_id: string;
+    execution_id: string;
+    review_revision: number;
+    execution: HumanReviewExecution;
+  },
+): value is Record<string, unknown> {
+  if (!isRecord(value) || !hasExactKeys(value, APPROVED_ARTIFACT_EXPORT_KEYS))
+    return false;
+  return (
+    value.id === input.export_id &&
+    value.project_id === input.project_id &&
+    value.execution_id === input.execution_id &&
+    value.review_revision === input.review_revision &&
+    value.organization_id === input.execution.organization_id &&
+    value.matter_id === input.execution.matter_id &&
+    value.source_document_id === input.execution.document_id &&
+    value.source_document_version_id === input.execution.document_version_id &&
+    value.source_document_sha256 === input.execution.document_content_sha256 &&
+    value.evidence_receipt_sha256 === input.execution.evidence_receipt_sha256 &&
+    isPostgresUuid(value.id) &&
+    isPostgresUuid(value.review_id) &&
+    isPostgresUuid(value.execution_id) &&
+    isPostgresUuid(value.organization_id) &&
+    isPostgresUuid(value.matter_id) &&
+    isPostgresUuid(value.project_id) &&
+    isPostgresUuid(value.source_document_id) &&
+    isPostgresUuid(value.source_document_version_id) &&
+    isPostgresUuid(value.artifact_document_id) &&
+    isPostgresUuid(value.artifact_document_version_id) &&
+    isSha256(value.source_document_sha256) &&
+    isSha256(value.evidence_receipt_sha256) &&
+    isSha256(value.artifact_sha256) &&
+    isNonEmptyString(value.idempotency_key) &&
+    isNonEmptyString(value.filename) &&
+    isNonEmptyString(value.mime_type) &&
+    isNonEmptyString(value.storage_path) &&
+    Number.isSafeInteger(value.review_revision) &&
+    (value.review_revision as number) >= 1 &&
+    Number.isSafeInteger(value.size_bytes) &&
+    (value.size_bytes as number) > 0 &&
+    value.storage_path ===
+      `orgs/${value.organization_id}/matters/${value.matter_id}/projects/${value.project_id}/documents/${value.artifact_document_id}/${value.artifact_sha256}.docx`
+  );
+}
+
+function publicationIntentMatchesAuthorizedContext(
+  value: unknown,
+  input: {
+    publication_id?: string;
+    export_id?: string;
+    review_revision?: number;
+    project_id: string;
+    execution: HumanReviewExecution;
+    identity: AuthenticatedIdentity;
+    authorization_epoch: number;
+  },
+): value is DrivePublicationIntentDto {
+  if (!isRecord(value)) return false;
+  return (
+    (input.publication_id === undefined ||
+      value.publication_id === input.publication_id) &&
+    (input.export_id === undefined || value.export_id === input.export_id) &&
+    (input.review_revision === undefined ||
+      value.review_revision === input.review_revision) &&
+    value.execution_id === input.execution.execution_id &&
+    value.project_id === input.project_id &&
+    value.organization_id === input.execution.organization_id &&
+    value.matter_id === input.execution.matter_id &&
+    value.actor_user_id === input.identity.user_id &&
+    value.authorization_epoch === input.authorization_epoch &&
+    isPostgresUuid(value.publication_id) &&
+    isPostgresUuid(value.export_id) &&
+    isPostgresUuid(value.review_id) &&
+    isPostgresUuid(value.execution_id) &&
+    isPostgresUuid(value.matter_id) &&
+    isPostgresUuid(value.project_id) &&
+    isPostgresUuid(value.organization_id) &&
+    isPostgresUuid(value.actor_user_id) &&
+    isPostgresUuid(value.artifact_document_id) &&
+    isPostgresUuid(value.artifact_document_version_id) &&
+    isPostgresUuid(value.source_document_id) &&
+    isPostgresUuid(value.source_document_version_id) &&
+    value.source_document_id === input.execution.document_id &&
+    value.source_document_version_id === input.execution.document_version_id &&
+    Number.isSafeInteger(value.authorization_epoch) &&
+    (value.authorization_epoch as number) >= 0 &&
+    Number.isSafeInteger(value.review_revision) &&
+    (value.review_revision as number) >= 1 &&
+    Number.isSafeInteger(value.revision) &&
+    (value.revision as number) >= 1 &&
+    Number.isSafeInteger(value.attempts) &&
+    (value.attempts as number) >= 1 &&
+    (value.attempts as number) <= 3 &&
+    typeof value.outcome === "string" &&
+    (DRIVE_PUBLICATION_OUTCOMES as readonly unknown[]).includes(
+      value.outcome,
+    ) &&
+    isSha256(value.approved_artifact_sha256) &&
+    isNonEmptyString(value.artifact_storage_path) &&
+    value.artifact_storage_path ===
+      `orgs/${value.organization_id}/matters/${value.matter_id}/projects/${value.project_id}/documents/${value.artifact_document_id}/${value.approved_artifact_sha256}.docx` &&
+    isNonEmptyString(value.matter_folder_id) &&
+    isNonEmptyString(value.idempotency_key) &&
+    Number.isSafeInteger(value.artifact_size_bytes) &&
+    (value.artifact_size_bytes as number) > 0
+  );
+}
+
+function isApprovedArtifactPublicationResult(
+  value: unknown,
+  input: Parameters<typeof publicationIntentMatchesAuthorizedContext>[1],
+): value is {
+  disposition: (typeof DRIVE_PUBLICATION_DISPOSITIONS)[number];
+  outcome: (typeof DRIVE_PUBLICATION_OUTCOMES)[number];
+  intent: DrivePublicationIntentDto;
+} {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["disposition", "outcome", "intent"])
+  )
+    return false;
+  return (
+    (DRIVE_PUBLICATION_DISPOSITIONS as readonly unknown[]).includes(
+      value.disposition,
+    ) &&
+    (DRIVE_PUBLICATION_OUTCOMES as readonly unknown[]).includes(
+      value.outcome,
+    ) &&
+    value.outcome ===
+      (isRecord(value.intent) ? value.intent.outcome : undefined) &&
+    publicationIntentMatchesAuthorizedContext(value.intent, input)
+  );
+}
+
+function publicationScopeMatchesExecution(
+  scope: {
+    user_id: string;
+    organization_id: string;
+    matter_id: string;
+    project_id?: string;
+  },
+  identity: AuthenticatedIdentity,
+  execution: HumanReviewExecution,
+  projectId: string,
+): boolean {
+  return (
+    scope.user_id === identity.user_id &&
+    scope.organization_id === execution.organization_id &&
+    scope.matter_id === execution.matter_id &&
+    execution.project_id === projectId &&
+    (scope.project_id === undefined || scope.project_id === projectId)
+  );
+}
+
+function createDriveWriteRevalidator(input: {
+  context: Parameters<typeof publicationIntentMatchesAuthorizedContext>[1];
+  scope: Parameters<typeof recheckFreshAccessViaPort>[1]["scope"];
+  tenancy: ReturnType<typeof createSupabaseTenancyReadPort>;
+  repository: ReturnType<typeof createSupabaseAiReadRepository>;
+  resources: EvidenceResourceScopePort;
+}) {
+  return async ({
+    intent,
+  }: {
+    phase: "before_upload" | "before_record_outcome";
+    intent: DrivePublicationIntentDto;
+  }): Promise<boolean> => {
+    try {
+      if (!publicationIntentMatchesAuthorizedContext(intent, input.context))
+        return false;
+      const current = await input.repository.loadExecutionEvidence({
+        project_id: input.context.project_id,
+        execution_id: input.context.execution.execution_id,
+      });
+      if (!current) return false;
+      for (const key of [
+        "execution_id",
+        "organization_id",
+        "matter_id",
+        "project_id",
+        "document_id",
+        "document_version_id",
+        "document_content_sha256",
+        "evidence_receipt_sha256",
+      ] as const) {
+        if (current.execution[key] !== input.context.execution[key])
+          return false;
+      }
+      if (!(await drivePublicationResourceMatches(input.resources, intent)))
+        return false;
+      // This is the last awaited read: revocation during resource I/O must win.
+      const fresh = await recheckFreshAccessViaPort(input.tenancy, {
+        scope: input.scope,
+        identity: input.context.identity,
+        requiresMfa: true,
+      });
+      return (
+        fresh.kind !== "authorization_dependency_failed" && fresh.result.fresh
+      );
+    } catch {
+      return false;
+    }
+  };
+}
+
+function drivePublicationUnavailable(res: import("express").Response) {
+  return res.status(503).json({
+    code: "drive_publication_unavailable",
+    detail: "Drive publication unavailable.",
+  });
+}
+
 async function drivePublicationResourceMatches(
   port: EvidenceResourceScopePort,
   intent: DrivePublicationIntentDto,
@@ -570,6 +821,326 @@ aiRecoveryRouter.get(
       if (!fresh.result.fresh) return opaqueNotFound(res);
 
       return res.json(publicDrivePublication(intent));
+    } catch (error) {
+      return sendInternalError(res, error);
+    }
+  },
+);
+
+aiRecoveryRouter.post(
+  "/:executionId/review/drive-publications",
+  requireAuth,
+  async (req, res) => {
+    const received = req.body;
+    const body = isRecord(received) ? { ...received } : received;
+    if (
+      !isRecord(body) ||
+      !hasExactKeys(body, ["export_id", "expected_review_revision"]) ||
+      !isPostgresUuid(body.export_id) ||
+      !Number.isSafeInteger(body.expected_review_revision) ||
+      (body.expected_review_revision as number) < 1
+    )
+      return res.status(400).json({
+        code: "invalid_drive_publication",
+        detail: "Invalid Drive publication.",
+      });
+
+    const projectId = req.params.projectId;
+    const executionId = req.params.executionId;
+    const exportId = body.export_id as string;
+    const expectedReviewRevision = body.expected_review_revision as number;
+    const identity = res.locals.authenticatedIdentity as
+      | AuthenticatedIdentity
+      | undefined;
+    if (!isPostgresUuid(projectId) || !isPostgresUuid(executionId) || !identity)
+      return res.status(400).json({
+        code: "invalid_drive_publication",
+        detail: "Invalid Drive publication.",
+      });
+
+    try {
+      const db = createServerSupabase();
+      const repository = createSupabaseAiReadRepository(db);
+      const evidence = await repository.loadExecutionEvidence({
+        project_id: projectId,
+        execution_id: executionId,
+      });
+      if (!evidence || evidence.execution.execution_id !== executionId)
+        return opaqueNotFound(res);
+
+      const tenancyPort = createSupabaseTenancyReadPort(db);
+      const access = await evaluateInitialAccess(tenancyPort, {
+        identity,
+        organization_id: evidence.execution.organization_id,
+        matter_id: evidence.execution.matter_id,
+        requiresMfa: true,
+      });
+      if (access.kind === "authorization_dependency_failed")
+        throw new Error("AI Drive publication authorization failed");
+      if (access.decision.outcome === "not_found") return opaqueNotFound(res);
+      if (access.decision.outcome === "denied") {
+        if (access.decision.code === "mfa_required")
+          return res
+            .status(403)
+            .json({ code: "mfa_required", detail: "MFA required." });
+        return res.status(403).json({
+          code: "authorization_revoked",
+          detail: "Authorization revoked.",
+        });
+      }
+      const grantedScope = access.decision.scope;
+      if (
+        !publicationScopeMatchesExecution(
+          grantedScope,
+          identity,
+          evidence.execution,
+          projectId,
+        )
+      )
+        return opaqueNotFound(res);
+
+      const exportResult = await db
+        .from("ai_review_exports")
+        .select(APPROVED_ARTIFACT_EXPORT_COLUMNS)
+        .eq("id", exportId)
+        .eq("project_id", projectId)
+        .eq("execution_id", executionId)
+        .maybeSingle();
+      if (exportResult.error)
+        throw new Error("AI approved artifact query failed");
+      const receivedExport = exportResult.data;
+      const exportRow = isRecord(receivedExport)
+        ? { ...receivedExport }
+        : receivedExport;
+      if (
+        !isApprovedArtifactExportRow(exportRow, {
+          export_id: exportId,
+          project_id: projectId,
+          execution_id: executionId,
+          review_revision: expectedReviewRevision,
+          execution: evidence.execution,
+        })
+      )
+        return opaqueNotFound(res);
+
+      const transport = req.app.locals.recoveryDriveTransport;
+      if (!isFakeDriveTransport(transport))
+        return drivePublicationUnavailable(res);
+
+      const resourceScopePort = createBoundEvidenceResourceScopePort(db, {
+        organization_id: evidence.execution.organization_id,
+        matter_id: evidence.execution.matter_id,
+        project_id: projectId,
+      });
+      const revalidateAuthorization = createDriveWriteRevalidator({
+        context: {
+          export_id: exportId,
+          review_revision: expectedReviewRevision,
+          project_id: projectId,
+          execution: evidence.execution,
+          identity,
+          authorization_epoch: grantedScope.authorization_epoch,
+        },
+        scope: grantedScope,
+        tenancy: tenancyPort,
+        repository,
+        resources: resourceScopePort,
+      });
+      const persistence = createDrivePublicationPersistence({
+        client: db,
+        context: {
+          actor_user_id: identity.user_id,
+          organization_id: grantedScope.organization_id,
+          authorization_epoch: grantedScope.authorization_epoch,
+        },
+      });
+      const service = createApprovedArtifactPublicationService({
+        persistence,
+        storage: { getStrict: (key: string) => downloadFileStrict(key) },
+        transport,
+        revalidateAuthorization,
+      });
+      const result = await service.publish({
+        export_id: exportId,
+        review_revision: expectedReviewRevision,
+      });
+      if (
+        !isApprovedArtifactPublicationResult(result, {
+          export_id: exportId,
+          review_revision: expectedReviewRevision,
+          project_id: projectId,
+          execution: evidence.execution,
+          identity,
+          authorization_epoch: grantedScope.authorization_epoch,
+        })
+      )
+        throw new Error("AI Drive publication result mismatch");
+      if (
+        !(await revalidateAuthorization({
+          phase: "before_record_outcome",
+          intent: result.intent,
+        }))
+      )
+        return res.status(403).json({
+          code: "authorization_revoked",
+          detail: "Authorization revoked.",
+        });
+      return res.status(result.disposition === "uploaded" ? 201 : 200).json({
+        outcome: result.outcome,
+        disposition: result.disposition,
+        publication: publicDrivePublication(result.intent),
+      });
+    } catch (error) {
+      return sendInternalError(res, error);
+    }
+  },
+);
+
+aiRecoveryRouter.post(
+  "/:executionId/review/drive-publications/:publicationId/reconcile",
+  requireAuth,
+  async (req, res) => {
+    const received = req.body;
+    const body = isRecord(received) ? { ...received } : received;
+    if (!isRecord(body) || !hasExactKeys(body, []))
+      return res.status(400).json({
+        code: "invalid_drive_publication",
+        detail: "Invalid Drive publication.",
+      });
+
+    const projectId = req.params.projectId;
+    const executionId = req.params.executionId;
+    const publicationId = req.params.publicationId;
+    const identity = res.locals.authenticatedIdentity as
+      | AuthenticatedIdentity
+      | undefined;
+    if (
+      !isPostgresUuid(projectId) ||
+      !isPostgresUuid(executionId) ||
+      !isPostgresUuid(publicationId) ||
+      !identity
+    )
+      return res.status(400).json({
+        code: "invalid_drive_publication",
+        detail: "Invalid Drive publication.",
+      });
+
+    try {
+      const db = createServerSupabase();
+      const repository = createSupabaseAiReadRepository(db);
+      const evidence = await repository.loadExecutionEvidence({
+        project_id: projectId,
+        execution_id: executionId,
+      });
+      if (!evidence || evidence.execution.execution_id !== executionId)
+        return opaqueNotFound(res);
+      const tenancyPort = createSupabaseTenancyReadPort(db);
+      const access = await evaluateInitialAccess(tenancyPort, {
+        identity,
+        organization_id: evidence.execution.organization_id,
+        matter_id: evidence.execution.matter_id,
+        requiresMfa: true,
+      });
+      if (access.kind === "authorization_dependency_failed")
+        throw new Error("AI Drive publication authorization failed");
+      if (access.decision.outcome === "not_found") return opaqueNotFound(res);
+      if (access.decision.outcome === "denied") {
+        if (access.decision.code === "mfa_required")
+          return res
+            .status(403)
+            .json({ code: "mfa_required", detail: "MFA required." });
+        return res.status(403).json({
+          code: "authorization_revoked",
+          detail: "Authorization revoked.",
+        });
+      }
+      const grantedScope = access.decision.scope;
+      if (
+        !publicationScopeMatchesExecution(
+          grantedScope,
+          identity,
+          evidence.execution,
+          projectId,
+        )
+      )
+        return opaqueNotFound(res);
+
+      const persistence = createDrivePublicationPersistence({
+        client: db,
+        context: {
+          actor_user_id: identity.user_id,
+          organization_id: grantedScope.organization_id,
+          authorization_epoch: grantedScope.authorization_epoch,
+        },
+      });
+      const readback = await persistence.read(publicationId);
+      if (
+        !publicationIntentMatchesAuthorizedContext(readback, {
+          publication_id: publicationId,
+          project_id: projectId,
+          execution: evidence.execution,
+          identity,
+          authorization_epoch: grantedScope.authorization_epoch,
+        })
+      )
+        return opaqueNotFound(res);
+
+      const resourceScopePort = createBoundEvidenceResourceScopePort(db, {
+        organization_id: evidence.execution.organization_id,
+        matter_id: evidence.execution.matter_id,
+        project_id: projectId,
+      });
+      if (!(await drivePublicationResourceMatches(resourceScopePort, readback)))
+        return opaqueNotFound(res);
+      const transport = req.app.locals.recoveryDriveTransport;
+      if (!isFakeDriveTransport(transport))
+        return drivePublicationUnavailable(res);
+
+      const revalidateAuthorization = createDriveWriteRevalidator({
+        context: {
+          publication_id: publicationId,
+          project_id: projectId,
+          execution: evidence.execution,
+          identity,
+          authorization_epoch: grantedScope.authorization_epoch,
+        },
+        scope: grantedScope,
+        tenancy: tenancyPort,
+        repository,
+        resources: resourceScopePort,
+      });
+      const service = createApprovedArtifactPublicationService({
+        persistence,
+        storage: { getStrict: (key: string) => downloadFileStrict(key) },
+        transport,
+        revalidateAuthorization,
+      });
+      const result = await service.reconcile({ publication_id: publicationId });
+      if (
+        !isApprovedArtifactPublicationResult(result, {
+          publication_id: publicationId,
+          project_id: projectId,
+          execution: evidence.execution,
+          identity,
+          authorization_epoch: grantedScope.authorization_epoch,
+        })
+      )
+        throw new Error("AI Drive publication result mismatch");
+      if (
+        !(await revalidateAuthorization({
+          phase: "before_record_outcome",
+          intent: result.intent,
+        }))
+      )
+        return res.status(403).json({
+          code: "authorization_revoked",
+          detail: "Authorization revoked.",
+        });
+      return res.status(200).json({
+        outcome: result.outcome,
+        disposition: result.disposition,
+        publication: publicDrivePublication(result.intent),
+      });
     } catch (error) {
       return sendInternalError(res, error);
     }
