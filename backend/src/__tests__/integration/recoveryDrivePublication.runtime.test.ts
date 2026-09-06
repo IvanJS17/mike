@@ -5,7 +5,11 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { Document, Packer, Paragraph } from "docx";
+import { createDrivePublicationPersistence } from "../../lib/recovery/persistence/drivePublicationPersistence";
+import { createApprovedArtifactPublicationService } from "../../lib/recovery/drive/approvedArtifactPublication";
+import { createFakeDrive } from "../../lib/recovery/drive/fakeDrive";
 
 import { buildSupportedUpgradeSql } from "../../lib/recovery/supportedUpgradeDriver";
 import {
@@ -130,7 +134,10 @@ function approvedArtifact(database: string): Record<string, unknown> {
   );
 }
 
-function appendExport(database: string): void {
+function appendExport(
+  database: string,
+  content?: Uint8Array,
+): Record<string, unknown> {
   // The old fixture has no project binding; configure the new live operation
   // explicitly after upgrade instead of pretending migration inferred one.
   psql(
@@ -139,6 +146,15 @@ function appendExport(database: string): void {
     drive_folder_id='runtime-drive-folder' where id='${IDS.matter}';`,
   );
   const artifact = approvedArtifact(database);
+  if (content) {
+    const hash = crypto.createHash("sha256").update(content).digest("hex");
+    artifact.artifact_sha256 = hash;
+    artifact.size_bytes = content.byteLength;
+    artifact.storage_path = String(artifact.storage_path).replace(
+      "f".repeat(64),
+      hash,
+    );
+  }
   const epoch = psql(
     database,
     `select authorization_epoch from public.organizations where id='${IDS.org}';`,
@@ -152,6 +168,7 @@ function appendExport(database: string): void {
     database,
     `update public.matters set drive_folder_id='runtime-drive-folder' where id='${IDS.matter}';`,
   );
+  return artifact;
 }
 
 const execAsync = promisify(execFile);
@@ -287,6 +304,129 @@ describe("Drive publication RPC SQL contract", () => {
 });
 
 maybe("Matter Drive folder settings RPC runtime", () => {
+  it.each([false, true])(
+    "publishes durable DOCX through real SQL and rehydrates (lost upload ACK=%s)",
+    async (lostAck) => {
+      const database = lostAck ? "g1_unknown" : "g1_uploaded";
+      const reviewSeed = LEGACY_AI_SEED.replace(
+        /insert into public\.ai_review_exports\([\s\S]*?(?=insert into public\.ai_redline_bundles)/,
+        "",
+      );
+      createDatabase(database, BASELINE_LEGACY_SEED + reviewSeed);
+      const content = await Packer.toBuffer(
+        new Document({
+          sections: [
+            { children: [new Paragraph("Synthetic approved report")] },
+          ],
+        }),
+      );
+      const artifact = appendExport(database, content);
+      const epoch = Number(
+        psql(
+          database,
+          `select authorization_epoch from public.organizations where id='${IDS.org}';`,
+        ),
+      );
+      const exportId = psql(
+        database,
+        "select id from public.ai_review_exports where idempotency_key='runtime-drive-export';",
+      );
+      const file = `/tmp/${database}.docx`;
+      execFileSync("docker", ["exec", "-i", container, "tee", file], {
+        input: content,
+        stdio: ["pipe", "ignore", "pipe"],
+        timeout: 30_000,
+      });
+      const literal = (value: unknown): string => {
+        if (value === null) return "null";
+        if (typeof value === "number" && Number.isSafeInteger(value))
+          return String(value);
+        if (typeof value === "string")
+          return `'${value.replaceAll("'", "''")}'`;
+        throw new Error("Invalid synthetic RPC argument");
+      };
+      const newPersistence = () => {
+        const rpc = vi.fn();
+        rpc.mockImplementation(
+          async (name: string, args: Record<string, unknown>) => {
+            expect([
+              "begin_ai_review_drive_publication",
+              "read_ai_review_drive_publication",
+              "record_ai_review_drive_publication_outcome",
+            ]).toContain(name);
+            const argumentsSql = Object.entries(args)
+              .map(([key, value]) => {
+                if (!/^p_[a-z_]+$/.test(key))
+                  throw new Error("Invalid RPC argument name");
+                return `${key} => ${literal(value)}`;
+              })
+              .join(",");
+            const data = JSON.parse(
+              psql(
+                database,
+                `set role service_role; select public.${name}(${argumentsSql})::text;`,
+              ),
+            );
+            return { data, error: null };
+          },
+        );
+        return createDrivePublicationPersistence({
+          context: {
+            actor_user_id: IDS.reviewer,
+            organization_id: IDS.org,
+            authorization_epoch: epoch,
+          },
+          client: { rpc },
+        });
+      };
+      const drive = createFakeDrive({ throwAfterStore: lostAck });
+      const newService = () => {
+        const persistence = newPersistence();
+        return createApprovedArtifactPublicationService({
+          persistence,
+          transport: drive,
+          storage: {
+            async getStrict(key) {
+              expect(key).toBe(artifact.storage_path);
+              return Buffer.from(
+                execFileSync(
+                  "docker",
+                  ["exec", container, "base64", "-w0", file],
+                  { encoding: "utf8", timeout: 30_000 },
+                ),
+                "base64",
+              );
+            },
+          },
+          revalidateAuthorization: async ({ intent }) =>
+            (await persistence.read(intent.publication_id)) !== null,
+        });
+      };
+      const input = {
+        export_id: exportId,
+        review_revision: Number(artifact.review_revision),
+      };
+      const published = await newService().publish(input);
+      expect(published.outcome).toBe(lostAck ? "reconciled" : "uploaded");
+      const rehydrated = await newService().publish(input);
+      expect(rehydrated.disposition).toBe("replayed");
+      expect(rehydrated.intent.publication_id).toBe(
+        published.intent.publication_id,
+      );
+      expect(drive.uploadCount).toBe(1);
+      expect(
+        await newPersistence().read(published.intent.publication_id),
+      ).toMatchObject({
+        outcome: published.outcome,
+        remote_size_bytes: content.byteLength,
+        remote_checksum: crypto
+          .createHash("sha256")
+          .update(content)
+          .digest("hex"),
+      });
+    },
+  );
+
   it("sets, clears, replays, and rejects unauthorized or stale matter folder changes without changing publication evidence", () => {
     const database = "recovery_drive_folder_settings";
     const withoutExport = LEGACY_AI_SEED.replace(
