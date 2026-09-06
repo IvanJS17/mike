@@ -28,6 +28,21 @@ export const RECOVERY_MIGRATION_TAG = "_recovery_";
 export const RECOVERY_SCHEMA_FINGERPRINT_MARKER =
   "RECOVERY_SCHEMA_FINGERPRINT:";
 
+/**
+ * Coordinator-owned order for the supported populated legacy Drive upgrade.
+ * This is intentionally different from lexical order: the 20260905 preflight
+ * must move the legacy relation before the unchanged 20260904 E2a migration.
+ */
+export const SUPPORTED_RECOVERY_MIGRATION_ORDER = [
+  "20260831_01_recovery_identity_tenancy.sql",
+  "20260902_01_recovery_onboarding_organization.sql",
+  "20260905_03_recovery_drive_publication_preflight.sql",
+  "20260904_01_recovery_ai_evidence_review.sql",
+  "20260905_01_recovery_core_convergence.sql",
+  "20260905_02_recovery_approved_artifact_storage.sql",
+  "20260905_04_recovery_drive_publication.sql",
+] as const;
+
 const RECOVERY_NAME_PATTERN = /^(\d{8})_(\d{2})_recovery_([a-z0-9_]+)\.sql$/;
 const DATED_MIGRATION_PATTERN = /^(\d{8})_(\d{2})_/;
 

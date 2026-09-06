@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "recovery:upgrade:sql": "tsx src/cli/recovery-upgrade.ts emit-sql",
     "build": "tsc",
     "start": "node dist/index.js",
     "sync:workflows": "node dist/jobs/syncWorkflows.js",

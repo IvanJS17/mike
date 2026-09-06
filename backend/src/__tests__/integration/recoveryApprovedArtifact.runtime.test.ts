@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { SUPPORTED_RECOVERY_MIGRATION_ORDER } from "../../lib/recovery/migrationOrder";
 import {
   IDS,
   LEGACY_IDS,
@@ -18,7 +19,6 @@ const BACKEND = path.resolve(
   "..",
   "..",
 );
-const MIGRATIONS = path.join(BACKEND, "migrations");
 const MIGRATION = "20260905_02_recovery_approved_artifact_storage.sql";
 const BASELINE = "d9fa8380e63837b6441cef169cf5ef80dfb55e54";
 const RUN = process.env.RUN_RECOVERY_APPROVED_ARTIFACT_RUNTIME === "1";
@@ -59,11 +59,14 @@ function psql(db: string, sql: string): string {
   ).trim();
 }
 function applyRecovery(db: string, before?: string): void {
-  fs.readdirSync(MIGRATIONS)
-    .filter((name) => /^\d{8}_\d{2}_recovery_.*\.sql$/.test(name))
-    .filter((name) => !before || name < before)
-    .sort()
-    .forEach((name) => psql(db, read(`migrations/${name}`)));
+  const boundary =
+    before === undefined
+      ? SUPPORTED_RECOVERY_MIGRATION_ORDER.length
+      : SUPPORTED_RECOVERY_MIGRATION_ORDER.findIndex((name) => name === before);
+  if (boundary < 0) throw new Error("unknown recovery migration boundary");
+  SUPPORTED_RECOVERY_MIGRATION_ORDER.slice(0, boundary).forEach((name) =>
+    psql(db, read(`migrations/${name}`)),
+  );
 }
 
 const BOOTSTRAP = `
@@ -212,6 +215,14 @@ maybe("approved artifact SQL runtime", () => {
       ),
     ).toBe("1");
     psql("recovery_upgrade", read(`migrations/${MIGRATION}`));
+    // The artifact delta was just checked in isolation; finish the explicit
+    // later steps before comparing against the current complete fresh schema.
+    const artifactIndex = SUPPORTED_RECOVERY_MIGRATION_ORDER.findIndex(
+      (name) => name === MIGRATION,
+    );
+    SUPPORTED_RECOVERY_MIGRATION_ORDER.slice(artifactIndex + 1).forEach(
+      (name) => psql("recovery_upgrade", read(`migrations/${name}`)),
+    );
     expect(
       psql("recovery_upgrade", read("scripts/schema-fingerprint.sql")),
     ).toBe(psql("recovery_fresh", read("scripts/schema-fingerprint.sql")));

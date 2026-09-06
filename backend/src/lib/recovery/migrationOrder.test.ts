@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   RECOVERY_MIGRATION_TAG,
   RECOVERY_SCHEMA_FINGERPRINT_MARKER,
+  SUPPORTED_RECOVERY_MIGRATION_ORDER,
   assertRecoveryMigrationName,
   listRecoveryMigrations,
   sortRecoveryMigrations,
@@ -21,13 +22,18 @@ const BACKEND_DIR = path.resolve(
 const MIGRATIONS_DIR = path.join(BACKEND_DIR, "migrations");
 
 function gitLsMigrations(): string[] {
-  return execFileSync("git", ["ls-files", "migrations"], {
-    cwd: BACKEND_DIR,
-    encoding: "utf8",
-  })
+  return execFileSync(
+    "git",
+    ["ls-files", "--cached", "--others", "--exclude-standard", "migrations"],
+    {
+      cwd: BACKEND_DIR,
+      encoding: "utf8",
+    },
+  )
     .split("\n")
     .filter((line) => line.endsWith(".sql"))
-    .map((line) => path.basename(line));
+    .map((line) => path.basename(line))
+    .sort();
 }
 
 describe("recovery migration naming contract", () => {
@@ -75,6 +81,18 @@ describe("recovery migration naming contract", () => {
 });
 
 describe("recovery migration ordering contract", () => {
+  it("keeps the supported populated Drive route explicitly ordered around E2a", () => {
+    expect(SUPPORTED_RECOVERY_MIGRATION_ORDER).toEqual([
+      "20260831_01_recovery_identity_tenancy.sql",
+      "20260902_01_recovery_onboarding_organization.sql",
+      "20260905_03_recovery_drive_publication_preflight.sql",
+      "20260904_01_recovery_ai_evidence_review.sql",
+      "20260905_01_recovery_core_convergence.sql",
+      "20260905_02_recovery_approved_artifact_storage.sql",
+      "20260905_04_recovery_drive_publication.sql",
+    ]);
+  });
+
   it("uses the runner-compatible lexical order across upstream and recovery migrations", () => {
     const ordered = sortRecoveryMigrations([
       "20260831_01_recovery_baseline.sql",
@@ -111,29 +129,31 @@ describe("recovery migration ledger state", () => {
       "20260902_01_recovery_onboarding_organization.sql",
       "20260904_01_recovery_ai_evidence_review.sql",
       "20260905_01_recovery_core_convergence.sql",
+      "20260905_02_recovery_approved_artifact_storage.sql",
+      "20260905_03_recovery_drive_publication_preflight.sql",
+      "20260905_04_recovery_drive_publication.sql",
     ];
     const candidate = "20260905_02_recovery_approved_artifact_storage.sql";
+    const beforeDrive = integrated.filter(
+      (name) =>
+        name !== "20260905_03_recovery_drive_publication_preflight.sql" &&
+        name !== "20260905_04_recovery_drive_publication.sql",
+    );
     const tracked = gitLsMigrations().filter((name) =>
       name.includes(RECOVERY_MIGRATION_TAG),
     );
-    expect(tracked).toEqual([
-      ...integrated,
-      ...(tracked.includes(candidate) ? [candidate] : []),
-    ]);
-    expect(listRecoveryMigrations(MIGRATIONS_DIR)).toEqual([
-      ...integrated,
-      candidate,
-    ]);
-    expect(sortRecoveryMigrations([...integrated, candidate])).toEqual([
-      ...integrated,
-      candidate,
-    ]);
+    expect(tracked).toEqual(integrated);
+    expect(listRecoveryMigrations(MIGRATIONS_DIR)).toEqual(integrated);
+    expect(sortRecoveryMigrations([...integrated])).toEqual(integrated);
     expect(() =>
-      assertRecoveryMigrationName(candidate, integrated),
+      assertRecoveryMigrationName(
+        candidate,
+        beforeDrive.filter((name) => name !== candidate),
+      ),
     ).not.toThrow();
     expect(() =>
       assertRecoveryMigrationName(candidate, [
-        ...integrated,
+        ...beforeDrive,
         "20260905_02_upstream_collision.sql",
       ]),
     ).toThrow(/collides/);

@@ -133,7 +133,17 @@ describe("Slice E2a AI evidence/review persistence migration", () => {
     expect(migration).toMatch(
       /if\s+exists[\s\S]*ai_review_drive_publications[\s\S]*raise\s+exception[\s\S]*drop\s+table\s+public\.ai_review_drive_publications/,
     );
-    expect(schema).not.toMatch(/ai_review_drive_publications/);
+    // E2a's direct populated guard remains above. 5.2a now provides a distinct
+    // canonical PublicationIntent shape, not the retired legacy state vocabulary.
+    const publicationTable = schema.match(
+      /create table if not exists public\.ai_review_drive_publications \(([\s\S]*?)\n\);/,
+    )?.[1];
+    expect(publicationTable).toBeDefined();
+    expect(publicationTable).toContain("legacy_payload jsonb not null");
+    expect(publicationTable).toMatch(
+      /status in\s*\(\s*'pending',\s*'uploaded'/,
+    );
+    expect(publicationTable).not.toMatch(/'published'/);
     expect(schema).toMatch(/drive_folder_id/);
   });
 
