@@ -79,6 +79,26 @@ export const INTERNAL_ERROR_MESSAGE = "Something went wrong. Please try again.";
 export const MALFORMED_ERROR_RESPONSE_MESSAGE =
     "The request could not be completed. Please try again.";
 
+export type DrivePublicationOutcome =
+    | "pending"
+    | "uploaded"
+    | "unknown_outcome"
+    | "reconciled"
+    | "failed";
+
+export interface DrivePublicationStatus {
+    publication_id: string;
+    export_id: string;
+    execution_id: string;
+    review_revision: number;
+    revision: number;
+    outcome: DrivePublicationOutcome;
+    attempts: number;
+    approved_artifact_sha256: string;
+    provider_file_id: string | null;
+    failure_code: string | null;
+}
+
 export function isMfaRequiredError(error: unknown) {
     return (
         error instanceof MikeApiError &&
@@ -764,6 +784,15 @@ export async function setMcpToolEnabled(
 
 export async function getProject(projectId: string): Promise<Project> {
     return apiRequest<Project>(`/projects/${projectId}`);
+}
+
+export async function getDrivePublicationStatus(
+    projectId: string,
+    executionId: string,
+    publicationId: string,
+): Promise<DrivePublicationStatus> {
+    const path = `/projects/${encodeURIComponent(projectId)}/ai-executions/${encodeURIComponent(executionId)}/review/drive-publications/${encodeURIComponent(publicationId)}`;
+    return apiRequest<DrivePublicationStatus>(path);
 }
 
 export async function updateProject(

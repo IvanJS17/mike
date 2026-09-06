@@ -30,6 +30,11 @@ import {
   type ApprovedArtifactPersistenceClient,
   type ApprovedArtifactReadExpectation,
 } from "../lib/recovery/persistence/approvedArtifactPersistence";
+import {
+  createDrivePublicationPersistence,
+  type DrivePublicationIntentDto,
+} from "../lib/recovery/persistence/drivePublicationPersistence";
+import type { EvidenceResourceScopePort } from "../lib/recovery/evidence/appendOnlyEvidence";
 import { uploadFileIfAbsent, downloadFileStrict } from "../lib/storage";
 
 export const aiRecoveryRouter = Router({ mergeParams: true });
@@ -95,6 +100,15 @@ function isUuid(value: unknown): value is string {
   return (
     typeof value === "string" &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    )
+  );
+}
+
+function isPostgresUuid(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
       value,
     )
   );
@@ -280,6 +294,39 @@ function opaqueNotFound(res: import("express").Response) {
   return res.status(404).json({ code: "not_found", detail: "Not found." });
 }
 
+function publicDrivePublication(intent: DrivePublicationIntentDto) {
+  return {
+    publication_id: intent.publication_id,
+    export_id: intent.export_id,
+    execution_id: intent.execution_id,
+    review_revision: intent.review_revision,
+    revision: intent.revision,
+    outcome: intent.outcome,
+    attempts: intent.attempts,
+    approved_artifact_sha256: intent.approved_artifact_sha256,
+    provider_file_id: intent.provider_file_id ?? null,
+    failure_code: intent.failure_code,
+  };
+}
+
+async function drivePublicationResourceMatches(
+  port: EvidenceResourceScopePort,
+  intent: DrivePublicationIntentDto,
+): Promise<boolean> {
+  const resource = await port.getEvidenceResourceScope({
+    document_version_id: intent.artifact_document_version_id,
+  });
+  return (
+    isRecord(resource) &&
+    resource.organization_id === intent.organization_id &&
+    resource.matter_id === intent.matter_id &&
+    resource.project_id === intent.project_id &&
+    resource.document_id === intent.artifact_document_id &&
+    resource.document_version_id === intent.artifact_document_version_id &&
+    resource.document_content_sha256 === intent.approved_artifact_sha256
+  );
+}
+
 function isValidExecutionRow(
   row: unknown,
   projectId: string,
@@ -432,6 +479,102 @@ aiRecoveryRouter.get("/:executionId/review", requireAuth, async (req, res) => {
     return sendInternalError(res, error);
   }
 });
+
+aiRecoveryRouter.get(
+  "/:executionId/review/drive-publications/:publicationId",
+  requireAuth,
+  async (req, res) => {
+    const projectId = req.params.projectId;
+    const executionId = req.params.executionId;
+    const publicationId = req.params.publicationId;
+    const identity = res.locals.authenticatedIdentity as
+      | AuthenticatedIdentity
+      | undefined;
+    if (
+      !isPostgresUuid(projectId) ||
+      !isPostgresUuid(executionId) ||
+      !isPostgresUuid(publicationId) ||
+      !identity
+    )
+      return res.status(400).json({
+        code: "invalid_drive_publication",
+        detail: "Invalid Drive publication.",
+      });
+
+    try {
+      const db = createServerSupabase();
+      const repository = createSupabaseAiReadRepository(db);
+      const evidence = await repository.loadExecutionEvidence({
+        project_id: projectId,
+        execution_id: executionId,
+      });
+      if (!evidence) return opaqueNotFound(res);
+
+      const tenancyPort = createSupabaseTenancyReadPort(db);
+      const access = await evaluateInitialAccess(tenancyPort, {
+        identity,
+        organization_id: evidence.execution.organization_id,
+        matter_id: evidence.execution.matter_id,
+        requiresMfa: true,
+      });
+      if (access.kind === "authorization_dependency_failed")
+        throw new Error("AI Drive publication authorization failed");
+      if (access.decision.outcome === "denied") {
+        if (access.decision.code === "mfa_required")
+          return res
+            .status(403)
+            .json({ code: "mfa_required", detail: "MFA required." });
+        return opaqueNotFound(res);
+      }
+      if (access.decision.outcome !== "allow") return opaqueNotFound(res);
+
+      const grantedScope = access.decision.scope;
+      const persistence = createDrivePublicationPersistence({
+        client: db,
+        context: {
+          actor_user_id: identity.user_id,
+          organization_id: grantedScope.organization_id,
+          authorization_epoch: grantedScope.authorization_epoch,
+        },
+      });
+      const result = await persistence.read(publicationId);
+      if (!result) return opaqueNotFound(res);
+      if ("disposition" in result) return opaqueNotFound(res);
+
+      const intent = result;
+      if (
+        intent.publication_id !== publicationId ||
+        intent.execution_id !== executionId ||
+        intent.execution_id !== evidence.execution.execution_id ||
+        intent.project_id !== projectId ||
+        intent.project_id !== evidence.execution.project_id ||
+        intent.organization_id !== evidence.execution.organization_id ||
+        intent.matter_id !== evidence.execution.matter_id
+      )
+        return opaqueNotFound(res);
+
+      const resourceScopePort = createBoundEvidenceResourceScopePort(db, {
+        organization_id: evidence.execution.organization_id,
+        matter_id: evidence.execution.matter_id,
+        project_id: projectId,
+      });
+      if (!(await drivePublicationResourceMatches(resourceScopePort, intent)))
+        return opaqueNotFound(res);
+      const fresh = await recheckFreshAccessViaPort(tenancyPort, {
+        scope: grantedScope,
+        identity,
+        requiresMfa: true,
+      });
+      if (fresh.kind === "authorization_dependency_failed")
+        throw new Error("AI Drive publication fresh authorization failed");
+      if (!fresh.result.fresh) return opaqueNotFound(res);
+
+      return res.json(publicDrivePublication(intent));
+    } catch (error) {
+      return sendInternalError(res, error);
+    }
+  },
+);
 
 aiRecoveryRouter.post("/:executionId/review", requireAuth, async (req, res) => {
   const body = req.body;
