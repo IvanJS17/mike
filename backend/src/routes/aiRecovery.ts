@@ -1832,16 +1832,6 @@ aiRecoveryRouter.post(
         getStrict: (key: string) => downloadFileStrict(key),
       };
       const revalidateCurrent = async () => {
-        const fresh = await recheckFreshAccessViaPort(tenancyPort, {
-          scope: grantedScope,
-          identity,
-          requiresMfa: true,
-        });
-        if (
-          fresh.kind === "authorization_dependency_failed" ||
-          !fresh.result.fresh
-        )
-          return false;
         const currentEvidence = await repository.loadExecutionEvidence({
           project_id: projectId,
           execution_id: executionId,
@@ -1872,12 +1862,24 @@ aiRecoveryRouter.post(
             evidence.execution.evidence_receipt_sha256
         )
           return false;
-        return (
+        if (
           (await recheckHumanReviewResourceScope(
             resourceScopePort,
             currentReview,
-          )) === "match"
-        );
+          )) !== "match"
+        )
+          return false;
+        const fresh = await recheckFreshAccessViaPort(tenancyPort, {
+          scope: grantedScope,
+          identity,
+          requiresMfa: true,
+        });
+        if (
+          fresh.kind === "authorization_dependency_failed" ||
+          !fresh.result.fresh
+        )
+          return false;
+        return true;
       };
       const persistence = createApprovedArtifactPersistence({
         client: db as unknown as ApprovedArtifactPersistenceClient,
@@ -1934,9 +1936,51 @@ aiRecoveryRouter.post(
           });
         throw new Error("AI approved report operation failed");
       }
+      const committedResult = await db
+        .from("ai_review_exports")
+        .select(
+          "id,idempotency_key,review_id,review_revision,execution_id,organization_id,matter_id,project_id,source_document_id,source_document_version_id,source_document_sha256,evidence_receipt_sha256,artifact_document_id,artifact_document_version_id,artifact_sha256,storage_path,size_bytes,filename,mime_type",
+        )
+        .eq("idempotency_key", idempotencyKey)
+        .eq("project_id", projectId)
+        .eq("execution_id", executionId)
+        .maybeSingle();
+      if (committedResult.error)
+        throw new Error("approved report receipt read failed");
+      const rawCommitted = committedResult.data;
+      const committed = isRecord(rawCommitted) ? { ...rawCommitted } : null;
+      if (
+        !committed ||
+        !isPostgresUuid(committed.id) ||
+        !isApprovedArtifactExportRow(committed, {
+          export_id: committed.id,
+          project_id: projectId,
+          execution_id: executionId,
+          review_revision: review.revision,
+          execution: evidence.execution,
+        }) ||
+        committed.idempotency_key !== idempotencyKey ||
+        committed.review_id !== review.review_id ||
+        committed.artifact_sha256 !== result.artifact.artifact_sha256 ||
+        committed.source_document_sha256 !== expected.source_document_sha256 ||
+        committed.evidence_receipt_sha256 !==
+          expected.evidence_receipt_sha256 ||
+        committed.filename !== result.artifact.filename ||
+        committed.mime_type !== result.artifact.mime_type
+      )
+        throw new Error("approved report receipt mismatch");
+      if (!(await revalidateCurrent()))
+        return res.status(403).json({
+          code: "authorization_revoked",
+          detail: "Authorization revoked.",
+        });
       return res
         .status(result.receipt.disposition === "applied" ? 201 : 200)
-        .json({ artifact: result.artifact, receipt: result.receipt });
+        .json({
+          export_id: committed.id,
+          artifact: result.artifact,
+          receipt: result.receipt,
+        });
     } catch (error) {
       return sendInternalError(res, error);
     }

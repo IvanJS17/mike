@@ -839,6 +839,51 @@ export async function getProject(projectId: string): Promise<Project> {
     return apiRequest<Project>(`/projects/${projectId}`);
 }
 
+export type ApprovedReviewReportResult = {
+    export_id: string;
+    artifact: {
+        idempotency_key: string;
+        review_id: string;
+        review_revision: number;
+        execution_id: string;
+        organization_id: string;
+        matter_id: string;
+        project_id: string;
+        document_id: string;
+        document_version_id: string;
+        source_document_sha256: string;
+        evidence_receipt_sha256: string;
+        filename: string;
+        mime_type: string;
+        artifact_sha256: string;
+    };
+    receipt: {
+        disposition: "applied" | "replayed";
+        review_id: string;
+        review_revision: number;
+        execution_id: string;
+        artifact_sha256: string;
+        idempotency_key: string;
+    };
+};
+
+export async function createApprovedReviewReport(
+    projectId: string,
+    executionId: string,
+    expectedReviewRevision: number,
+    idempotencyKey: string,
+): Promise<ApprovedReviewReportResult> {
+    const path = `/projects/${encodeURIComponent(projectId)}/ai-executions/${encodeURIComponent(executionId)}/review/approved-report`;
+    return apiRequest<ApprovedReviewReportResult>(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            expected_review_revision: expectedReviewRevision,
+            idempotency_key: idempotencyKey,
+        }),
+    });
+}
+
 export async function getDrivePublicationStatus(
     projectId: string,
     executionId: string,

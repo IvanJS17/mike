@@ -328,6 +328,7 @@ describe("approved review report routes", () => {
       .send({ expected_review_revision: 1, idempotency_key: "report:route" });
     expect(first.status).toBe(201);
     expect(first.body.receipt.disposition).toBe("applied");
+    expect(first.body.export_id).toBe("00000000-0000-4000-8000-000000000011");
     expect(render).toHaveBeenCalledOnce();
     expect(state.uploadCalls).toBe(1);
 
@@ -346,8 +347,67 @@ describe("approved review report routes", () => {
       .send({ expected_review_revision: 1, idempotency_key: "report:route" });
     expect(replay.status).toBe(200);
     expect(replay.body.receipt.disposition).toBe("replayed");
+    expect(replay.body.export_id).toBe(first.body.export_id);
     expect(render).toHaveBeenCalledOnce();
     expect(state.uploadCalls).toBe(1);
+  });
+
+  it("rejects a malformed committed ID without deleting the committed artifact", async () => {
+    const original = from.getMockImplementation()!;
+    from.mockImplementation((table: string) => {
+      const query = original(table);
+      const read = query.maybeSingle.getMockImplementation()!;
+      query.maybeSingle.mockImplementation(async () => {
+        const result = await read();
+        return result.data
+          ? { ...result, data: { ...result.data, id: "not-a-uuid" } }
+          : result;
+      });
+      return query;
+    });
+    try {
+      const response = await request(makeApp())
+        .post(
+          `/projects/${ids.project}/ai-executions/${ids.execution}/review/approved-report`,
+        )
+        .send({
+          expected_review_revision: 1,
+          idempotency_key: "report:bad-receipt",
+        });
+      expect(response.status).toBe(500);
+      expect(response.body).not.toHaveProperty("export_id");
+      expect(state.exportRow?.id).toBe("00000000-0000-4000-8000-000000000011");
+      expect(state.objects.size).toBe(1);
+    } finally {
+      from.mockImplementation(original);
+    }
+  });
+
+  it("withholds the export ID after revocation during the final resource read", async () => {
+    const original =
+      resourceScope.getEvidenceResourceScope.getMockImplementation()!;
+    let readsAfterCommit = 0;
+    resourceScope.getEvidenceResourceScope.mockImplementation(async () => {
+      const value = await original();
+      if (state.exportRow && ++readsAfterCommit === 2) state.epoch += 1;
+      return value;
+    });
+    try {
+      const response = await request(makeApp())
+        .post(
+          `/projects/${ids.project}/ai-executions/${ids.execution}/review/approved-report`,
+        )
+        .send({
+          expected_review_revision: 1,
+          idempotency_key: "report:final-revocation",
+        });
+      expect(response.status).toBe(403);
+      expect(response.body).not.toHaveProperty("export_id");
+      expect(state.exportRow).not.toBeNull();
+      expect(state.uploadCalls).toBe(1);
+    } finally {
+      resourceScope.getEvidenceResourceScope.mockImplementation(original);
+    }
   });
 
   it("reconciles a committed object after an unknown RPC outcome", async () => {
