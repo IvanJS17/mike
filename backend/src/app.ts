@@ -20,6 +20,7 @@ import { downloadsRouter } from "./routes/downloads";
 import { sourceDocumentsRouter } from "./routes/sourceDocuments";
 import { auditRouter } from "./routes/audit";
 import { aiRecoveryRouter } from "./routes/aiRecovery";
+import { matterSettingsRouter } from "./routes/matterSettings";
 import { authRouter } from "./routes/auth";
 import { manifestPublicKey } from "./lib/manifestSigning";
 import {
@@ -271,6 +272,7 @@ app.use("/chat", chatRouter);
 app.use("/word-chat", wordChatRouter);
 app.use("/models", modelsRouter);
 app.use("/projects/:projectId/ai-executions", aiRecoveryRouter);
+app.use("/projects/:projectId/matters", matterSettingsRouter);
 app.use("/projects", projectsRouter);
 app.use("/projects/:projectId/chat", projectChatRouter);
 app.use("/single-documents", documentsRouter);

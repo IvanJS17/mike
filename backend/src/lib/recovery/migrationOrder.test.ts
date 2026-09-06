@@ -91,6 +91,7 @@ describe("recovery migration ordering contract", () => {
       "20260905_02_recovery_approved_artifact_storage.sql",
       "20260905_04_recovery_drive_publication.sql",
       "20260905_05_recovery_drive_publication_rpc.sql",
+      "20260905_06_recovery_matter_drive_folder.sql",
     ]);
   });
 
@@ -134,13 +135,15 @@ describe("recovery migration ledger state", () => {
       "20260905_03_recovery_drive_publication_preflight.sql",
       "20260905_04_recovery_drive_publication.sql",
       "20260905_05_recovery_drive_publication_rpc.sql",
+      "20260905_06_recovery_matter_drive_folder.sql",
     ];
     const candidate = "20260905_02_recovery_approved_artifact_storage.sql";
     const beforeDrive = integrated.filter(
       (name) =>
         name !== "20260905_03_recovery_drive_publication_preflight.sql" &&
         name !== "20260905_04_recovery_drive_publication.sql" &&
-        name !== "20260905_05_recovery_drive_publication_rpc.sql",
+        name !== "20260905_05_recovery_drive_publication_rpc.sql" &&
+        name !== "20260905_06_recovery_matter_drive_folder.sql",
     );
     const tracked = gitLsMigrations().filter((name) =>
       name.includes(RECOVERY_MIGRATION_TAG),

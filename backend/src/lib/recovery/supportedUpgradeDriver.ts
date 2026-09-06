@@ -93,6 +93,14 @@ export const KNOWN_SUPPORTED_MIGRATIONS: Readonly<
         "begin;\n",
     ),
   },
+  "20260905_06_recovery_matter_drive_folder.sql": {
+    sha256: "94c0e9c6a2873f4e4f41b29325d8fd17205b11eb0ab5039009243c80260a9388",
+    envelope: wrapped(
+      "-- Migration date: 2026-09-05\n" +
+        "-- Persist the matter-bound Drive folder through one service-role mutation RPC.\n" +
+        "begin;\n",
+    ),
+  },
 };
 
 function sha256(source: string): string {

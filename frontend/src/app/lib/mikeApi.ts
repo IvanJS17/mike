@@ -79,6 +79,46 @@ export const INTERNAL_ERROR_MESSAGE = "Something went wrong. Please try again.";
 export const MALFORMED_ERROR_RESPONSE_MESSAGE =
     "The request could not be completed. Please try again.";
 
+export type MatterDriveFolderRole =
+    | "matter_owner"
+    | "editor"
+    | "viewer"
+    | "technical_operator"
+    | "org_owner"
+    | "workspace_admin";
+
+export interface MatterDriveFolderSettings {
+    matter_id: string;
+    project_id: string;
+    drive_folder_id: string | null;
+    role: MatterDriveFolderRole;
+    can_edit: boolean;
+}
+
+export async function getMatterDriveFolder(
+    projectId: string,
+    matterId: string,
+): Promise<MatterDriveFolderSettings> {
+    return apiRequest<MatterDriveFolderSettings>(
+        `/projects/${encodeURIComponent(projectId)}/matters/${encodeURIComponent(matterId)}/drive-folder`,
+    );
+}
+
+export async function updateMatterDriveFolder(
+    projectId: string,
+    matterId: string,
+    driveFolderId: string | null,
+): Promise<MatterDriveFolderSettings> {
+    return apiRequest<MatterDriveFolderSettings>(
+        `/projects/${encodeURIComponent(projectId)}/matters/${encodeURIComponent(matterId)}/drive-folder`,
+        {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ drive_folder_id: driveFolderId }),
+        },
+    );
+}
+
 export type DrivePublicationOutcome =
     | "pending"
     | "uploaded"

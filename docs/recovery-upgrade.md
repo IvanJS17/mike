@@ -11,6 +11,9 @@ file, core convergence, and approved-artifact storage. It finishes with
 therefore not discovered lexically; direct lexical E2a remains fail-closed on a
 populated legacy publication relation.
 
+The manifest then applies `20260905_05_recovery_drive_publication_rpc.sql` and
+`20260905_06_recovery_matter_drive_folder.sql` in order.
+
 The driver validates exact source hashes and known transaction envelopes, emits
 one SQL script with one outer transaction, and never chooses a database target.
 The caller owns the connection and must run the emitted SQL with fail-fast

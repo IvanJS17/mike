@@ -18,6 +18,7 @@ describe("supported populated legacy Drive upgrade manifest", () => {
       "20260905_02_recovery_approved_artifact_storage.sql",
       "20260905_04_recovery_drive_publication.sql",
       "20260905_05_recovery_drive_publication_rpc.sql",
+      "20260905_06_recovery_matter_drive_folder.sql",
     ]);
   });
 

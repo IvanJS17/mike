@@ -238,7 +238,7 @@ afterAll(() => {
   const run = (args: string[]) =>
     execFileSync("docker", args, {
       encoding: "utf8",
-      timeout: 30_000,
+      timeout: 90_000,
     }).trim();
   const inventory = () =>
     run([
@@ -268,7 +268,7 @@ afterAll(() => {
   }
   expect(inventory()).toBe("");
   expect(errors).toHaveLength(0);
-}, 60_000);
+}, 120_000);
 
 describe("Drive publication RPC SQL contract", () => {
   it("pins the canonical lifecycle RPCs and does not expose direct table DML", () => {
@@ -284,6 +284,112 @@ describe("Drive publication RPC SQL contract", () => {
       /revoke all on public\.ai_review_drive_publications from anon, authenticated, service_role/,
     );
   });
+});
+
+maybe("Matter Drive folder settings RPC runtime", () => {
+  it("sets, clears, replays, and rejects unauthorized or stale matter folder changes without changing publication evidence", () => {
+    const database = "recovery_drive_folder_settings";
+    const withoutExport = LEGACY_AI_SEED.replace(
+      /insert into public\.ai_review_exports\([\s\S]*?(?=insert into public\.ai_redline_bundles)/,
+      "",
+    );
+    createDatabase(database, BASELINE_LEGACY_SEED + withoutExport);
+    appendExport(database);
+
+    const epoch = psql(
+      database,
+      `select authorization_epoch from public.organizations where id='${IDS.org}';`,
+    );
+    const reviewRevision = psql(
+      database,
+      `select revision from public.ai_reviews where id='${LEGACY_IDS.review}';`,
+    );
+    const publication = call(
+      database,
+      `public.begin_ai_review_drive_publication((select id from public.ai_review_exports where idempotency_key='runtime-drive-export'),${reviewRevision},'${IDS.reviewer}','${IDS.org}',${epoch})`,
+    );
+    expect(publication.disposition).toBe("claimed");
+    const publicationSnapshot = psql(
+      database,
+      "select to_jsonb(p)::text from public.ai_review_drive_publications p order by id;",
+    );
+    const update = (
+      actor: string,
+      organization: string,
+      value: string | null,
+      project = IDS.project,
+      authorizationEpoch = epoch,
+    ) =>
+      call(
+        database,
+        `public.update_matter_drive_folder('${IDS.matter}','${project}',${value === null ? "null" : `'${value}'`},'${actor}','${organization}',${authorizationEpoch})`,
+      );
+
+    expect(update(IDS.owner, IDS.org, "x".repeat(256)).drive_folder_id).toBe(
+      "x".repeat(256),
+    );
+    for (const invalid of ["x".repeat(257), "", "bad/id", "bad folder"]) {
+      expect(() => update(IDS.owner, IDS.org, invalid)).toThrow();
+    }
+    expect(update(IDS.owner, IDS.org, "folder-owner").drive_folder_id).toBe(
+      "folder-owner",
+    );
+    expect(update(IDS.owner, IDS.org, "folder-owner").drive_folder_id).toBe(
+      "folder-owner",
+    );
+    expect(update(IDS.owner, IDS.org, null).drive_folder_id).toBeNull();
+    expect(
+      psql(
+        database,
+        `select drive_folder_id from public.matters where id='${IDS.matter}';`,
+      ),
+    ).toBe("");
+    expect(() =>
+      update(IDS.reviewer, IDS.org, "editor-cannot-write"),
+    ).toThrow();
+    expect(() =>
+      update(IDS.outsider, IDS.org, "outsider-cannot-write"),
+    ).toThrow();
+    expect(() =>
+      update(
+        IDS.owner,
+        IDS.org,
+        "scope-mismatch",
+        "eeeeeeee-0000-0000-0000-000000000099",
+      ),
+    ).toThrow();
+
+    psql(
+      database,
+      `update public.organizations set authorization_epoch=authorization_epoch+1 where id='${IDS.org}';`,
+    );
+    expect(() =>
+      update(IDS.owner, IDS.org, "stale", IDS.project, epoch),
+    ).toThrow();
+    psql(
+      database,
+      `update public.matter_memberships set status='revoked' where matter_id='${IDS.matter}' and user_id='${IDS.owner}';`,
+    );
+    const revokedEpoch = psql(
+      database,
+      `select authorization_epoch from public.organizations where id='${IDS.org}';`,
+    );
+    expect(() =>
+      update(IDS.owner, IDS.org, "revoked", IDS.project, revokedEpoch),
+    ).toThrow();
+    expect(
+      psql(
+        database,
+        `select has_function_privilege('service_role','public.update_matter_drive_folder(uuid,uuid,text,uuid,uuid,bigint)','execute'), has_function_privilege('anon','public.update_matter_drive_folder(uuid,uuid,text,uuid,uuid,bigint)','execute'), has_function_privilege('authenticated','public.update_matter_drive_folder(uuid,uuid,text,uuid,uuid,bigint)','execute');`,
+      ),
+    ).toBe("t|f|f");
+    expect(
+      psql(
+        database,
+        "select to_jsonb(p)::text from public.ai_review_drive_publications p order by id;",
+      ),
+    ).toBe(publicationSnapshot);
+  }, 180_000);
 });
 
 maybe("Drive publication RPC SQL runtime", () => {
