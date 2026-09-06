@@ -50,6 +50,22 @@ insert into public.document_versions(id,document_id,content_sha256,created_at) v
  ('${IDS.version}','${IDS.document}',repeat('a',64),now());
 `;
 
+export const BASELINE_LEGACY_SEED = SEED.replaceAll(
+  "organization_memberships(organization_id,user_id,role,status)",
+  "organization_memberships(organization_id,user_id,role)",
+)
+  .replaceAll(
+    "workspace_memberships(workspace_id,user_id,role,status)",
+    "workspace_memberships(workspace_id,user_id,role)",
+  )
+  .replaceAll(
+    "matter_memberships(matter_id,user_id,role,status)",
+    "matter_memberships(matter_id,user_id,role)",
+  )
+  .replaceAll(",'active'", "")
+  .replace(",project_id,visibility", "")
+  .replace(`,'${IDS.project}','private'`, "");
+
 export const LEGACY_AI_SEED = `
 insert into public.documents(id,project_id,user_id,status) values
  ('${LEGACY_IDS.artifactDocument}','${IDS.project}','${IDS.owner}','completed');

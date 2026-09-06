@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { buildSupportedUpgradeSql } from "../../lib/recovery/supportedUpgradeDriver";
 import {
+  BASELINE_LEGACY_SEED,
   IDS,
   LEGACY_AI_SEED,
   LEGACY_IDS,
@@ -182,21 +183,6 @@ set session_replication_role = origin;
 // Reuse the approved shared fixture while projecting only the columns that
 // existed in the pinned d9fa baseline. The recovery series adds membership
 // status and the matter project/visibility fields later.
-const BASELINE_LEGACY_SEED = SEED.replaceAll(
-  "organization_memberships(organization_id,user_id,role,status)",
-  "organization_memberships(organization_id,user_id,role)",
-)
-  .replaceAll(
-    "workspace_memberships(workspace_id,user_id,role,status)",
-    "workspace_memberships(workspace_id,user_id,role)",
-  )
-  .replaceAll(
-    "matter_memberships(matter_id,user_id,role,status)",
-    "matter_memberships(matter_id,user_id,role)",
-  )
-  .replaceAll(",'active'", "")
-  .replace(",project_id,visibility", "")
-  .replace(`,'${IDS.project}','private'`, "");
 
 beforeAll(() => {
   if (!RUN) return;

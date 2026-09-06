@@ -83,6 +83,16 @@ export const KNOWN_SUPPORTED_MIGRATIONS: Readonly<
         "begin;\n",
     ),
   },
+  "20260905_05_recovery_drive_publication_rpc.sql": {
+    sha256: "d94320e4951e4cba5676918c8553135cb5a25c71d465607d0146f1d37584e1b1",
+    envelope: wrapped(
+      "-- Migration date: 2026-09-05\n" +
+        "-- Coordinator-owned 5.2 Drive publication persistence RPC boundary.\n" +
+        "-- Canonical rows are claimed before any external upload and may only be\n" +
+        "-- advanced through the two lifecycle RPCs below.\n" +
+        "begin;\n",
+    ),
+  },
 };
 
 function sha256(source: string): string {
