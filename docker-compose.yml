@@ -275,7 +275,8 @@ services:
 
   frontend:
     build:
-      context: ./frontend
+      context: .
+      dockerfile: frontend/Dockerfile
     environment:
       - API_BASE_URL=${API_BASE_URL:-http://backend:3001}
     ports:

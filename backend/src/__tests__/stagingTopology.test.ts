@@ -6,6 +6,17 @@ import YAML from 'yaml';
 import { validateRuntimeConfiguration } from '../lib/runtimeConfig';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 describe('isolated recovery staging topology', () => {
+ it('builds the frontend with its canonical cross-package type sources', () => {
+  for (const file of ['compose.staging.yml', 'docker-compose.yml']) {
+   const c = YAML.parse(fs.readFileSync(path.join(root,file),'utf8'));
+   expect(c.services.frontend.build.context).toBe('.');
+   expect(c.services.frontend.build.dockerfile).toBe('frontend/Dockerfile');
+  }
+  const dockerfile=fs.readFileSync(path.join(root,'frontend/Dockerfile'),'utf8');
+  expect(dockerfile).toContain('WORKDIR /app/frontend');
+  expect(dockerfile).toContain('COPY backend/src/lib/sourceDocuments.ts /app/backend/src/lib/');
+  expect(dockerfile).toContain('COPY backend/src/lib/chat/types.ts /app/backend/src/lib/chat/');
+ });
  it('boots the actual backend validator with local HTTP configuration', () => {
   const c = YAML.parse(fs.readFileSync(path.join(root,'compose.staging.yml'),'utf8'));
   const env = Object.fromEntries(Object.entries(c.services.backend.environment).map(([key,value]) => [key,

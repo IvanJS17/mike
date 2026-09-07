@@ -1,10 +1,13 @@
 FROM node:22-slim
 
-WORKDIR /app
-COPY package*.json ./
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
 RUN npm ci
-COPY . .
+COPY frontend/ ./
+COPY backend/src/lib/sourceDocuments.ts /app/backend/src/lib/
+COPY backend/src/lib/chat/types.ts /app/backend/src/lib/chat/
 
+ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
 ENV NODE_ENV=production
