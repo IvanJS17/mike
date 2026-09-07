@@ -6,6 +6,22 @@ import YAML from 'yaml';
 import { validateRuntimeConfiguration } from '../lib/runtimeConfig';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 describe('isolated recovery staging topology', () => {
+ it('bounds response-header buffers large enough for chunked Auth session cookies', () => {
+  const proxy=fs.readFileSync(path.join(root,'docker/staging/proxy.conf'),'utf8');
+  expect(proxy).toContain('proxy_buffer_size 16k;');
+  expect(proxy).toContain('proxy_buffers 4 16k;');
+ });
+ it('does not run the database-server healthcheck in the one-shot schema job', () => {
+  const c=YAML.parse(fs.readFileSync(path.join(root,'compose.staging.yml'),'utf8'));
+  expect(c.services['db-init'].healthcheck).toEqual({ disable: true });
+  expect(c.services.backend.depends_on['db-init'].condition).toBe('service_completed_successfully');
+ });
+ it('gives the real PostgreSQL image a bounded startup wait without disabling durability', () => {
+  const c=YAML.parse(fs.readFileSync(path.join(root,'compose.staging.yml'),'utf8'));
+  expect(c.services.db.environment.PGCTLTIMEOUT).toBe('300');
+  expect(c.services.db.healthcheck.start_period).toBe('300s');
+  expect(c.services.db.environment.POSTGRES_INITDB_ARGS).toBeUndefined();
+ });
  it('builds the frontend with its canonical cross-package type sources', () => {
   for (const file of ['compose.staging.yml', 'docker-compose.yml']) {
    const c = YAML.parse(fs.readFileSync(path.join(root,file),'utf8'));

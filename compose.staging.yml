@@ -6,6 +6,8 @@ services:
     image: supabase/postgres:17.6.1.136
     environment:
       POSTGRES_DB: postgres
+      # pg_ctl's default wait expired while loading extensions on this local host.
+      PGCTLTIMEOUT: '300'
       POSTGRES_PASSWORD: ${STAGING_POSTGRES_PASSWORD:?STAGING_POSTGRES_PASSWORD is
         required}
       JWT_SECRET: ${STAGING_JWT_SECRET:?STAGING_JWT_SECRET is required}
@@ -22,7 +24,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 24
-      start_period: 10s
+      start_period: 300s
     restart: 'no'
   auth:
     labels: *id001
@@ -96,6 +98,8 @@ services:
     - /staging/db-init.sh
     command:
     - fresh
+    healthcheck:
+      disable: true
     restart: 'no'
   backend:
     labels: *id001
