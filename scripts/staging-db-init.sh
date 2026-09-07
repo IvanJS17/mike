@@ -12,7 +12,7 @@ digest=${digest%% *}
 [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || exit 65
 # All bootstrap changes, including the receipt, share one connection/transaction.
 # Never re-grant application privileges: canonical SQL owns its ACL contract.
-PGCONNECT_TIMEOUT=10 timeout --signal=TERM --kill-after=5s 120s \
+PGCONNECT_TIMEOUT=10 timeout -s TERM -k 5 120 \
   psql -X --set ON_ERROR_STOP=1 --set "schema_sha256=$digest" <<'SQL'
 begin;
 set local lock_timeout = '10s';

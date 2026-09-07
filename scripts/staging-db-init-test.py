@@ -126,6 +126,31 @@ grant execute on function auth.uid() to anon,authenticated;
             assert sql(database, probe) == original, f'{database} sentinel changed'
             assert sql(database, "select to_regclass('recovery_staging.bootstrap') is null") == 't'
             receipt['checks'].append(f'{database} rejected with unchanged sentinel and no receipt')
+        # Reproduce image-owned per-schema ACLs before the canonical fresh path.
+        shutil.copyfile(ROOT / 'scripts/staging-db-roles.sh', workspace / 'roles.sh')
+        sql('postgres', 'create role supabase_admin superuser login; create role authenticator login; create database image_acl;')
+        sql('image_acl', auth)
+        sql('image_acl', '''
+        alter default privileges for role postgres in schema public grant all on tables to anon;
+        alter default privileges for role supabase_admin in schema public grant all on functions to authenticated;
+        ''')
+        roles_env = workspace / 'roles.env'
+        roles_env.write_text('POSTGRES_PASSWORD=' + uuid.uuid4().hex + '\n')
+        roles_env.chmod(0o600)
+        def image_roles(database):
+            return command(['docker', 'exec', '-e', f'POSTGRES_DB={database}',
+                            '--env-file', str(roles_env), container,
+                            'bash', '/staging/roles.sh'], check=False)
+        assert image_roles('image_acl').returncode == 0
+        assert sql('image_acl', "select count(*) from pg_default_acl where defaclnamespace='public'::regnamespace") == '0', 'image default ACLs remain before canonical bootstrap'
+        assert bootstrap('image_acl').returncode == 0
+        receipt['checks'].append('image public default ACL preparation allows canonical bootstrap')
+        sql('nonempty', 'alter default privileges for role postgres in schema public grant all on tables to anon;')
+        original_acl = sql('nonempty', 'select defaclacl::text from pg_default_acl order by oid')
+        assert image_roles('nonempty').returncode != 0
+        assert sql('nonempty', 'select id from sentinel') == '7'
+        assert sql('nonempty', 'select defaclacl::text from pg_default_acl order by oid') == original_acl
+        receipt['checks'].append('image preparation rejects populated database without changing ACLs')
         receipt['status'] = 'PASS'
     except Exception as error:
         receipt['error'] = str(error)

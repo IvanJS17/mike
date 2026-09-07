@@ -1,0 +1,239 @@
+# Recovery-only local staging. Synthetic env required; no real providers.
+services:
+  db:
+    labels: &id001
+      com.litt.recovery.owner: ${STAGING_OWNER:?required}
+    image: supabase/postgres:17.6.1.136
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${STAGING_POSTGRES_PASSWORD:?STAGING_POSTGRES_PASSWORD is
+        required}
+      JWT_SECRET: ${STAGING_JWT_SECRET:?STAGING_JWT_SECRET is required}
+      JWT_EXP: '3600'
+    volumes:
+    - staging_db_data:/var/lib/postgresql/data
+    - ./scripts/staging-db-roles.sh:/docker-entrypoint-initdb.d/zz-staging-roles.sh:ro
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - PGPASSWORD="$$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U supabase_auth_admin
+        -d postgres -tAc "select 1 where to_regclass('auth.users') is not null" |
+        grep -qx 1
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    restart: 'no'
+  auth:
+    labels: *id001
+    image: supabase/gotrue:v2.189.0
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: '9999'
+      API_EXTERNAL_URL: ${STAGING_PUBLIC_URL:?STAGING_PUBLIC_URL is required}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${STAGING_POSTGRES_PASSWORD:?STAGING_POSTGRES_PASSWORD
+        is required}@db:5432/postgres
+      GOTRUE_SITE_URL: ${STAGING_PUBLIC_URL:?STAGING_PUBLIC_URL is required}
+      GOTRUE_URI_ALLOW_LIST: ${STAGING_PUBLIC_URL:?STAGING_PUBLIC_URL is required}
+      GOTRUE_JWT_SECRET: ${STAGING_JWT_SECRET:?STAGING_JWT_SECRET is required}
+      GOTRUE_JWT_EXP: '3600'
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_DISABLE_SIGNUP: ${STAGING_DISABLE_SIGNUP:-true}
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: 'true'
+      GOTRUE_EXTERNAL_PHONE_ENABLED: 'false'
+      GOTRUE_MAILER_AUTOCONFIRM: 'true'
+      GOTRUE_EXTERNAL_GOOGLE_ENABLED: 'false'
+      GOTRUE_PASSWORD_MIN_LENGTH: '10'
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - wget -q -O /dev/null http://127.0.0.1:9999/health
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    restart: 'no'
+  rest:
+    labels: *id001
+    image: postgrest/postgrest:v14.12
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${STAGING_POSTGRES_PASSWORD:?STAGING_POSTGRES_PASSWORD
+        is required}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${STAGING_JWT_SECRET:?STAGING_JWT_SECRET is required}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: 'no'
+  db-init:
+    labels: *id001
+    image: supabase/postgres:17.6.1.136
+    environment:
+      PGHOST: db
+      PGPORT: '5432'
+      PGUSER: postgres
+      PGPASSWORD: ${STAGING_POSTGRES_PASSWORD:?STAGING_POSTGRES_PASSWORD is required}
+      PGDATABASE: postgres
+    volumes:
+    - ./backend/schema.sql:/staging/schema.sql:ro
+    - ./scripts/staging-db-init.sh:/staging/db-init.sh:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+      rest:
+        condition: service_started
+    entrypoint:
+    - bash
+    - /staging/db-init.sh
+    command:
+    - fresh
+    restart: 'no'
+  backend:
+    labels: *id001
+    build:
+      context: ./backend
+    environment:
+      # Compiled backend in local HTTP mode; production HTTPS guards stay intact.
+      NODE_ENV: development
+      PORT: '3001'
+      FRONTEND_URL: ${STAGING_PUBLIC_URL:?STAGING_PUBLIC_URL is required}
+      API_PUBLIC_URL: ${STAGING_PUBLIC_URL:?STAGING_PUBLIC_URL is required}/api
+      SUPABASE_URL: http://proxy:8000
+      SUPABASE_SECRET_KEY: ${STAGING_SUPABASE_SERVICE_ROLE_KEY:?STAGING_SUPABASE_SERVICE_ROLE_KEY
+        is required}
+      DOWNLOAD_SIGNING_SECRET: ${STAGING_DOWNLOAD_SIGNING_SECRET:?STAGING_DOWNLOAD_SIGNING_SECRET
+        is required}
+      USER_API_KEYS_ENCRYPTION_SECRET: ${STAGING_USER_API_KEYS_ENCRYPTION_SECRET:?STAGING_USER_API_KEYS_ENCRYPTION_SECRET
+        is required}
+      GOTRUE_DISABLE_SIGNUP: ${STAGING_DISABLE_SIGNUP:-true}
+      R2_ENDPOINT_URL: http://storage:9000
+      R2_ACCESS_KEY_ID: ${STAGING_S3_ACCESS_KEY:?required}
+      R2_SECRET_ACCESS_KEY: ${STAGING_S3_SECRET_KEY:?required}
+      R2_BUCKET_NAME: litt-recovery
+      SUPABASE_PUBLISHABLE_KEY: ${STAGING_SUPABASE_ANON_KEY:?required}
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      auth:
+        condition: service_healthy
+      rest:
+        condition: service_started
+      storage-init:
+        condition: service_completed_successfully
+      proxy:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - -e
+      - 'fetch(''http://127.0.0.1:3001/health'').then((r) => process.exit(r.ok ? 0
+        : 1)).catch(() => process.exit(1))'
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    restart: 'no'
+  frontend:
+    labels: *id001
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - -e
+      - 'fetch(''http://127.0.0.1:3000'').then((r) => process.exit(r.ok ? 0 : 1)).catch(()
+        => process.exit(1))'
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+    restart: 'no'
+    build:
+      context: ./frontend
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: '1'
+      API_BASE_URL: http://backend:3001
+  proxy:
+    labels: *id001
+    image: nginx:1.27.5-alpine
+    ports:
+    - 127.0.0.1:${STAGING_PROXY_PORT:?required}:8000
+    volumes:
+    - ./docker/staging/proxy.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+    - default
+    - edge
+    depends_on:
+      auth:
+        condition: service_healthy
+      rest:
+        condition: service_started
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - wget -q -O /dev/null http://127.0.0.1:8000/healthz
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 5s
+    restart: 'no'
+  storage:
+    labels: *id001
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    environment:
+      MINIO_ROOT_USER: ${STAGING_S3_ACCESS_KEY:?required}
+      MINIO_ROOT_PASSWORD: ${STAGING_S3_SECRET_KEY:?required}
+      MINIO_BROWSER: 'off'
+    command:
+    - server
+    - /data
+    volumes:
+    - staging_storage_data:/data
+    restart: 'no'
+  storage-init:
+    labels: *id001
+    image: amazon/aws-cli:2.27.41
+    environment:
+      AWS_ACCESS_KEY_ID: ${STAGING_S3_ACCESS_KEY:?required}
+      AWS_SECRET_ACCESS_KEY: ${STAGING_S3_SECRET_KEY:?required}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: 'true'
+    entrypoint:
+    - /bin/sh
+    - -c
+    command:
+    - set -eu; i=0; until aws --endpoint-url http://storage:9000 s3api list-buckets
+      >/dev/null 2>&1; do i=$$((i+1)); test $$i -lt 30 || exit 1; sleep 2; done; if
+      ! aws --endpoint-url http://storage:9000 s3api head-bucket --bucket litt-recovery
+      >/dev/null 2>&1; then aws --endpoint-url http://storage:9000 s3api create-bucket
+      --bucket litt-recovery >/dev/null; fi; aws --endpoint-url http://storage:9000
+      s3api head-bucket --bucket litt-recovery
+    depends_on:
+      storage:
+        condition: service_started
+    restart: 'no'
+volumes:
+  staging_db_data:
+    labels: *id001
+  staging_storage_data:
+    labels: *id001
+networks:
+  default:
+    internal: true
+    labels: *id001
+  edge:
+    internal: false
+    labels: *id001
