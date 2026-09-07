@@ -839,6 +839,16 @@ export async function getProject(projectId: string): Promise<Project> {
     return apiRequest<Project>(`/projects/${projectId}`);
 }
 
+/** Read persisted review data; consumers must validate scope and runtime shape. */
+export async function getHumanReviewState(
+    projectId: string,
+    executionId: string,
+): Promise<unknown> {
+    return apiRequest<unknown>(
+        `/projects/${encodeURIComponent(projectId)}/ai-executions/${encodeURIComponent(executionId)}/review`,
+    );
+}
+
 export type ApprovedReviewReportResult = {
     export_id: string;
     artifact: {
