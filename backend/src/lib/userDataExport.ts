@@ -80,6 +80,22 @@ async function loadUserChats(db: Db, userId: string) {
     return { chats, messages };
 }
 
+async function loadUserWordChats(db: Db, userId: string) {
+    const documents = await selectAll(db, "word_documents", (query) =>
+        query.eq("user_id", userId).order("created_at", { ascending: true }),
+    );
+    const chats = await selectAll(db, "word_chats", (query) =>
+        query.eq("user_id", userId).order("created_at", { ascending: true }),
+    );
+    const messages = await selectByIds(
+        db,
+        "word_chat_messages",
+        "chat_id",
+        idsFrom(chats),
+    );
+    return { documents, chats, messages };
+}
+
 async function loadUserTabularChats(db: Db, userId: string) {
     const chats = await selectAll(db, "tabular_review_chats", (query) =>
         query.eq("user_id", userId).order("created_at", { ascending: true }),
@@ -114,8 +130,9 @@ export async function buildUserChatsExport(
     userId: string,
     userEmail?: string | null,
 ) {
-    const [assistant, tabular] = await Promise.all([
+    const [assistant, wordAddin, tabular] = await Promise.all([
         loadUserChats(db, userId),
+        loadUserWordChats(db, userId),
         loadUserTabularChats(db, userId),
     ]);
 
@@ -123,6 +140,7 @@ export async function buildUserChatsExport(
         exported_at: new Date().toISOString(),
         user: { id: userId, email: userEmail ?? null },
         assistant_chats: assistant,
+        word_addin_chats: wordAddin,
         tabular_review_chats: tabular,
     };
 }
@@ -278,17 +296,32 @@ export async function buildUserAccountExport(
     const [
         profile,
         apiKeys,
+        routerModels,
         projects,
         standaloneDocuments,
         workflows,
+        workflowReferenceDocuments,
+        defaultWorkflowInstallations,
+        quickActions,
         workflowOpenSourceSubmissions,
         hiddenWorkflows,
+        workflowSharesByUser,
+        workflowSharesWithUser,
         assistantChats,
         tabularChats,
         tabularReviews,
+        sharedProjects,
+        sharedTabularReviews,
+        auditEvents,
     ] = await Promise.all([
         selectAll(db, "user_profiles", (query) => query.eq("user_id", userId)),
         loadApiKeyStatus(db, userId),
+        selectAll(db, "user_router_models", (query) =>
+            query
+                .eq("user_id", userId)
+                .order("router", { ascending: true })
+                .order("sort_order", { ascending: true }),
+        ),
         selectAll(db, "projects", (query) =>
             query.eq("user_id", userId).order("created_at", { ascending: true }),
         ),
@@ -301,6 +334,15 @@ export async function buildUserAccountExport(
         selectAll(db, "workflows", (query) =>
             query.eq("user_id", userId).order("created_at", { ascending: true }),
         ),
+        selectAll(db, "workflow_reference_documents", (query) =>
+            query.eq("user_id", userId).order("created_at", { ascending: true }),
+        ),
+        selectAll(db, "default_workflow_installations", (query) =>
+            query.eq("user_id", userId).order("installed_at", { ascending: true }),
+        ),
+        selectAll(db, "quick_actions", (query) =>
+            query.eq("user_id", userId).order("sort_order", { ascending: true }),
+        ),
         selectAll(db, "workflow_open_source_submissions", (query) =>
             query
                 .eq("submitted_by_user_id", userId)
@@ -309,10 +351,49 @@ export async function buildUserAccountExport(
         selectAll(db, "hidden_workflows", (query) =>
             query.eq("user_id", userId).order("created_at", { ascending: true }),
         ),
+        selectAll(db, "workflow_shares", (query) =>
+            query
+                .eq("shared_by_user_id", userId)
+                .order("created_at", { ascending: true }),
+        ),
+        userEmail
+            ? selectAll(db, "workflow_shares", (query) =>
+                  query
+                      .eq("shared_with_email", userEmail)
+                      .order("created_at", { ascending: true }),
+              )
+            : Promise.resolve([]),
         loadUserChats(db, userId),
         loadUserTabularChats(db, userId),
         selectAll(db, "tabular_reviews", (query) =>
             query.eq("user_id", userId).order("created_at", { ascending: true }),
+        ),
+        userEmail
+            ? selectAll(db, "projects", (query) =>
+                  query
+                      .filter(
+                          "shared_with",
+                          "cs",
+                          JSON.stringify([userEmail.trim().toLowerCase()]),
+                      )
+                      .neq("user_id", userId)
+                      .order("created_at", { ascending: true }),
+                  "id, user_id, name, cm_number, created_at, updated_at",
+              )
+            : Promise.resolve([]),
+        userEmail
+            ? selectAll(db, "tabular_reviews", (query) =>
+                  query
+                      .filter("shared_with", "cs", JSON.stringify([userEmail]))
+                      .neq("user_id", userId)
+                      .order("created_at", { ascending: true }),
+                  "id, user_id, project_id, title, practice, created_at, updated_at",
+              )
+            : Promise.resolve([]),
+        selectAll(db, "audit_events", (query) =>
+            query
+                .eq("user_id", userId)
+                .order("created_at", { ascending: true }),
         ),
     ]);
 
@@ -339,17 +420,28 @@ export async function buildUserAccountExport(
         user: { id: userId, email: userEmail ?? null },
         profile,
         api_keys: apiKeys,
+        router_models: routerModels,
         projects,
         project_subfolders: folders,
         documents,
         document_versions: versions,
         document_edits: edits,
         workflows,
+        workflow_reference_documents: workflowReferenceDocuments,
+        default_workflow_installations: defaultWorkflowInstallations,
+        quick_actions: quickActions,
         workflow_open_source_submissions: workflowOpenSourceSubmissions,
         hidden_workflows: hiddenWorkflows,
+        workflow_shares_by_user: workflowSharesByUser,
+        workflow_shares_with_user: workflowSharesWithUser,
         chats: assistantChats,
         tabular_reviews: tabularReviews,
         tabular_cells: tabularCells,
         tabular_review_chats: tabularChats,
+        shared_access: {
+            projects: sharedProjects,
+            tabular_reviews: sharedTabularReviews,
+        },
+        audit_events: auditEvents,
     };
 }

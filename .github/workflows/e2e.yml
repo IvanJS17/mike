@@ -7,15 +7,10 @@
 # this job "e2e / playwright" as a required status check in branch protection —
 # see docs/e2e-ci.md ("Make it merge-blocking").
 #
-# The suite is green with NO secret: of the 31 specs, the 4 LLM-dependent ones
-# (chat + critical path) skip themselves when ANTHROPIC_API_KEY is absent (see
-# e2e/llm.ts), so a keyless run passes the other 27 specs. The gate exists because the app has no
-# keyless model — with no provider key configured, ChatInput blocks every send —
-# not because of the (best-effort) title-generation call. To run and enforce
-# those 4, set the ANTHROPIC_API_KEY repository secret; exact steps, the
-# fork-PR caveat (fork `pull_request` runs never receive secrets, so they
-# always take the skip path), cost, and how to verify the specs ran are in
-# docs/e2e-ci.md ("Enable the LLM specs").
+# LiTT default CI never injects real provider credentials. LLM-dependent
+# upstream specs remain explicitly skipped without an authorized G6 canary.
+# Their skip is not acceptance coverage; the isolated recovery Beta uses fakes.
+# See docs/e2e-ci.md and docs/RELEASE_GATES.md.
 #
 # The e2e user (e2e@mike.local) is bootstrapped in-job by e2e/auth.setup.ts against
 # the local Supabase admin API, so no E2E_PASSWORD secret is needed — the defaults
@@ -28,14 +23,7 @@ on:
     # `main` is the destination upstream; `upstream-main` is the fork's mirror of
     # it, so the suite is exercised on the fork PR and stays correct once merged.
     branches: [main, upstream-main]
-  # Nightly run against the default branch, so drift that lands BETWEEN pull
-  # requests (a dependency bump, a Supabase CLI change, an upstream UI tweak
-  # breaking a selector) is caught within a day instead of surfacing on the next
-  # unrelated PR. 03:47 UTC is a quiet hour for GitHub's cron pool (on-the-hour
-  # slots are congested and can be delayed or dropped). Scheduled runs exercise
-  # the 4 LLM-gated specs only when the ANTHROPIC_API_KEY repository secret is
-  # configured — without it they self-skip (e2e/llm.ts) and the run still
-  # covers the other specs.
+  # Existing nightly keyless regression checks; not Phase 4 intake automation.
   schedule:
     - cron: "47 3 * * *"
 
@@ -52,12 +40,8 @@ jobs:
       # Defaults match e2e/auth.setup.ts; overriding the password here would break
       # the valid-login specs, so only the base URL is pinned.
       PLAYWRIGHT_BASE_URL: http://localhost:3000
-      # Exposed to the Playwright process (not just backend/.env) so the LLM-gated
-      # specs can skip themselves when no key is present — see e2e/llm.ts. When the
-      # secret is set they run and are enforced; when absent they skip, so a keyless
-      # run (e.g. a fork PR, which never receives this secret) is still green on
-      # the other 27 of the 31 specs. Setup: docs/e2e-ci.md, "Enable the LLM specs".
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # Explicitly keyless even if a repository secret exists.
+      ANTHROPIC_API_KEY: ""
     steps:
       - uses: actions/checkout@v4
 
@@ -123,40 +107,25 @@ jobs:
       - name: Start local Supabase
         uses: supabase/setup-cli@v1
         with:
-          version: latest
-      - name: Init + start Supabase, load schema + migrations
+          # Keep CI reproducible and avoid the GitHub API call needed to resolve
+          # `latest`, which can fail when the shared runner hits its rate limit.
+          version: 2.108.0
+      - name: Init + start Supabase, load fresh schema
         run: |
           supabase init --force --with-vscode-settings=false || supabase init --force
-          supabase start
+          # E2E uses Auth, Postgres, PostgREST, and Kong only. Document storage
+          # is provided by MinIO above, and no spec reads local email. Excluding
+          # the unused services also avoids Inbucket claiming host port 54324,
+          # which can collide with runner processes before Playwright starts.
+          supabase start -x studio,imgproxy,inbucket,analytics,vector,realtime,storage,edge-runtime,functions,meta
           DB_URL=$(supabase status -o json | jq -r '.DB_URL')
-          # 1) Base schema. README: "For a new Supabase database ... run
-          # backend/schema.sql". It is meant to be the latest shape but in practice
-          # lags the migrations (e.g. it is missing workflow_open_source_submissions,
-          # which GET /workflows/:id queries — a 500 that breaks the workflow specs).
+          # A fresh database runs the current schema exactly once. Historical
+          # migrations only upgrade older deployments; replaying them on top of
+          # schema.sql can overwrite current functions with obsolete definitions.
+          # The schema-drift workflow separately proves that the real upgrade path
+          # (pinned baseline + migrations) converges with this fresh-install path.
           psql "$DB_URL" -v ON_ERROR_STOP=1 -f backend/schema.sql
-          # 2) Apply every dated migration on top. They are written to be safe to
-          # re-run (IF NOT EXISTS / ADD COLUMN IF NOT EXISTS), so the ones already
-          # in schema.sql are no-ops and the newer ones fill the gaps. Verified on a
-          # fresh CLI DB: all migrations apply with zero errors. Kept fail-tolerant
-          # so one non-idempotent migration can't wedge the whole gate — mismatches
-          # surface as a spec failure downstream, not an opaque CI abort.
-          for m in $(ls backend/migrations/*.sql | sort); do
-            psql "$DB_URL" -v ON_ERROR_STOP=1 -f "$m" >/dev/null 2>&1 \
-              || echo "::warning::migration returned a non-zero status (already applied?): $m"
-          done
-          # 3) schema.sql now grants service_role its narrowed data privileges
-          # itself, but those GRANT ... ON ALL statements only cover tables that
-          # exist when schema.sql runs — tables created by the migrations above
-          # are not covered, and the backend (which queries exclusively as
-          # service_role, lib/supabase.ts) 500s with "permission denied" on them.
-          # Re-grant AFTER migrations with the SAME privilege set as schema.sql —
-          # deliberately not ALL, so e2e cannot pass on a privilege prod lacks.
-          psql "$DB_URL" -v ON_ERROR_STOP=1 <<'SQL'
-          GRANT USAGE ON SCHEMA public TO service_role;
-          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO service_role;
-          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO service_role;
-          SQL
-          # 4) PostgREST cached its schema when `supabase start` booted it (before
+          # PostgREST cached its schema when `supabase start` booted it (before
           # the DDL above). Tell it to reload so the new tables/grants are visible.
           psql "$DB_URL" -v ON_ERROR_STOP=1 -c "NOTIFY pgrst, 'reload schema';"
 
@@ -171,7 +140,9 @@ jobs:
           {
             echo "PORT=3001"
             echo "FRONTEND_URL=http://localhost:3000"
+            echo "API_PUBLIC_URL=http://localhost:3000/api"
             echo "SUPABASE_URL=$API_URL"
+            echo "SUPABASE_PUBLISHABLE_KEY=$ANON_KEY"
             echo "SUPABASE_SECRET_KEY=$SERVICE_KEY"
             # Both secrets are consumed lazily by download-token signing and API-key
             # encryption; supply CI dummies well over any length floor.
@@ -187,20 +158,31 @@ jobs:
             echo "RATE_LIMIT_UPLOAD_MAX=100000"
             echo "RATE_LIMIT_EXPORT_MAX=100000"
             echo "RATE_LIMIT_DATA_DELETE_MAX=100000"
+            echo "RATE_LIMIT_AUTH_LOGIN_MAX=100000"
+            echo "RATE_LIMIT_AUTH_ACCOUNT_MAX=100000"
+            echo "RATE_LIMIT_AUTH_EMAIL_MAX=100000"
+            echo "RATE_LIMIT_AUTH_FLOW_MAX=100000"
+            echo "RATE_LIMIT_AUTH_MFA_MAX=100000"
             # Point the S3-compatible storage adapter at the MinIO container above.
             echo "R2_ENDPOINT_URL=http://localhost:9000"
             echo "R2_ACCESS_KEY_ID=minioadmin"
             echo "R2_SECRET_ACCESS_KEY=minioadmin"
             echo "R2_BUCKET_NAME=mike"
-            echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"
+            # Keep the release-job fixture reproducible even when the source
+            # repository's main branch changes independently of this PR.
+            echo "MIKE_WORKFLOWS_REF=ce62e6a2d3f47e1d3567a4f2edc61898cfe9e78a"
+            echo "ANTHROPIC_API_KEY="
           } >> backend/.env
-          # next build inlines NEXT_PUBLIC_* at build time, so these must be set
-          # before the "Build web" step below.
-          {
-            echo "NEXT_PUBLIC_SUPABASE_URL=$API_URL"
-            echo "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY=$ANON_KEY"
-            echo "NEXT_PUBLIC_API_BASE_URL=http://localhost:3001"
-          } > frontend/.env.local
+          # The web client talks to its own /api gateway. Only the Next server
+          # needs the upstream backend origin.
+          echo "API_BASE_URL=http://localhost:3001" > frontend/.env.local
+
+      # Production runs this as a release job after migrations and before the
+      # backend starts. E2E must exercise the same ordering so defaults exist.
+      - name: Sync Mike workflow catalog
+        run: |
+          npm run build --prefix backend
+          npm run sync:workflows --prefix backend
 
       # Serve a PRODUCTION build, not `next dev`. Two reasons the dev server makes
       # this suite flaky: (1) its on-demand route compilation makes the first hit

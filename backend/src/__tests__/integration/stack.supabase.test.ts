@@ -23,18 +23,18 @@ const maybeDescribe =
 // trips the leak sweep below. A table missing from an older local stack
 // returns an error (no rows), which never counts as a leak.
 const PUBLIC_TABLES = [
-    "ai_document_version_pages", "ai_executions", "ai_output_versions", "ai_receipts",
-    "ai_reviews", "ai_review_items", "ai_review_decisions", "ai_review_exports",
-    "ai_redline_bundles",
-    "audit_events",
-    "chat_messages", "chats", "document_edits",
-    "document_versions", "document_download_grants", "documents", "hidden_workflows", "library_folders",
+    "chat_messages", "chats", "courtlistener_citation_index",
+    "courtlistener_opinion_cluster_index", "document_edits",
+    "document_versions", "documents", "hidden_workflows", "library_folders",
+    "default_workflow_installations", "quick_actions", "mike_workflows",
+    "workflow_reference_documents", "mike_workflow_reference_files",
     "project_subfolders", "projects", "tabular_cells",
     "tabular_review_chat_messages", "tabular_review_chats", "tabular_reviews",
     "user_api_keys", "user_mcp_connector_tools", "user_mcp_connectors",
     "user_mcp_oauth_states", "user_mcp_oauth_tokens",
-    "user_mcp_tool_audit_logs", "user_profiles",
-    "workflow_open_source_submissions", "workflows",
+    "user_mcp_tool_audit_logs", "user_profiles", "user_router_models",
+    "word_chat_messages", "word_chats", "word_documents",
+    "workflow_open_source_submissions", "workflow_shares", "workflows",
 ];
 
 maybeDescribe("Supabase stack — auth contract + RLS deny-all firewall", () => {
@@ -62,7 +62,10 @@ maybeDescribe("Supabase stack — auth contract + RLS deny-all firewall", () => 
         });
 
         const a = await admin.auth.admin.createUser({
-            email: emailA, password, email_confirm: true,
+            email: emailA,
+            password,
+            email_confirm: true,
+            user_metadata: { full_name: "Google Stack User" },
         });
         const b = await admin.auth.admin.createUser({
             email: emailB, password, email_confirm: true,
@@ -105,6 +108,16 @@ maybeDescribe("Supabase stack — auth contract + RLS deny-all firewall", () => 
         expect(data.user?.email).toBe(emailA);
     });
 
+    it("signup profile uses the OAuth-style full_name metadata", async () => {
+        const { data, error } = await admin
+            .from("user_profiles")
+            .select("display_name")
+            .eq("user_id", userA)
+            .single();
+        expect(error).toBeNull();
+        expect(data?.display_name).toBe("Google Stack User");
+    });
+
     it("RLS: the service role sees seeded rows the owner cannot see via the user path", async () => {
         // Service role (app data path) sees the project…
         const svc = await admin
@@ -133,6 +146,63 @@ maybeDescribe("Supabase stack — auth contract + RLS deny-all firewall", () => 
         const cross = await asUser(tokenB)
             .from("projects").select("id").eq("id", projectId);
         expect(cross.data ?? []).toHaveLength(0);
+    });
+
+    it("deleting a default workflow removes its Quick Action but preserves its installation marker", async () => {
+        const defaultKey = `delete-verification-${Date.now()}`;
+        const workflowResult = await admin
+            .from("workflows")
+            .insert({
+                user_id: userA,
+                title: "Deletable default verification",
+                type: "assistant",
+            })
+            .select("id")
+            .single();
+        expect(workflowResult.error).toBeNull();
+        const workflowId = workflowResult.data!.id;
+
+        const installationResult = await admin
+            .from("default_workflow_installations")
+            .insert({ user_id: userA, default_key: defaultKey, workflow_id: workflowId });
+        expect(installationResult.error).toBeNull();
+        const actionResult = await admin
+            .from("quick_actions")
+            .insert({
+                user_id: userA,
+                workflow_id: workflowId,
+                name: "Verify cascade",
+                prompt: "Verify cascade",
+            });
+        expect(actionResult.error).toBeNull();
+
+        const deletionResult = await admin
+            .from("workflows")
+            .delete()
+            .eq("id", workflowId);
+        expect(deletionResult.error).toBeNull();
+
+        const installation = await admin
+            .from("default_workflow_installations")
+            .select("workflow_id")
+            .eq("user_id", userA)
+            .eq("default_key", defaultKey)
+            .single();
+        expect(installation.error).toBeNull();
+        expect(installation.data?.workflow_id).toBeNull();
+
+        const actions = await admin
+            .from("quick_actions")
+            .select("id")
+            .eq("workflow_id", workflowId);
+        expect(actions.error).toBeNull();
+        expect(actions.data).toEqual([]);
+
+        await admin
+            .from("default_workflow_installations")
+            .delete()
+            .eq("user_id", userA)
+            .eq("default_key", defaultKey);
     });
 
     it("leak sweep: no public table returns rows to the authenticated user path", async () => {

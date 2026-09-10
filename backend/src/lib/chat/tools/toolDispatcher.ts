@@ -1,7 +1,4 @@
-import {
-  executeMcpToolCall,
-  type McpToolEvent,
-} from "../../mcpConnectors";
+import { executeMcpToolCall, type McpToolEvent } from "../../mcpConnectors";
 import { createServerSupabase } from "../../supabase";
 import {
   type DocStore,
@@ -15,18 +12,14 @@ import {
   devLog,
   resolveDocLabel,
 } from "../types";
+import { downloadFile, storageKey, uploadFile } from "../../storage";
+import { convertedPdfKey, docxToPdf } from "../../convert";
 import {
-  downloadFile,
-  storageKey,
-  uploadFile,
-} from "../../storage";
-import { convertedPdfKey } from "../../convert";
-import { contentTypeForDocumentType } from "../../documentTypes";
-import { createDownloadUrl } from "../../downloadTokens";
-import {
-  contentSha256,
-  loadActiveVersion,
-} from "../../documentVersions";
+  contentTypeForDocumentType,
+  shouldConvertToPdf,
+} from "../../documentTypes";
+import { buildDownloadUrl } from "../../downloadTokens";
+import { contentSha256, loadActiveVersion } from "../../documentVersions";
 import { type EditInput } from "../../docxTrackedChanges";
 import {
   citationReminder,
@@ -38,7 +31,6 @@ import {
   clearTurnReadsForDocument,
   readDocumentContent,
   findInDocumentContent,
-  findTextMatches,
   runEditDocument,
   safeGeneratedFilename,
   type DocEditedResult,
@@ -46,20 +38,32 @@ import {
   type TurnReadState,
   type DocCreatedResult,
   type DocReplicatedResult,
-  type TextMatch,
 } from "./documentOps";
 import {
   spotlight,
   spotlightFilename,
   spotlightWorkflow,
 } from "../contextBuilders";
+function sourceMaterialNotice(
+  sourceKind: "document" | "library_template" | "workflow_asset" | undefined,
+) {
+  if (sourceKind === "library_template") {
+    return "Source type: Library Template (immutable). If this template will be edited or filled in, call replicate_document with a new_filename and work from the returned copy; reading it for information needs no copy.";
+  }
+  if (sourceKind === "workflow_asset") {
+    return "Source type: Workflow asset (immutable). If this file will be used as a template — edited or filled in — call replicate_document with a new_filename and work from the returned copy; reading it for information needs no copy.";
+  }
+  return null;
+}
 
 function cleanAskInputString(value: unknown, fallback = ""): string {
   const text = typeof value === "string" ? value.trim() : "";
   return text || fallback;
 }
 
-function normalizeAskInputsEvent(args: Record<string, unknown>): AskInputsEvent {
+function normalizeAskInputsEvent(
+  args: Record<string, unknown>,
+): AskInputsEvent {
   const rawItems = Array.isArray(args.items) ? args.items : [];
   const items = rawItems
     .map((item, index): AskInputItem | null => {
@@ -67,7 +71,13 @@ function normalizeAskInputsEvent(args: Record<string, unknown>): AskInputsEvent 
       const row = item as Record<string, unknown>;
       const id =
         cleanAskInputString(row.id) ||
-        `${row.kind === "documents" ? "documents" : "choice"}-${index + 1}`;
+        `${
+          row.kind === "documents"
+            ? "documents"
+            : row.kind === "text"
+              ? "text"
+              : "choice"
+        }-${index + 1}`;
       const responsePrefix = cleanAskInputString(row.response_prefix);
 
       if (row.kind === "documents") {
@@ -84,6 +94,21 @@ function normalizeAskInputsEvent(args: Record<string, unknown>): AskInputsEvent 
           id: id.slice(0, 80),
           kind: "documents",
           document_types: documentTypes,
+          ...(responsePrefix
+            ? { response_prefix: responsePrefix.slice(0, 200) }
+            : {}),
+        };
+      }
+
+      if (row.kind === "text") {
+        const question = cleanAskInputString(
+          row.question,
+          "Please provide the requested information.",
+        );
+        return {
+          id: id.slice(0, 80),
+          kind: "text",
+          question: question.slice(0, 500),
           ...(responsePrefix
             ? { response_prefix: responsePrefix.slice(0, 200) }
             : {}),
@@ -142,12 +167,23 @@ export async function runToolCalls(
   turnEditState?: TurnEditState,
   turnReadState?: TurnReadState,
   projectId?: string | null,
-  apiKeys?: import("../../llm").UserApiKeys,
   nonce?: string,
 ): Promise<{
   toolResults: unknown[];
-  docsRead: { filename: string; document_id?: string }[];
-  docsFound: { filename: string; query: string; total_matches: number }[];
+  docsRead: {
+    filename: string;
+    document_id?: string;
+    version_id?: string | null;
+    version_number?: number | null;
+  }[];
+  docsFound: {
+    filename: string;
+    document_id?: string;
+    version_id?: string | null;
+    version_number?: number | null;
+    query: string;
+    total_matches: number;
+  }[];
   docsCreated: DocCreatedResult[];
   docsReplicated: DocReplicatedResult[];
   workflowsApplied: { workflow_id: string; title: string }[];
@@ -156,9 +192,17 @@ export async function runToolCalls(
   mcpEvents: McpToolEvent[];
 }> {
   const toolResults: unknown[] = [];
-  const docsRead: { filename: string; document_id?: string }[] = [];
+  const docsRead: {
+    filename: string;
+    document_id?: string;
+    version_id?: string | null;
+    version_number?: number | null;
+  }[] = [];
   const docsFound: {
     filename: string;
+    document_id?: string;
+    version_id?: string | null;
+    version_number?: number | null;
     query: string;
     total_matches: number;
   }[] = [];
@@ -168,7 +212,6 @@ export async function runToolCalls(
   const docsEdited: DocEditedResult[] = [];
   const askInputsEvents: AskInputsEvent[] = [];
   const mcpEvents: McpToolEvent[] = [];
-
   const registerGeneratedDocument = (
     tc: ToolCall,
     result: Record<string, unknown>,
@@ -193,6 +236,8 @@ export async function runToolCalls(
         docIndex[newDocLabel] = {
           document_id: documentId,
           filename: dlFilename,
+          version_id: versionId ?? null,
+          version_number: versionNumber,
         };
         docStore.set(newDocLabel, {
           storage_path: storagePath,
@@ -301,10 +346,13 @@ export async function runToolCalls(
       });
       if (readIdentity && turnReadState?.has(readIdentity.key)) {
         const promptFilename = spotlightFilename(readIdentity.filename, nonce);
+        const sourceNotice = sourceMaterialNotice(
+          docStore.get(docId)?.source_kind,
+        );
         toolResults.push({
           role: "tool",
           tool_call_id: tc.id,
-          content: `Document filename: ${promptFilename}\n\n${duplicateReadDocumentResult(readIdentity)}`,
+          content: `Document filename: ${promptFilename}${sourceNotice ? `\n${sourceNotice}` : ""}\n\n${duplicateReadDocumentResult(readIdentity)}`,
         });
         continue;
       }
@@ -314,32 +362,67 @@ export async function runToolCalls(
         write,
         docIndex,
         db,
+        { readIdentity },
       );
       const filename = docStore.get(docId)?.filename;
       const documentId = docIndex?.[docId]?.document_id;
       if (readIdentity && turnReadState) {
         turnReadState.set(readIdentity.key, readIdentity);
       }
-      if (filename) docsRead.push({ filename, document_id: documentId });
+      if (filename)
+        docsRead.push({
+          filename,
+          document_id: readIdentity?.documentId ?? documentId,
+          version_id: readIdentity?.versionId ?? null,
+          version_number: readIdentity?.versionNumber ?? null,
+        });
       // Wrap document content in the spotlight fence: the document body
       // is entirely user-controlled and may contain injected instructions.
       const fencedContent = nonce ? spotlight(content, nonce) : content;
       const promptFilename = spotlightFilename(filename ?? "", nonce);
+      const sourceNotice = sourceMaterialNotice(
+        docStore.get(docId)?.source_kind,
+      );
       toolResults.push({
         role: "tool",
         tool_call_id: tc.id,
         content: filename
-          ? `${citationReminder(docId, filename, promptFilename)}\n\n${fencedContent}`
+          ? `${citationReminder(docId, filename, promptFilename)}${sourceNotice ? `\n${sourceNotice}` : ""}\n\n${fencedContent}`
           : fencedContent,
       });
     } else if (tc.function.name === "find_in_document") {
       const rawDocId = args.doc_id as string;
       const docId = resolveDocLabel(rawDocId, docStore, docIndex) ?? rawDocId;
+      const docInfo = docStore.get(docId);
+      // Request-scoped inline documents (currently the active Word document)
+      // must enter model context only through read_document/fetch_documents.
+      // Those paths emit the visible read lifecycle and nonce-fence the entire
+      // body. find_in_document otherwise returns raw, user-controlled snippets
+      // and would silently bypass both guarantees.
+      if (docInfo?.inline_text !== undefined) {
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify({
+            ok: false,
+            error:
+              "Request-scoped documents must be opened with read_document before they can be searched.",
+            next_required_action: `Call read_document with doc_id "${docId}".`,
+          }),
+        });
+        continue;
+      }
       const query = (args.query as string) ?? "";
       const maxResults =
         typeof args.max_results === "number" ? args.max_results : undefined;
       const contextChars =
         typeof args.context_chars === "number" ? args.context_chars : undefined;
+      const readIdentity = await getTurnReadIdentity({
+        docLabel: docId,
+        docStore,
+        docIndex,
+        db,
+      });
       const content = await findInDocumentContent({
         docLabel: docId,
         query,
@@ -349,8 +432,9 @@ export async function runToolCalls(
         write,
         docIndex,
         db,
+        readIdentity,
       });
-      const filename = docStore.get(docId)?.filename;
+      const filename = docInfo?.filename;
       if (filename) {
         let totalMatches = 0;
         try {
@@ -363,6 +447,10 @@ export async function runToolCalls(
         }
         docsFound.push({
           filename,
+          document_id:
+            readIdentity?.documentId ?? docIndex?.[docId]?.document_id,
+          version_id: readIdentity?.versionId ?? null,
+          version_number: readIdentity?.versionNumber ?? null,
           query,
           total_matches: totalMatches,
         });
@@ -395,8 +483,11 @@ export async function runToolCalls(
         if (readIdentity && turnReadState?.has(readIdentity.key)) {
           const filename = docStore.get(docId)?.filename ?? docId;
           const promptFilename = spotlightFilename(filename, nonce);
+          const sourceNotice = sourceMaterialNotice(
+            docStore.get(docId)?.source_kind,
+          );
           parts.push(
-            `--- ${docId} ---\nDocument filename: ${promptFilename}\n\n${duplicateReadDocumentResult(
+            `--- ${docId} ---\nDocument filename: ${promptFilename}${sourceNotice ? `\n${sourceNotice}` : ""}\n\n${duplicateReadDocumentResult(
               readIdentity,
             )}`,
           );
@@ -408,6 +499,7 @@ export async function runToolCalls(
           write,
           docIndex,
           db,
+          { readIdentity },
         );
         const filename = docStore.get(docId)?.filename ?? docId;
         if (readIdentity && turnReadState) {
@@ -416,12 +508,20 @@ export async function runToolCalls(
         // Document body is user-controlled; spotlight it.
         const fencedContent = nonce ? spotlight(content, nonce) : content;
         const promptFilename = spotlightFilename(filename, nonce);
+        const sourceNotice = sourceMaterialNotice(
+          docStore.get(docId)?.source_kind,
+        );
         parts.push(
-          `--- ${docId} ---\n${citationReminder(docId, filename, promptFilename)}\n\n${fencedContent}`,
+          `--- ${docId} ---\n${citationReminder(docId, filename, promptFilename)}${sourceNotice ? `\n${sourceNotice}` : ""}\n\n${fencedContent}`,
         );
         if (docStore.get(docId)) {
           const documentId = docIndex?.[docId]?.document_id;
-          docsRead.push({ filename, document_id: documentId });
+          docsRead.push({
+            filename,
+            document_id: readIdentity?.documentId ?? documentId,
+            version_id: readIdentity?.versionId ?? null,
+            version_number: readIdentity?.versionNumber ?? null,
+          });
         }
       }
       toolResults.push({
@@ -431,10 +531,12 @@ export async function runToolCalls(
       });
     } else if (tc.function.name === "list_workflows") {
       const list = workflowStore
-        ? Array.from(workflowStore.entries()).map(([id, w]) => ({
-            id,
-            title: w.title,
-          }))
+        ? Array.from(workflowStore.entries())
+            .filter(([, workflow]) => workflow.listed !== false)
+            .map(([id, w]) => ({
+              id,
+              title: w.title,
+            }))
         : [];
       toolResults.push({
         role: "tool",
@@ -450,16 +552,43 @@ export async function runToolCalls(
         );
         workflowsApplied.push({ workflow_id: wfId, title: wf.title });
       }
+      const referenceHandles: { doc_id: string; filename: string }[] = [];
+      if (wf) {
+        for (const [index, reference] of (wf.reference_files ?? []).entries()) {
+          const docId = `workflow-ref-${wfId}-${index + 1}`;
+          docStore.set(docId, {
+            storage_path: reference.storage_path,
+            file_type: reference.file_type,
+            filename: reference.filename,
+            source_kind: "workflow_asset",
+          });
+          referenceHandles.push({
+            doc_id: docId,
+            filename: reference.filename,
+          });
+        }
+      }
       // Workflow bodies are instructions the user installed to be FOLLOWED,
       // so they get the semi-trusted <workflow-instructions> fence (follow,
       // but never override system policy) rather than <untrusted-content>
       // (data only) — wrapping instructions in a data-only fence would either
       // break workflow execution or teach the model to ignore the fence.
       const wfContent = wf ? wf.skill_md : `Workflow '${wfId}' not found.`;
+      const instructions =
+        nonce && wf ? spotlightWorkflow(wfContent, nonce) : wfContent;
+      const referenceNotice =
+        referenceHandles.length > 0
+          ? `\n\nAvailable immutable workflow reference files (open relevant files with read_document; if a file will be used as a template — edited or filled in — call replicate_document with a new_filename and work from the copy; reading one for information needs no copy):\n${referenceHandles
+              .map(
+                (reference) =>
+                  `- ${reference.doc_id}: ${spotlightFilename(reference.filename, nonce)}`,
+              )
+              .join("\n")}`
+          : "";
       toolResults.push({
         role: "tool",
         tool_call_id: tc.id,
-        content: nonce && wf ? spotlightWorkflow(wfContent, nonce) : wfContent,
+        content: `${instructions}${referenceNotice}`,
       });
     } else if (tc.function.name === "read_table_cells" && tabularStore) {
       const colIndices = args.col_indices as number[] | undefined;
@@ -544,7 +673,19 @@ export async function runToolCalls(
         );
       };
 
-      if (!docInfo || !indexed) {
+      if (
+        docInfo?.source_kind === "library_template" ||
+        docInfo?.source_kind === "workflow_asset"
+      ) {
+        const err =
+          "Templates and workflow assets cannot be edited directly. Call replicate_document with a new_filename, then edit the returned copy.";
+        emitEditError(docInfo.filename, indexed?.document_id ?? "", err);
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: err }),
+        });
+      } else if (!docInfo || !indexed) {
         const err = `Document '${docId}' not found in this chat's attachments.`;
         emitEditError(docId, indexed?.document_id ?? "", err);
         toolResults.push({
@@ -714,25 +855,54 @@ export async function runToolCalls(
         });
       };
 
-      if (!sourceInfo || !sourceIndexed) {
-        fail(`Document '${rawDocId}' not found in this project.`);
-      } else if (!projectId) {
-        fail("replicate_document is only available in project chats.");
+      const isImmutableSource =
+        sourceInfo?.source_kind === "library_template" ||
+        sourceInfo?.source_kind === "workflow_asset";
+
+      if (!sourceInfo) {
+        fail(`Document '${rawDocId}' is not available in this chat.`);
+      } else if (
+        !sourceIndexed &&
+        sourceInfo.source_kind !== "workflow_asset"
+      ) {
+        fail(`Document '${rawDocId}' is not available in this chat.`);
+      } else if (isImmutableSource && !requestedFilename) {
+        fail(
+          "A new_filename is required when copying a Library Template or workflow asset.",
+        );
       } else {
         try {
           // Pull the active version once — every copy gets the
           // same starting bytes (with any accepted tracked
           // changes rolled in), no point re-fetching per copy.
-          const active = await loadActiveVersion(sourceIndexed.document_id, db);
+          const active = sourceIndexed
+            ? await loadActiveVersion(sourceIndexed.document_id, db)
+            : null;
           const sourcePath = active?.storage_path ?? sourceInfo.storage_path;
           const sourcePdfPath = active?.pdf_storage_path ?? null;
           const raw = await downloadFile(sourcePath);
-          const pdfBytes = sourcePdfPath
+          let pdfBytes = sourcePdfPath
             ? await downloadFile(sourcePdfPath)
             : null;
           if (!raw) {
             fail("Could not read the source document's bytes from storage.");
           } else {
+            if (!pdfBytes && sourceInfo.file_type.toLowerCase() === "pdf") {
+              pdfBytes = raw;
+            } else if (!pdfBytes && shouldConvertToPdf(sourceInfo.file_type)) {
+              try {
+                const converted = await docxToPdf(Buffer.from(raw));
+                pdfBytes = converted.buffer.slice(
+                  converted.byteOffset,
+                  converted.byteOffset + converted.byteLength,
+                ) as ArrayBuffer;
+              } catch (conversionError) {
+                devLog(
+                  `[replicate_document] Office→PDF conversion failed for ${sourceFilename}:`,
+                  conversionError,
+                );
+              }
+            }
             // Build N filenames. With count=1 keep the
             // pre-existing "(copy)" suffix; with count>1 use
             // numbered "(1)", "(2)" suffixes.
@@ -754,56 +924,65 @@ export async function runToolCalls(
               filenames.push(`${baseStem}${suffix}${srcExt}`);
             }
 
-            // Bulk insert N documents in one round-trip.
-            const docRows = filenames.map((fn) => ({
-              project_id: projectId,
+            // Pre-generate the document ids client-side (mirrors
+            // persistGeneratedFile) so every copy's bytes can be
+            // uploaded BEFORE any documents row exists: a failure
+            // mid-flight then leaves orphaned storage objects, never
+            // a user-visible "ready" library row without content.
+            const newDocs = filenames.map((fn) => ({
+              id: crypto.randomUUID(),
+              filename: fn,
+            }));
+            const contentType = contentTypeForDocumentType(
+              sourceInfo.file_type,
+            );
+
+            // Parallel uploads: the doc bytes (and PDF
+            // rendition if any) for every new copy.
+            const uploadJobs: Promise<unknown>[] = [];
+            const newKeys: string[] = [];
+            const newPdfKeys: (string | null)[] = [];
+            for (const d of newDocs) {
+              const key = storageKey(userId, d.id, d.filename);
+              newKeys.push(key);
+              uploadJobs.push(uploadFile(key, raw, contentType));
+              if (pdfBytes) {
+                const pdfKey = convertedPdfKey(userId, d.id);
+                newPdfKeys.push(pdfKey);
+                uploadJobs.push(
+                  uploadFile(pdfKey, pdfBytes, "application/pdf"),
+                );
+              } else {
+                newPdfKeys.push(null);
+              }
+            }
+            await Promise.all(uploadJobs);
+
+            // Bytes are durable; now record the rows in one
+            // round-trip per table.
+            const docRows = newDocs.map((d) => ({
+              id: d.id,
+              project_id: projectId ?? null,
               user_id: userId,
               status: "ready",
+              library_kind: "file",
+              library_folder_id: null,
             }));
             const { data: insertedDocs, error: docErr } = await db
               .from("documents")
               .insert(docRows)
               .select("id");
-            if (docErr || !insertedDocs || insertedDocs.length === 0) {
-              fail(
-                `Failed to record replicated documents: ${docErr?.message ?? "unknown"}`,
+            if (
+              docErr ||
+              !insertedDocs ||
+              insertedDocs.length !== newDocs.length
+            ) {
+              console.error(
+                "[replicate-document] failed to record documents",
+                docErr,
               );
+              fail("Failed to record replicated documents");
             } else {
-              // Preserve the request order so each row pairs
-              // with the right filename. Supabase returns
-              // inserted rows in the same order as the
-              // payload.
-              const newDocs = (insertedDocs as { id: string }[]).map(
-                (doc, idx) => ({
-                  ...doc,
-                  filename: filenames[idx] ?? "Untitled document.docx",
-                }),
-              );
-              const contentType = contentTypeForDocumentType(
-                sourceInfo.file_type,
-              );
-
-              // Parallel uploads: the doc bytes (and PDF
-              // rendition if any) for every new copy.
-              const uploadJobs: Promise<unknown>[] = [];
-              const newKeys: string[] = [];
-              const newPdfKeys: (string | null)[] = [];
-              for (const d of newDocs) {
-                const key = storageKey(userId, d.id, d.filename);
-                newKeys.push(key);
-                uploadJobs.push(uploadFile(key, raw, contentType));
-                if (pdfBytes) {
-                  const pdfKey = convertedPdfKey(userId, d.id);
-                  newPdfKeys.push(pdfKey);
-                  uploadJobs.push(
-                    uploadFile(pdfKey, pdfBytes, "application/pdf"),
-                  );
-                } else {
-                  newPdfKeys.push(null);
-                }
-              }
-              await Promise.all(uploadJobs);
-
               // Bulk insert N versions in one round-trip.
               const versionRows = newDocs.map((d, idx) => ({
                 document_id: d.id,
@@ -829,9 +1008,21 @@ export async function runToolCalls(
                 !insertedVersions ||
                 insertedVersions.length !== newDocs.length
               ) {
-                fail(
-                  `Failed to record replicated document versions: ${verErr?.message ?? "unknown"}`,
+                // Roll the documents rows back so no version-less
+                // "ready" rows stay visible in the library
+                // (best-effort; the bytes are already uploaded).
+                await db
+                  .from("documents")
+                  .delete()
+                  .in(
+                    "id",
+                    newDocs.map((d) => d.id),
+                  );
+                console.error(
+                  "[replicate-document] failed to record document versions",
+                  verErr,
                 );
+                fail("Failed to record replicated document versions");
               } else {
                 const versionByDocId = new Map<string, string>();
                 for (const v of insertedVersions as {
@@ -843,9 +1034,11 @@ export async function runToolCalls(
 
                 // current_version_id has to be a per-row
                 // value, so a single UPDATE statement
-                // can't cover all N. Fan out in parallel
-                // instead of sequential awaits.
-                await Promise.all(
+                // can't cover all N. Fan out in parallel,
+                // but check every in-band result: Supabase
+                // builders report failures in `error`, they
+                // never reject.
+                const updateResults = await Promise.all(
                   newDocs.map((d) =>
                     db
                       .from("documents")
@@ -855,9 +1048,30 @@ export async function runToolCalls(
                       .eq("id", d.id),
                   ),
                 );
+                const failedCopies: { filename: string; error: string }[] = [];
+                const brokenDocIds: string[] = [];
+                const linkedDocIds = new Set<string>();
+                newDocs.forEach((d, idx) => {
+                  const updateError = updateResults[idx]?.error;
+                  if (!versionByDocId.get(d.id) || updateError) {
+                    failedCopies.push({
+                      filename: d.filename,
+                      error: "Failed to link the copy to its version",
+                    });
+                    brokenDocIds.push(d.id);
+                  } else {
+                    linkedDocIds.add(d.id);
+                  }
+                });
+                if (brokenDocIds.length > 0) {
+                  // Best-effort: drop copies that never got a
+                  // current_version_id rather than leaving them
+                  // broken in the library.
+                  await db.from("documents").delete().in("id", brokenDocIds);
+                }
 
-                // Register every copy under a fresh doc-N
-                // slug so the model can edit/read any of
+                // Register every successful copy under a fresh
+                // doc-N slug so the model can edit/read any of
                 // them in the same turn.
                 const existingLabels = new Set(Object.keys(docIndex));
                 let nextLabelIdx = 0;
@@ -877,7 +1091,7 @@ export async function runToolCalls(
                   const d = newDocs[idx];
                   const newKey = newKeys[idx];
                   const versionId = versionByDocId.get(d.id);
-                  if (!versionId) continue;
+                  if (!versionId || !linkedDocIds.has(d.id)) continue;
                   while (existingLabels.has(`doc-${nextLabelIdx}`))
                     nextLabelIdx++;
                   const slug = `doc-${nextLabelIdx}`;
@@ -885,11 +1099,14 @@ export async function runToolCalls(
                   docIndex[slug] = {
                     document_id: d.id,
                     filename: d.filename,
+                    version_id: versionId,
+                    version_number: 1,
                   };
                   docStore.set(slug, {
                     storage_path: newKey,
                     file_type: sourceInfo.file_type,
                     filename: d.filename,
+                    source_kind: "document",
                   });
                   copies.push({
                     new_filename: d.filename,
@@ -901,48 +1118,61 @@ export async function runToolCalls(
                     document_id: d.id,
                     version_id: versionId,
                     filename: d.filename,
-                    download_url: await createDownloadUrl(db, {
-                      documentId: d.id,
-                      versionId,
-                      storagePath: newKey,
-                      filename: d.filename,
-                      userId,
-                    }),
+                    download_url: buildDownloadUrl(newKey, d.filename),
                   });
                 }
 
-                write(
-                  `data: ${JSON.stringify({
-                    type: "doc_replicated",
+                if (copies.length === 0) {
+                  fail(
+                    `Failed to finalize replicated copies: ${failedCopies[0]?.error ?? "unknown"}`,
+                  );
+                } else {
+                  write(
+                    `data: ${JSON.stringify({
+                      type: "doc_replicated",
+                      filename: sourceFilename,
+                      count: copies.length,
+                      copies,
+                    })}\n\n`,
+                  );
+                  docsReplicated.push({
                     filename: sourceFilename,
                     count: copies.length,
                     copies,
-                  })}\n\n`,
-                );
-                docsReplicated.push({
-                  filename: sourceFilename,
-                  count: copies.length,
-                  copies,
-                });
-                toolResults.push({
-                  role: "tool",
-                  tool_call_id: tc.id,
-                  content: JSON.stringify({
-                    ok: true,
-                    count: copies.length,
-                    copies: toolPayloadCopies,
-                  }),
-                });
+                  });
+                  toolResults.push({
+                    role: "tool",
+                    tool_call_id: tc.id,
+                    content: JSON.stringify({
+                      ok: true,
+                      count: copies.length,
+                      saved_to: projectId
+                        ? "project_documents"
+                        : "library_files",
+                      copies: toolPayloadCopies,
+                      // Copies that uploaded but could not be linked
+                      // to their version are reported, not silently
+                      // dropped from an ok:true result.
+                      ...(failedCopies.length > 0
+                        ? { failed_copies: failedCopies }
+                        : {}),
+                    }),
+                  });
+                }
               }
             }
           }
         } catch (e) {
-          fail(`replicate_document failed: ${String(e)}`);
+          console.error("[replicate-document] failed", e);
+          fail("replicate_document failed");
         }
       }
     } else if (tc.function.name === "generate_docx") {
       const title = args.title as string;
       const landscape = !!args.landscape;
+      // `=== true` is intentional: missing, null, or malformed values must
+      // not enable numbering.
+      const numberSections = args.numberSections === true;
       devLog(
         `[generate_docx] title="${title}" landscape=${landscape} args.landscape=${args.landscape}`,
       );
@@ -955,7 +1185,7 @@ export async function runToolCalls(
         args.sections as unknown[],
         userId,
         db,
-        { landscape, projectId: projectId ?? null },
+        { landscape, numberSections, projectId: projectId ?? null },
       );
       registerGeneratedDocument(
         tc,

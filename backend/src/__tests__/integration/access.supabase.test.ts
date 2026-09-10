@@ -20,24 +20,48 @@ maybeDescribe("Supabase access integration", () => {
             auth: { persistSession: false },
         });
         const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        const ownerId = crypto.randomUUID();
-        const reviewerId = crypto.randomUUID();
-        const ownerProjectId = crypto.randomUUID();
-        const otherProjectId = crypto.randomUUID();
-        const ownerDocId = crypto.randomUUID();
-        const otherDocId = crypto.randomUUID();
+        const ownerEmail = `owner-${suffix}@example.com`;
+        const reviewerEmail = `reviewer-${suffix}@example.com`;
+        let ownerId = "";
+        let reviewerId = "";
+        const sharedProjectId = crypto.randomUUID();
+        const privateProjectId = crypto.randomUUID();
+        const sharedDocId = crypto.randomUUID();
+        const privateDocId = crypto.randomUUID();
 
         try {
+            const owner = await admin.auth.admin.createUser({
+                email: ownerEmail,
+                password: "StackTest1!",
+                email_confirm: true,
+            });
+            if (owner.error || !owner.data.user) {
+                throw owner.error ?? new Error("Could not create owner");
+            }
+            ownerId = owner.data.user.id;
+
+            const reviewer = await admin.auth.admin.createUser({
+                email: reviewerEmail,
+                password: "StackTest1!",
+                email_confirm: true,
+            });
+            if (reviewer.error || !reviewer.data.user) {
+                throw reviewer.error ?? new Error("Could not create reviewer");
+            }
+            reviewerId = reviewer.data.user.id;
+
             const projectsInsert = await admin.from("projects").insert([
                 {
-                    id: ownerProjectId,
+                    id: sharedProjectId,
                     user_id: ownerId,
-                    name: `owner-${suffix}`,
+                    name: `shared-${suffix}`,
+                    shared_with: [reviewerEmail],
                 },
                 {
-                    id: otherProjectId,
+                    id: privateProjectId,
                     user_id: ownerId,
-                    name: `other-${suffix}`,
+                    name: `private-${suffix}`,
+                    shared_with: [],
                 },
             ]);
             if (projectsInsert.error) {
@@ -51,14 +75,14 @@ maybeDescribe("Supabase access integration", () => {
             // the documents rows only need identity + ownership columns.
             const documentsInsert = await admin.from("documents").insert([
                 {
-                    id: ownerDocId,
+                    id: sharedDocId,
                     user_id: ownerId,
-                    project_id: ownerProjectId,
+                    project_id: sharedProjectId,
                 },
                 {
-                    id: otherDocId,
+                    id: privateDocId,
                     user_id: ownerId,
-                    project_id: otherProjectId,
+                    project_id: privateProjectId,
                 },
             ]);
             if (documentsInsert.error) {
@@ -71,23 +95,27 @@ maybeDescribe("Supabase access integration", () => {
             await expect(
                 listAccessibleProjectIds(
                     reviewerId,
+                    reviewerEmail,
                     admin as any,
                 ),
-            ).resolves.toEqual([]);
+            ).resolves.toContain(sharedProjectId);
 
             await expect(
                 filterAccessibleDocumentIds(
-                    [ownerDocId, otherDocId],
+                    [sharedDocId, privateDocId],
                     reviewerId,
+                    reviewerEmail,
                     admin as any,
                 ),
-            ).resolves.toEqual([]);
+            ).resolves.toEqual([sharedDocId]);
         } finally {
-            await admin.from("documents").delete().in("id", [ownerDocId, otherDocId]);
+            await admin.from("documents").delete().in("id", [sharedDocId, privateDocId]);
             await admin
                 .from("projects")
                 .delete()
-                .in("id", [ownerProjectId, otherProjectId]);
+                .in("id", [sharedProjectId, privateProjectId]);
+            if (reviewerId) await admin.auth.admin.deleteUser(reviewerId);
+            if (ownerId) await admin.auth.admin.deleteUser(ownerId);
         }
     });
 });

@@ -16,6 +16,7 @@ import {
     createTabularReview,
     deleteProject,
     getProject,
+    getProjectPeople,
     listProjectChats,
     updateProject,
 } from "@/app/lib/mikeApi";
@@ -29,6 +30,7 @@ import { TableToolbar } from "@/app/components/shared/TableToolbar";
 import { NewTRModal } from "@/app/components/tabular/NewTRModal";
 import { ConfirmPopup } from "@/app/components/popups/ConfirmPopup";
 import { OwnerOnlyPopup } from "@/app/components/popups/OwnerOnlyPopup";
+import { PeopleModal } from "@/app/components/modals/PeopleModal";
 import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
 import { useAuth } from "@/app/contexts/AuthContext";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
@@ -58,6 +60,9 @@ type ProjectWorkspaceValue = {
     createChat: () => Promise<void>;
     openNewReview: () => void;
     setAddDocumentsHeaderAction: (action: (() => void) | null) => void;
+    setDocumentFolderBreadcrumbs: React.Dispatch<
+        React.SetStateAction<Array<{ label: string; onClick: () => void }>>
+    >;
     setOwnerOnlyAction: React.Dispatch<React.SetStateAction<string | null>>;
 };
 
@@ -88,8 +93,9 @@ function activeSectionFromSegments(
 
 function shouldShowWorkspaceShell(segments: string[]) {
     if (segments.length === 0) return true;
+    if (segments.length === 2 && segments[0] === "folders") return true;
     if (segments.length !== 1) return false;
-    return segments[0] === "assistant" || segments[0] === "tabular-reviews" || segments[0] === "ai-executions";
+    return segments[0] === "assistant" || segments[0] === "tabular-reviews";
 }
 
 export function ProjectWorkspaceProvider({
@@ -107,6 +113,7 @@ export function ProjectWorkspaceProvider({
     >({ documents: "", assistant: "", reviews: "" });
     const [projectChats, setProjectChats] = useState<Chat[] | null>(null);
     const [projectChatsLoading, setProjectChatsLoading] = useState(false);
+    const [peopleModalOpen, setPeopleModalOpen] = useState(false);
     const [projectDetailsOpen, setProjectDetailsOpen] = useState(false);
     const [ownerOnlyAction, setOwnerOnlyAction] = useState<string | null>(null);
     const [deleteProjectConfirmOpen, setDeleteProjectConfirmOpen] =
@@ -119,7 +126,9 @@ export function ProjectWorkspaceProvider({
     const [creatingReview, setCreatingReview] = useState(false);
     const [addDocumentsHeaderAction, setAddDocumentsHeaderActionState] =
         useState<{ action: (() => void) | null }>({ action: null });
-
+    const [documentFolderBreadcrumbs, setDocumentFolderBreadcrumbs] = useState<
+        Array<{ label: string; onClick: () => void }>
+    >([]);
     const segments = useSelectedLayoutSegments();
     const activeSection = activeSectionFromSegments(segments);
     const showShell = shouldShowWorkspaceShell(segments);
@@ -132,6 +141,7 @@ export function ProjectWorkspaceProvider({
     useEffect(() => {
         setProjectChats(null);
         setProjectChatsLoading(false);
+        setDocumentFolderBreadcrumbs([]);
         projectChatsPromiseRef.current = null;
     }, [projectId]);
 
@@ -141,6 +151,10 @@ export function ProjectWorkspaceProvider({
         },
         [],
     );
+
+    const openProjectRoot = useCallback(() => {
+        router.push(`/projects/${projectId}`);
+    }, [projectId, router]);
 
     useEffect(() => {
         if (!showShell) {
@@ -237,18 +251,16 @@ export function ProjectWorkspaceProvider({
     }, [profile?.displayName, projectId, router, saveChat, user?.id]);
 
     const openNewReview = useCallback(() => {
-        const readyDocs =
-            project?.documents?.filter((d) => d.status === "ready") ?? [];
-        if (readyDocs.length === 0) return;
         setNewTRModalOpen(true);
-    }, [project?.documents]);
+    }, []);
 
     async function handleCreateReview(
         title: string,
-        _projectId?: string,
-        documentIds?: string[],
-        columnsConfig?: ColumnConfig[] | null,
-        documentGrouping?: "document" | "folder",
+        _projectId: string | undefined,
+        documentIds: string[] | undefined,
+        columnsConfig: ColumnConfig[] | null | undefined,
+        documentGrouping: "document" | "folder" | undefined,
+        model: string,
     ) {
         setCreatingReview(true);
         try {
@@ -259,6 +271,7 @@ export function ProjectWorkspaceProvider({
                 document_ids: documentIds ?? readyDocs.map((d) => d.id),
                 columns_config: columnsConfig ?? [],
                 document_grouping: documentGrouping,
+                model,
                 project_id: projectId,
             });
             router.push(`/projects/${projectId}/tabular-reviews/${review.id}`);
@@ -340,6 +353,7 @@ export function ProjectWorkspaceProvider({
             createChat,
             openNewReview,
             setAddDocumentsHeaderAction,
+            setDocumentFolderBreadcrumbs,
             setOwnerOnlyAction,
         }),
         [
@@ -379,15 +393,17 @@ export function ProjectWorkspaceProvider({
                     activeSection={activeSection}
                     creatingChat={creatingChat}
                     creatingReview={creatingReview}
-                    docsCount={project?.documents?.length ?? 0}
                     isOwner={project?.is_owner !== false}
                     onBackToProjects={() => router.push("/projects")}
+                    onProjectRoot={openProjectRoot}
                     onOpenDetails={() => setProjectDetailsOpen(true)}
                     onDeleteProject={requestProjectDelete}
                     onSearchChange={setSearch}
+                    onOpenPeople={() => setPeopleModalOpen(true)}
                     onNewChat={() => void createChat()}
                     onNewReview={openNewReview}
                     onAddDocuments={addDocumentsHeaderAction.action}
+                    documentFolderBreadcrumbs={documentFolderBreadcrumbs}
                 />
 
                 {children}
@@ -396,9 +412,12 @@ export function ProjectWorkspaceProvider({
                     open={newTRModalOpen}
                     onClose={() => setNewTRModalOpen(false)}
                     onAdd={handleCreateReview}
-                    projectDocs={project?.documents?.filter(
-                        (d) => d.status === "ready",
-                    )}
+                    projectId={projectId}
+                    projectDocs={
+                        project?.documents?.filter(
+                            (d) => d.status === "ready",
+                        ) ?? []
+                    }
                     projectFolders={folders}
                     projectName={project?.name}
                     projectCmNumber={project?.cm_number}
@@ -416,6 +435,10 @@ export function ProjectWorkspaceProvider({
                     canEdit={project?.is_owner !== false}
                     onClose={() => setProjectDetailsOpen(false)}
                     onSave={handleProjectDetailsSave}
+                    onShareProject={() => {
+                        setProjectDetailsOpen(false);
+                        setPeopleModalOpen(true);
+                    }}
                 />
 
                 <ConfirmPopup
@@ -439,6 +462,42 @@ export function ProjectWorkspaceProvider({
                     onConfirm={() => void confirmProjectDelete()}
                 />
 
+                {project && (
+                    <PeopleModal
+                        open={peopleModalOpen}
+                        onClose={() => setPeopleModalOpen(false)}
+                        resource={project}
+                        fetchPeople={getProjectPeople}
+                        currentUserEmail={user?.email ?? null}
+                        breadcrumb={[
+                            "Projects",
+                            project.name +
+                                (project.cm_number
+                                    ? ` (${project.cm_number})`
+                                    : ""),
+                            "People",
+                        ]}
+                        onSharedWithChange={
+                            project.is_owner === false
+                                ? undefined
+                                : async (next) => {
+                                      const updated = await updateProject(
+                                          projectId,
+                                          { shared_with: next },
+                                      );
+                                      setProject((prev) =>
+                                          prev
+                                              ? {
+                                                    ...prev,
+                                                    shared_with:
+                                                        updated.shared_with,
+                                                }
+                                              : prev,
+                                      );
+                                  }
+                        }
+                    />
+                )}
             </div>
         </ProjectWorkspaceContext.Provider>
     );

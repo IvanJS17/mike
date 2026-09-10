@@ -6,21 +6,19 @@
 #
 # What it does (idempotent — safe to re-run):
 #   1. Verifies Node is available.
-#   2. Reads the Supabase URL + publishable key from frontend/.env.local (the same
-#      values the Next.js app uses) and writes word-addin/.env.development —
-#      the webpack build inlines these at compile time, so they must exist
-#      before the bundle is built.
-#   3. Runs `npm install` if node_modules is missing.
-#   4. Checks the Mike backend (and Supabase) are reachable (warns if not).
-#   5. Verifies port 3000 is free — the dev server + manifest are hardwired to
-#      it, and the Mike web app on :3000 collides. Fails fast with a fix.
+#   2. Reads the backend location and writes word-addin/.env with a same-origin
+#      API route so the backend-managed HttpOnly session cookie works in Word.
+#   3. Runs `npm install` to verify and repair the dependency tree.
+#   4. Checks the Mike backend is reachable (warns if not).
+#   5. Verifies port 3200 is free for the dev server and manifest.
 #   6. Installs the trusted dev HTTPS certificate if Word doesn't already trust
 #      it (this step may prompt for your keychain/admin password).
-#   7. Sources the env and runs `npm start`, which boots the webpack dev server
-#      on https://localhost:3000 and sideloads the add-in into Word desktop.
+#   7. Runs `npm start`; webpack loads `.env` and boots its dev server on
+#      https://localhost:3200. It sideloads into Word unless
+#      WORD_ADDIN_SIDELOAD=0.
 #
 # Prerequisite: the Mike API must be running (`npm run dev` in backend/),
-# and frontend/.env.local must be filled in (see the repo README).
+# and its Supabase server configuration must be filled in (see the repo README).
 #
 # Pass --setup-only to do everything except the port check + final `npm start`.
 #
@@ -31,7 +29,6 @@ SETUP_ONLY=0
 
 cd "$(dirname "$0")/.."          # -> word-addin
 ADDIN_DIR="$(pwd)"
-ROOT_DIR="$(cd .. && pwd)"       # -> repo root (word-addin lives at the root)
 
 step() { printf "\n\033[1;34m==> %s\033[0m\n" "$1"; }
 ok()   { printf "    \033[1;32m✔\033[0m %s\n" "$1"; }
@@ -44,107 +41,78 @@ NODE_MAJOR="$(node --version | sed -E 's/^v([0-9]+).*/\1/')"
 [ "$NODE_MAJOR" -ge 22 ] || { echo "Node.js 22+ is required; found $(node --version)"; exit 1; }
 ok "node $(node --version)"
 
-# ── 2. Read Supabase config from frontend/.env.local ─────────────────────────
-# The add-in signs in against the SAME Supabase project as the web app, so we
-# reuse the web app's env file rather than asking you to copy the keys twice.
-step "Reading Supabase config from frontend/.env.local"
-FE_ENV="$ROOT_DIR/frontend/.env.local"
-read_env() { [ -f "$FE_ENV" ] && grep -E "^$1=" "$FE_ENV" | head -1 | cut -d= -f2- | tr -d '"' || true; }
-SUPA_URL="$(read_env NEXT_PUBLIC_SUPABASE_URL)"
-ANON="$(read_env NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY)"
-[ -n "$ANON" ] || ANON="$(read_env NEXT_PUBLIC_SUPABASE_ANON_KEY)"   # older key name
-API_BASE="${REACT_APP_API_BASE_URL:-$(read_env NEXT_PUBLIC_API_BASE_URL)}"
-API_BASE="${API_BASE:-http://localhost:3001}"
-if [ -z "$SUPA_URL" ] || [ -z "$ANON" ]; then
-    warn "Couldn't read Supabase URL/anon key from $FE_ENV."
-    warn "Fill it in first (see the repo README → Environment)."
-fi
+# ── 2. Read the shared backend location ──────────────────────────────────────
+step "Reading backend config"
+read_env_file() { [ -f "$1" ] && grep -E "^$2=" "$1" | head -1 | cut -d= -f2- | tr -d '"' || true; }
+read_addin_env() { read_env_file .env "$1"; }
 
-# ── 3. Write .env.development ─────────────────────────────────────────────────
+API_TARGET="${API_PROXY_TARGET:-$(read_addin_env API_PROXY_TARGET)}"
+API_TARGET="${API_TARGET:-http://localhost:3001}"
+SIDELOAD_SETTING="${WORD_ADDIN_SIDELOAD:-$(read_addin_env WORD_ADDIN_SIDELOAD)}"
+SIDELOAD_SETTING="${SIDELOAD_SETTING:-1}"
+# ── 3. Write .env ─────────────────────────────────────────────────────────────
 # The add-in is served over HTTPS (Word requires it). The local backend is HTTP,
 # which Word's WebView blocks as mixed content, so the bundle points at
 # SAME-ORIGIN HTTPS paths on the dev server, which proxies them to the real
-# backends (see the proxy config in webpack.config.js). Routing Supabase through
-# the proxy too keeps every request same-origin and side-steps CORS.
-step "Configuring .env.development (proxied through the HTTPS dev server)"
-DEV_ORIGIN="https://localhost:3000"
-# Preserve an existing anon key if we couldn't read one above.
-if [ -z "$ANON" ] && [ -f .env.development ]; then
-    ANON="$(grep '^REACT_APP_SUPABASE_ANON_KEY=' .env.development | cut -d= -f2- || true)"
-fi
-cat > .env.development <<EOF
+# backend (see the proxy config in webpack.config.js). Authentication and API
+# traffic share this route so the browser only receives HttpOnly cookies.
+step "Configuring .env (proxied through the HTTPS dev server)"
+DEV_ORIGIN="https://localhost:3200"
+# Preserve an explicit override; otherwise link account settings to the
+# deployed Mike app.
+WEB_APP_URL="${REACT_APP_WEB_APP_URL:-$(read_addin_env REACT_APP_WEB_APP_URL)}"
+WEB_APP_URL="${WEB_APP_URL:-https://app.mikeoss.com}"
+cat > .env <<EOF
 # Generated by scripts/dev.sh. URLs point at the dev server's HTTPS proxy
 # (webpack.config.js) so the task pane never makes blocked HTTP / cross-origin
-# requests. The real backends are reached via SUPABASE_PROXY_TARGET /
-# API_PROXY_TARGET, exported below before npm start.
-REACT_APP_SUPABASE_URL=${DEV_ORIGIN}
-REACT_APP_SUPABASE_ANON_KEY=${ANON}
+# requests. The real backend is reached via API_PROXY_TARGET.
 REACT_APP_API_BASE_URL=${DEV_ORIGIN}/api
+REACT_APP_WEB_APP_URL=${WEB_APP_URL}
+WORD_ADDIN_SIDELOAD=${SIDELOAD_SETTING}
+API_PROXY_TARGET=${API_TARGET}
 EOF
-if [ -n "$ANON" ]; then
-    ok "wrote proxied URLs + anon key"
-else
-    warn "No publishable key found — fill frontend/.env.local and re-run."
-fi
+ok "wrote the same-origin API route"
 
 # ── 4. Dependencies ──────────────────────────────────────────────────────────
 step "Installing dependencies"
-if [ -d node_modules ]; then
-    ok "node_modules present (run 'npm install' manually to update)"
-else
-    npm install
-    ok "dependencies installed"
-fi
+npm install
+ok "dependencies installed and verified"
 
-# ── 5. Mike backend health (API + Supabase) ──────────────────────────────────
-# The add-in is useless without the API: sign-in goes to Supabase while chat,
-# actions, workflows, project browsing, and uploads call the Mike API.
+# ── 5. Mike backend health ───────────────────────────────────────────────────
+# The backend owns sign-in, session refresh, chat, actions, workflows, project
+# browsing, and uploads. The add-in never contacts Supabase directly.
 step "Checking the Mike backend is running"
 BACKEND_OK=1
 
 # 5a. Mike backend — GET /health returns {"ok":true}.
-health_code="$(curl -s -m6 -o /dev/null -w '%{http_code}' "$API_BASE/health" 2>/dev/null)" || true
+health_code="$(curl -s -m6 -o /dev/null -w '%{http_code}' "$API_TARGET/health" 2>/dev/null)" || true
 [ -n "$health_code" ] || health_code=000
 if [ "$health_code" = "200" ]; then
-    ok "Mike backend healthy at $API_BASE"
+    ok "Mike backend healthy at $API_TARGET"
 else
     BACKEND_OK=0
-    warn "Mike API NOT reachable at $API_BASE (HTTP $health_code)."
+    warn "Mike API NOT reachable at $API_TARGET (HTTP $health_code)."
     warn "Start it:  cd backend && npm run dev"
 fi
 
-# 5b. Supabase — required for sign-in and document storage.
-if [ -n "$SUPA_URL" ]; then
-    supa_code="$(curl -s -m6 -o /dev/null -w '%{http_code}' "$SUPA_URL/auth/v1/health" 2>/dev/null)" || true
-    [ -n "$supa_code" ] || supa_code=000
-    if [ "$supa_code" = "200" ]; then
-        ok "Supabase reachable ($SUPA_URL)"
-    else
-        BACKEND_OK=0
-        warn "Supabase NOT reachable (HTTP $supa_code) — check NEXT_PUBLIC_SUPABASE_URL."
-    fi
-fi
-
-# ── 6. Port 3000 availability ─────────────────────────────────────────────────
+# ── 6. Port 3200 availability ─────────────────────────────────────────────────
 # The webpack dev server AND the add-in manifest are hardwired to
-# https://localhost:3000. The Mike web app (`npm run dev:web`) also
-# binds 3000, so the two collide. Fail fast with a clear message BEFORE the cert
-# prompt / launch — otherwise `npm start` dies with an opaque EADDRINUSE.
+# https://localhost:3200. Fail fast with a clear message BEFORE the cert prompt /
+# launch — otherwise `npm start` dies with an opaque EADDRINUSE.
 # (Skipped for --setup-only, which never launches; re-running while the add-in's
 # own server is already up correctly trips this too.)
 if [ "$SETUP_ONLY" != 1 ]; then
-    step "Checking port 3000 is free"
-    if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:3000 -sTCP:LISTEN >/dev/null 2>&1; then
-        holder="$(lsof -nP -iTCP:3000 -sTCP:LISTEN 2>/dev/null | awk 'NR==2{print $1" (pid "$2")"}')"
-        warn "Port 3000 is already in use by: ${holder:-another process}"
-        echo "    The add-in dev server and Word's manifest both require https://localhost:3000."
-        echo "    This is most likely the Mike web app — stop it first:"
-        echo "      lsof -nP -iTCP:3000 -sTCP:LISTEN     # confirm what it is"
-        echo "      # then stop that process (e.g. quit 'npm run dev:web')"
+    step "Checking port 3200 is free"
+    if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:3200 -sTCP:LISTEN >/dev/null 2>&1; then
+        holder="$(lsof -nP -iTCP:3200 -sTCP:LISTEN 2>/dev/null | awk 'NR==2{print $1" (pid "$2")"}')"
+        warn "Port 3200 is already in use by: ${holder:-another process}"
+        echo "    The add-in dev server and Word's manifest both require https://localhost:3200."
+        echo "    Stop the process using it first:"
+        echo "      lsof -nP -iTCP:3200 -sTCP:LISTEN     # confirm what it is"
         echo "    Then re-run this script."
         exit 1
     fi
-    ok "port 3000 is free"
+    ok "port 3200 is free"
 fi
 
 # ── 7. Dev HTTPS certificate ─────────────────────────────────────────────────
@@ -186,7 +154,7 @@ else
         warn "Cert trusted — fully QUIT Word (Cmd-Q) before launching so it reloads trust."
     else
         warn "Certificate STILL not trusted — Word will refuse the pane."
-        warn "See word-addin/README.md → Troubleshooting → certificate trust drift."
+        warn "See docs/word-addin-development.md → Word reports an invalid development certificate."
         exit 1
     fi
 fi
@@ -195,7 +163,7 @@ fi
 if [ "$SETUP_ONLY" = 1 ]; then
     step "Setup complete"
     [ "$BACKEND_OK" = 1 ] || warn "Backend is not fully up — start Mike before launching (see above)."
-    echo "    To launch: cd $ADDIN_DIR && set -a && source .env.development && set +a && npm start"
+    echo "    To launch: cd $ADDIN_DIR && npm start"
     exit 0
 fi
 
@@ -203,34 +171,22 @@ if [ "$BACKEND_OK" != 1 ]; then
     step "Mike backend is not running"
     echo "    The add-in needs Mike running before it does anything useful. Start it:"
     echo "      (backend/)    npm run dev        # the Mike API on :3001"
-    echo "    and make sure frontend/.env.local has your Supabase URL + publishable key."
+    echo "    and make sure backend/.env contains the Supabase server configuration."
     echo "    Then re-run this script. To launch anyway, set FORCE=1 (sign-in will fail until Mike is up)."
     [ "${FORCE:-0}" = 1 ] || exit 1
     warn "FORCE=1 set — launching despite the backend being down."
 fi
 
-# Clear any stale sideload registration BEFORE launching. office-addin-debugging
-# registers the add-in by hard-linking manifest.xml into Word's sideload folder
-# (~/Library/Containers/com.microsoft.Word/Data/Documents/wef). If a previous run
-# exited without `npm run stop` (a crash, a Ctrl-C, a killed terminal), that link
-# is left behind — and the next `npm start` dies with
-# "EEXIST: file already exists, link 'manifest.xml' -> '…/wef/<id>.manifest.xml'".
-# A best-effort stop makes re-runs genuinely idempotent (it also shuts down any
-# orphaned dev server from that prior run). Errors are ignored: a clean machine
-# with nothing registered is the normal case.
-step "Clearing any stale add-in registration"
-npm run stop >/dev/null 2>&1 || true
-ok "ready to (re)register the add-in"
-
-step "Starting dev server + sideloading into Word"
-echo "    (webpack serves https://localhost:3000 and proxies /auth + /api to the"
-echo "     real backends; Word opens with the add-in.)"
-echo "    In Word: Home → Mike Legal AI → Open Mike"
-# Tell webpack where to proxy backend calls (tracks the real backend URLs).
-export SUPABASE_PROXY_TARGET="${SUPA_URL:-http://127.0.0.1:54321}"
-export API_PROXY_TARGET="$API_BASE"
-set -a
-# shellcheck disable=SC1091
-source .env.development
-set +a
+case "$SIDELOAD_SETTING" in
+0|false|FALSE|False|no|NO|No|off|OFF|Off)
+    step "Starting dev server without opening Word"
+    echo "    WORD_ADDIN_SIDELOAD=${SIDELOAD_SETTING}; webpack will serve the task pane only."
+    ;;
+*)
+    step "Starting dev server + sideloading into Word"
+    echo "    (webpack serves https://localhost:3200 and proxies /api to the"
+    echo "     Mike backend; Word opens with the add-in.)"
+    echo "    In Word: Home → Mike Legal AI → Mike"
+    ;;
+esac
 exec npm start

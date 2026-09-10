@@ -6,8 +6,9 @@ import {
     uploadStandaloneDocument,
     uploadProjectDocument,
     addDocumentToProject,
+    getProject,
 } from "@/app/lib/mikeApi";
-import type { Document } from "../shared/types";
+import type { Document, Folder } from "../shared/types";
 import { FileDirectory } from "../shared/FileDirectory";
 import type { DirectoryTab } from "../shared/useDirectoryData";
 import { Modal } from "./Modal";
@@ -30,7 +31,13 @@ interface Props {
     /** Keep the modal mounted (hidden) while closed so the loaded
      * directory listing survives close/reopen cycles. */
     keepMounted?: boolean;
+    /** Limit the directory to the target project's files and folder tree. */
+    projectDocumentsOnly?: boolean;
+    tabs?: readonly DirectoryTab[];
+    disabledDocumentIds?: ReadonlySet<string>;
 }
+
+const DIRECTORY_PAGE_SIZE = 40;
 
 export function AddDocumentsModal({
     open,
@@ -42,12 +49,24 @@ export function AddDocumentsModal({
     initialSelectedDocuments,
     externalUploadedDocuments,
     keepMounted = false,
+    projectDocumentsOnly = false,
+    tabs,
+    disabledDocumentIds,
 }: Props) {
     const [selectedDocuments, setSelectedDocuments] = useState<Document[]>([]);
     const [uploading, setUploading] = useState(false);
     const [uploadingFilenames, setUploadingFilenames] = useState<string[]>([]);
     const [uploadWarning, setUploadWarning] = useState<string | null>(null);
     const [extraUploadedDocs, setExtraUploadedDocs] = useState<Document[]>([]);
+    const [projectDocuments, setProjectDocuments] = useState<Document[]>([]);
+    const [projectFolders, setProjectFolders] = useState<Folder[]>([]);
+    const [projectDirectoryLoading, setProjectDirectoryLoading] =
+        useState(false);
+    const [projectDocumentLimitByLevel, setProjectDocumentLimitByLevel] =
+        useState<Record<string, number>>({ root: DIRECTORY_PAGE_SIZE });
+    const [loadedProjectFolderIds, setLoadedProjectFolderIds] = useState<
+        Set<string>
+    >(new Set());
     // Tracks whether the modal has ever been opened, so keepMounted only
     // keeps it (and its directory fetch) alive after first use rather than
     // eagerly loading on page mount.
@@ -58,6 +77,35 @@ export function AddDocumentsModal({
     useEffect(() => {
         if (open) setHasOpened(true);
     }, [open]);
+
+    useEffect(() => {
+        if (!open || !projectDocumentsOnly || !projectId) return;
+        let cancelled = false;
+        setProjectDirectoryLoading(true);
+        getProject(projectId)
+            .then((project) => {
+                if (cancelled) return;
+                setProjectDocuments(
+                    (project.documents ?? []).filter(
+                        (document) => document.status === "ready",
+                    ),
+                );
+                setProjectFolders(project.folders ?? []);
+                setProjectDocumentLimitByLevel({ root: DIRECTORY_PAGE_SIZE });
+                setLoadedProjectFolderIds(new Set());
+            })
+            .catch(() => {
+                if (cancelled) return;
+                setProjectDocuments([]);
+                setProjectFolders([]);
+            })
+            .finally(() => {
+                if (!cancelled) setProjectDirectoryLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [open, projectDocumentsOnly, projectId]);
 
     // Key the sync on the id list itself so a reopen targeting different
     // documents (or ids arriving late) always re-seeds the selection.
@@ -191,6 +239,49 @@ export function AddDocumentsModal({
         }
     }
 
+    const directoryDocuments = projectDocumentsOnly
+        ? [
+              ...extraUploadedDocs,
+              ...projectDocuments.filter(
+                  (document) =>
+                      !extraUploadedDocs.some(
+                          (uploaded) => uploaded.id === document.id,
+                      ),
+              ),
+          ]
+        : extraUploadedDocs;
+    const projectDocumentCountsByLevel: Record<string, number> = {};
+    directoryDocuments.forEach((document) => {
+        const key = document.folder_id ?? "root";
+        projectDocumentCountsByLevel[key] =
+            (projectDocumentCountsByLevel[key] ?? 0) + 1;
+    });
+    const projectDocumentsHasMoreByFolder = Object.fromEntries(
+        [...loadedProjectFolderIds].map((folderId) => [
+            folderId,
+            (projectDocumentCountsByLevel[folderId] ?? 0) >
+                (projectDocumentLimitByLevel[folderId] ?? DIRECTORY_PAGE_SIZE),
+        ]),
+    );
+
+    function handleExpandProjectFolder(folderId: string) {
+        setLoadedProjectFolderIds((current) => new Set(current).add(folderId));
+        setProjectDocumentLimitByLevel((current) =>
+            current[folderId] != null
+                ? current
+                : { ...current, [folderId]: DIRECTORY_PAGE_SIZE },
+        );
+    }
+
+    function handleLoadMoreProjectLevel(parentId: string | null) {
+        const key = parentId ?? "root";
+        setProjectDocumentLimitByLevel((current) => ({
+            ...current,
+            [key]:
+                (current[key] ?? DIRECTORY_PAGE_SIZE) + DIRECTORY_PAGE_SIZE,
+        }));
+    }
+
     return (
         <Modal
             open={open}
@@ -239,13 +330,39 @@ export function AddDocumentsModal({
 
             <div className="flex min-h-0 flex-1 flex-col">
                 <FileDirectory
-                    documents={extraUploadedDocs}
+                    documents={directoryDocuments}
+                    folders={projectDocumentsOnly ? projectFolders : undefined}
+                    loading={projectDirectoryLoading}
                     selectedDocuments={selectedDocuments}
                     onChange={setSelectedDocuments}
                     uploadingFilenames={uploadingFilenames}
-                    showTabs
+                    showTabs={!projectDocumentsOnly}
                     initialTab={initialTab}
-                    excludeProjectId={projectId}
+                    tabs={tabs}
+                    excludeProjectId={projectDocumentsOnly ? undefined : projectId}
+                    disabledDocumentIds={disabledDocumentIds}
+                    onExpandFolder={
+                        projectDocumentsOnly
+                            ? handleExpandProjectFolder
+                            : undefined
+                    }
+                    loadedFolderIds={loadedProjectFolderIds}
+                    documentLimitByLevel={projectDocumentLimitByLevel}
+                    documentsHasMoreByFolder={
+                        projectDocumentsHasMoreByFolder
+                    }
+                    onLoadMoreFolderDocuments={(folderId) =>
+                        handleLoadMoreProjectLevel(folderId)
+                    }
+                    rootDocumentsHasMore={
+                        projectDocumentsOnly &&
+                        (projectDocumentCountsByLevel.root ?? 0) >
+                            (projectDocumentLimitByLevel.root ??
+                                DIRECTORY_PAGE_SIZE)
+                    }
+                    onLoadMoreRootDocuments={() =>
+                        handleLoadMoreProjectLevel(null)
+                    }
                 />
             </div>
         </Modal>

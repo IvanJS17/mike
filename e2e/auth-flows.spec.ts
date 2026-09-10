@@ -10,6 +10,7 @@
  * config (e2e/.auth/user.json), so auth.setup.ts must run first.
  */
 import { test, expect } from "@playwright/test";
+import { completeOnboardingIfRequired } from "./onboarding";
 
 /* ─── Unauthenticated tests ───────────────────────────────────────────────── */
 
@@ -91,7 +92,7 @@ test.describe("unauthenticated", () => {
             "/projects",
             "/tabular-reviews",
             "/workflows",
-            "/account",
+            "/settings",
         ];
 
         for (const route of protectedRoutes) {
@@ -121,7 +122,7 @@ test.describe("logout (isolated user)", () => {
     const logoutPassword =
         process.env.E2E_LOGOUT_PASSWORD ?? "E2eLogoutPass1!";
 
-    test("logout from account settings redirects to /login", async ({
+    test("logout from settings redirects to /login", async ({
         page,
     }) => {
         /* Log in fresh as the dedicated logout user. */
@@ -131,7 +132,7 @@ test.describe("logout (isolated user)", () => {
         await page.fill("#password", logoutPassword);
         await page.click('button[type="submit"]');
 
-        await page.waitForURL(/\/assistant/, { timeout: 15_000 });
+        await completeOnboardingIfRequired(page);
         await page.waitForLoadState("networkidle");
 
     /* The AppSidebar renders a user-profile toggle button at the very bottom
@@ -147,25 +148,25 @@ test.describe("logout (isolated user)", () => {
     await expect(userMenuButton).toBeVisible({ timeout: 10_000 });
     await userMenuButton.click();
 
-    /* The dropdown that appears contains an "Account Settings" button which
-       navigates to /account via router.push("/account"). */
+    /* The dropdown that appears contains a "Settings" button which
+       navigates to /settings via router.push("/settings"). */
     const accountSettingsItem = page.getByRole("button", {
-        name: "Account Settings",
+        name: "Settings",
     });
     await expect(accountSettingsItem).toBeVisible({ timeout: 5_000 });
     await accountSettingsItem.click();
 
-    await expect(page).toHaveURL(/\/account/, { timeout: 10_000 });
+    await expect(page).toHaveURL(/\/settings/, { timeout: 10_000 });
     await page.waitForLoadState("networkidle");
 
-    /* The /account page has a "Sign Out" button that calls:
-           await signOut();
-           router.push("/");
-       The root "/" page redirects to "/assistant", and the (pages) layout auth
-       guard then redirects the now-unauthenticated user to "/login".
-       REGRESSION: fails if signOut() is removed from handleLogout in
-       frontend/src/app/(pages)/account/page.tsx. */
-    const signOutButton = page.getByRole("button", { name: "Sign Out" });
+    /* Sign out now lives in the account dropdown rather than the Settings
+       page. Reopen the same sidebar menu after navigation and exercise the
+       relocated action. */
+    await userMenuButton.click();
+    const signOutButton = page.getByRole("button", {
+        name: "Sign out",
+        exact: true,
+    });
     await expect(signOutButton).toBeVisible({ timeout: 5_000 });
     await signOutButton.click();
 

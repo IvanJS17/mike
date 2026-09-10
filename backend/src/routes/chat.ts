@@ -1,42 +1,48 @@
 import { Router } from "express";
+import { randomUUID } from "node:crypto";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
+import { recordChatTurn } from "../lib/audit";
 import {
     buildDocContext,
     buildMessages,
+    buildUserPersonalisationPrompt,
     enrichWithPriorEvents,
     buildWorkflowStore,
     appendAskInputsResponseToLastAssistantMessage,
     appendAssistantEventsToLastAssistantMessage,
     AssistantStreamError,
+    ASSISTANT_ERROR_MESSAGE,
     buildCancelledAssistantMessage,
     extractCitations,
     generateSpotlightNonce,
     isAbortError,
     runLLMStream,
+
     parseChatMessages,
     parseOptionalAskInputsResponse,
     parseOptionalChatId,
     parseOptionalModel,
+    parseOptionalReasoning,
     parseOptionalProjectId,
-    parseOptionalDocumentContext,
-    buildWordDocumentContextPrompt,
+    createReservedAssistantMessageUpdater,
+    openAssistantSse,
+    reserveAssistantMessage,
+    withoutEmptyAssistantReservations,
 } from "../lib/chat";
-import { completeText } from "../lib/llm";
-import {
-    parseModelRoute,
-    routesEqual,
-    type ModelRoute,
-} from "../lib/llm/routes";
-import {
-    pinnedRouteFromChatRow,
-    resolveModelRouteForUser,
-} from "../lib/llm/governedRoutes";
 import {
     getUserModelSettings,
+    persistLastSelectedChatModel,
+    persistLastSelectedReasoningLevel,
 } from "../lib/userSettings";
 import { checkProjectAccess } from "../lib/access";
-import { safeErrorLog, safeErrorMessage } from "../lib/safeError";
+import { generateAssistantChatTitle } from "../lib/chatTitle";
+import { sendInternalError } from "../lib/httpError";
+import {
+    resolveEffectiveChatModel,
+    resolveEffectiveReasoningLevel,
+    titleModelForChat,
+} from "../lib/modelSelection";
 
 export const chatRouter = Router();
 
@@ -46,28 +52,23 @@ const devLog = (...args: Parameters<typeof console.log>) => {
     if (isDev) console.log(...args);
 };
 
-const TITLE_FALLBACK = "Misc. Query";
-
-function normalizeGeneratedTitle(raw: string): string {
-    const title = raw.trim().replace(/^["'`]+|["'`.,:;!?]+$/g, "").trim();
-    if (!title) return TITLE_FALLBACK;
-    return title.slice(0, 80);
-}
-
 type AccessibleChat = {
     id: string;
     title: string | null;
     user_id: string;
     project_id: string | null;
+    model: string | null;
+    reasoning_level: string | null;
 } & Record<string, unknown>;
 
 async function validateAccessibleProjectId(
     projectId: string | null,
     userId: string,
+    userEmail: string | null | undefined,
     db: Db,
 ): Promise<{ ok: true } | { ok: false; status: number; detail: string }> {
     if (!projectId) return { ok: true };
-    const access = await checkProjectAccess(projectId, userId, db);
+    const access = await checkProjectAccess(projectId, userId, userEmail, db);
     if (!access.ok)
         return { ok: false, status: 404, detail: "Project not found" };
     return { ok: true };
@@ -76,6 +77,7 @@ async function validateAccessibleProjectId(
 async function getAccessibleChat(
     chatId: string,
     userId: string,
+    userEmail: string | null | undefined,
     db: Db,
 ): Promise<AccessibleChat | null> {
     const { data: chat, error } = await db
@@ -92,6 +94,7 @@ async function getAccessibleChat(
         const access = await checkProjectAccess(
             row.project_id,
             userId,
+            userEmail,
             db,
         );
         if (access.ok) return row;
@@ -110,45 +113,38 @@ chatRouter.get("/", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
     const db = createServerSupabase();
     const requestedLimit = Number.parseInt(String(req.query.limit ?? ""), 10);
+    const requestedOffset = Number.parseInt(String(req.query.offset ?? ""), 10);
     const limit = Number.isFinite(requestedLimit)
         ? Math.min(Math.max(requestedLimit, 1), 100)
         : null;
+    const offset =
+        Number.isFinite(requestedOffset) && requestedOffset > 0
+            ? requestedOffset
+            : 0;
 
     const { data, error } = await db.rpc("get_chats_overview", {
         p_user_id: userId,
         p_limit: limit,
+        p_offset: offset,
     });
-    if (error) return void res.status(500).json({ detail: error.message });
+    if (error) return void sendInternalError(res, error);
     res.json(data ?? []);
 });
 
 // POST /chat/create
 chatRouter.post("/create", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
-    const parsedRoute = parseModelRoute(req.body?.route);
-    if (!parsedRoute.ok) {
-        return void res.status(400).json({ detail: parsedRoute.detail });
-    }
+    const userEmail = res.locals.userEmail as string | undefined;
     const parsedProjectId = parseOptionalProjectId(req.body?.project_id);
     if (!parsedProjectId.ok) {
         return void res.status(400).json({ detail: parsedProjectId.detail });
     }
     const projectId = parsedProjectId.value.projectId;
     const db = createServerSupabase();
-    const routeResolution = await resolveModelRouteForUser(
-        userId,
-        parsedRoute.value,
-        db,
-    );
-    if (!routeResolution.ok) {
-        return void res.status(422).json({
-            code: routeResolution.code,
-            detail: routeResolution.detail,
-        });
-    }
     const projectAccess = await validateAccessibleProjectId(
         projectId,
         userId,
+        userEmail,
         db,
     );
     if (!projectAccess.ok)
@@ -158,29 +154,23 @@ chatRouter.post("/create", requireAuth, async (req, res) => {
 
     const { data, error } = await db
         .from("chats")
-        .insert({
-            user_id: userId,
-            project_id: projectId ?? null,
-            model_provider: routeResolution.route.provider,
-            model: routeResolution.route.model,
-            credential_ref: routeResolution.route.credential_ref,
-        })
+        .insert({ user_id: userId, project_id: projectId ?? null })
         .select("id")
         .single();
 
-    if (error) return void res.status(500).json({ detail: error.message });
+    if (error) return void sendInternalError(res, error);
     res.json({ id: data.id });
 });
 
 // GET /chat/:chatId
 chatRouter.get("/:chatId", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
     const { chatId } = req.params;
     const db = createServerSupabase();
 
-    const chat = await getAccessibleChat(chatId, userId, db);
-    if (!chat)
-        return void res.status(404).json({ detail: "Chat not found" });
+    const chat = await getAccessibleChat(chatId, userId, userEmail, db);
+    if (!chat) return void res.status(404).json({ detail: "Chat not found" });
 
     const { data: messages } = await db
         .from("chat_messages")
@@ -188,7 +178,10 @@ chatRouter.get("/:chatId", requireAuth, async (req, res) => {
         .eq("chat_id", chatId)
         .order("created_at", { ascending: true });
 
-    const hydrated = await hydrateEditStatuses(messages ?? [], db);
+    const hydrated = await hydrateEditStatuses(
+        withoutEmptyAssistantReservations(messages ?? []),
+        db,
+    );
     res.json({ chat, messages: hydrated });
 });
 
@@ -206,8 +199,7 @@ async function hydrateEditStatuses(
         if (!Array.isArray(list)) return;
         for (const a of list as Record<string, unknown>[]) {
             if (typeof a?.edit_id === "string") editIds.add(a.edit_id);
-            if (typeof a?.version_id === "string")
-                versionIds.add(a.version_id);
+            if (typeof a?.version_id === "string") versionIds.add(a.version_id);
         }
     };
     for (const m of messages) {
@@ -309,22 +301,106 @@ async function hydrateEditStatuses(
 // PATCH /chat/:chatId
 chatRouter.patch("/:chatId", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
     const { chatId } = req.params;
-    const title = (req.body.title ?? "").trim();
-    if (!title)
+    const body =
+        req.body && typeof req.body === "object" && !Array.isArray(req.body)
+            ? (req.body as Record<string, unknown>)
+            : {};
+    const invalidField = Object.keys(body).find(
+        (field) =>
+            field !== "title" &&
+            field !== "model" &&
+            field !== "reasoningLevel",
+    );
+    if (invalidField) {
+        return void res
+            .status(400)
+            .json({ detail: `Unsupported chat field: ${invalidField}` });
+    }
+    const hasTitle = Object.hasOwn(body, "title");
+    const hasModel = Object.hasOwn(body, "model");
+    const hasReasoning = Object.hasOwn(body, "reasoningLevel");
+    if (!hasTitle && !hasModel && !hasReasoning) {
+        return void res
+            .status(400)
+            .json({ detail: "title, model, or reasoningLevel is required" });
+    }
+
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    if (hasTitle && !title) {
         return void res.status(400).json({ detail: "title is required" });
+    }
+    const parsedModel = parseOptionalModel(body.model);
+    if (hasModel && !parsedModel.ok) {
+        return void res.status(400).json({ detail: parsedModel.detail });
+    }
+    const parsedReasoning = parseOptionalReasoning(body.reasoningLevel);
+    if (hasReasoning && !parsedReasoning.ok) {
+        return void res.status(400).json({ detail: parsedReasoning.detail });
+    }
 
     const db = createServerSupabase();
+    const chat = await getAccessibleChat(chatId, userId, userEmail, db);
+    if (!chat || (hasTitle && chat.user_id !== userId)) {
+        return void res.status(404).json({ detail: "Chat not found" });
+    }
+
+    let selectedModel: string | undefined;
+    const selectedReasoningLevel =
+        hasReasoning && parsedReasoning.ok ? parsedReasoning.value : undefined;
+    if (hasModel) {
+        const settings = await getUserModelSettings(userId, db);
+        const resolution = await resolveEffectiveChatModel({
+            requested: parsedModel.ok ? parsedModel.value : undefined,
+            chatModel: chat.model,
+            lastSelectedModel: settings.last_selected_chat_model,
+            apiKeys: settings.api_keys,
+            userId,
+            db,
+        });
+        if (!resolution.ok) {
+            return void res.status(resolution.status).json({
+                code: resolution.code,
+                detail: resolution.detail,
+            });
+        }
+        selectedModel = resolution.model;
+    }
+
+    const update = {
+        ...(hasTitle ? { title } : {}),
+        ...(selectedModel ? { model: selectedModel } : {}),
+        ...(selectedReasoningLevel
+            ? { reasoning_level: selectedReasoningLevel }
+            : {}),
+    };
     const { data, error } = await db
         .from("chats")
-        .update({ title })
+        .update(update)
         .eq("id", chatId)
-        .eq("user_id", userId)
-        .select("id, title")
+        .select("id, title, model, reasoning_level")
         .single();
 
     if (error || !data)
         return void res.status(404).json({ detail: "Chat not found" });
+
+    if (selectedModel) {
+        const profileError = await persistLastSelectedChatModel(
+            userId,
+            selectedModel,
+            db,
+        );
+        if (profileError) return void sendInternalError(res, profileError);
+    }
+    if (selectedReasoningLevel) {
+        const profileError = await persistLastSelectedReasoningLevel(
+            userId,
+            selectedReasoningLevel,
+            db,
+        );
+        if (profileError) return void sendInternalError(res, profileError);
+    }
     res.json(data);
 });
 
@@ -339,45 +415,52 @@ chatRouter.delete("/:chatId", requireAuth, async (req, res) => {
         .eq("id", chatId)
         .eq("user_id", userId);
 
-    if (error) return void res.status(500).json({ detail: error.message });
+    if (error) return void sendInternalError(res, error);
     res.status(204).send();
 });
 
 // POST /chat/:chatId/generate-title
 chatRouter.post("/:chatId/generate-title", requireAuth, async (req, res) => {
     const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
     const { chatId } = req.params;
     const message =
         typeof req.body?.message === "string" ? req.body.message.trim() : "";
+    const requestedModel =
+        typeof req.body?.model === "string" ? req.body.model.trim() : null;
     if (!message)
         return void res.status(400).json({ detail: "message is required" });
-
     const db = createServerSupabase();
-    const chat = await getAccessibleChat(chatId, userId, db);
-    if (!chat)
-        return void res.status(404).json({ detail: "Chat not found" });
+    const chat = await getAccessibleChat(chatId, userId, userEmail, db);
+    if (!chat) return void res.status(404).json({ detail: "Chat not found" });
 
     try {
-        const { title_model, api_keys } = await getUserModelSettings(
+        const settings = await getUserModelSettings(userId, db);
+        const resolution = await resolveEffectiveChatModel({
+            requested: requestedModel,
+            chatModel: chat.model,
+            lastSelectedModel: settings.last_selected_chat_model,
+            apiKeys: settings.api_keys,
             userId,
             db,
-        );
-        const titleText = await completeText({
-            model: title_model,
-            user: `Generate a concise title (3–6 words) for a chat in an AI Legal Platform that starts with this message. The title should describe the topic or document — do NOT include words like "Legal Assistant", "AI", "Chat", or any similar prefix. If there is not enough information to generate a title, return exactly "${TITLE_FALLBACK}". Return only the title, no quotes or punctuation.\n\nMessage: ${message.slice(0, 500)}`,
-            maxTokens: 64,
-            apiKeys: api_keys,
         });
-        const title = normalizeGeneratedTitle(titleText);
+        if (!resolution.ok) {
+            return void res.status(resolution.status).json({
+                code: resolution.code,
+                detail: resolution.detail,
+            });
+        }
+        const title = await generateAssistantChatTitle({
+            model: titleModelForChat(resolution.model, settings.title_model),
+            message,
+            apiKeys: settings.api_keys,
+        });
 
-        await db
-            .from("chats")
-            .update({ title })
-            .eq("id", chatId);
+        await db.from("chats").update({ title }).eq("id", chatId);
 
         res.json({ title });
     } catch (err) {
-        console.error("[generate-title]", safeErrorLog(err));
+        console.error("[generate-title]", err);
         res.status(500).json({ detail: "Failed to generate title" });
     }
 });
@@ -405,23 +488,9 @@ chatRouter.post("/", requireAuth, async (req, res) => {
     if (!parsedModel.ok) {
         return void res.status(400).json({ detail: parsedModel.detail });
     }
-    const parsedRoute =
-        body.route === undefined
-            ? ({ ok: true, value: undefined } as const)
-            : parseModelRoute(body.route);
-    if (!parsedRoute.ok) {
-        return void res.status(400).json({ detail: parsedRoute.detail });
-    }
-    // Optional plain-text document context supplied by the Word add-in (the
-    // active document body, read via Word.run() — no upload, no stored
-    // document record). Injected into the LLM system prompt below.
-    const parsedDocumentContext = parseOptionalDocumentContext(
-        body.document_context,
-    );
-    if (!parsedDocumentContext.ok) {
-        return void res
-            .status(400)
-            .json({ detail: parsedDocumentContext.detail });
+    const parsedReasoning = parseOptionalReasoning(body.reasoning);
+    if (!parsedReasoning.ok) {
+        return void res.status(400).json({ detail: parsedReasoning.detail });
     }
     const parsedAskInputsResponse = parseOptionalAskInputsResponse(
         body.ask_inputs_response,
@@ -431,12 +500,14 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             .status(400)
             .json({ detail: parsedAskInputsResponse.detail });
     }
-
     const messages = parsedMessages.value;
     const chat_id = parsedChatId.value;
     const project_id = parsedProjectId.value.projectId;
     const model = parsedModel.value;
     const askInputsResponse = parsedAskInputsResponse.value;
+    // Reserve a stable assistant identity before streaming. This lets clients
+    // associate streamed UI with the same durable message after a reload.
+    const assistantMessageId = askInputsResponse ? null : randomUUID();
 
     devLog("[chat/stream] incoming request", {
         userId,
@@ -446,15 +517,16 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         messageCount: messages?.length,
     });
 
+    const userEmail = res.locals.userEmail as string | undefined;
     const db = createServerSupabase();
     let chatId = chat_id ?? null;
     let chatTitle: string | null = null;
+    let chatModel: string | null = null;
+    let chatReasoningLevel: string | null = null;
     let resolvedProjectId: string | null = parsedProjectId.value.projectId;
-    let resolvedRoute: ModelRoute | null = null;
-    let routeCredentialSecret: string | undefined;
 
     if (chatId) {
-        const existing = await getAccessibleChat(chatId, userId, db);
+        const existing = await getAccessibleChat(chatId, userId, userEmail, db);
         if (!existing)
             return void res.status(404).json({ detail: "Chat not found" });
 
@@ -469,77 +541,55 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         }
         resolvedProjectId = existingProjectId;
         chatTitle = existing.title;
+        chatModel = existing.model;
+        chatReasoningLevel = existing.reasoning_level;
+    }
 
-        const pinnedRoute = pinnedRouteFromChatRow(existing);
-        if (!pinnedRoute) {
-            return void res.status(409).json({
-                code: "chat_route_required",
-                detail: "This chat has no pinned model route",
-            });
-        }
-        if (
-            parsedRoute.value &&
-            !routesEqual(parsedRoute.value, pinnedRoute)
-        ) {
-            return void res.status(409).json({
-                code: "chat_route_mismatch",
-                detail: "The requested model route does not match the pinned chat route",
-            });
-        }
-        if (parsedModel.value && parsedModel.value !== pinnedRoute.model) {
-            return void res.status(409).json({
-                code: "chat_route_mismatch",
-                detail: "The requested model does not match the pinned chat route",
-            });
-        }
-        const routeResolution = await resolveModelRouteForUser(
-            userId,
-            pinnedRoute,
-            db,
-        );
-        if (!routeResolution.ok) {
-            return void res.status(409).json({
-                code: "pinned_credential_unavailable",
-                detail: "The pinned model credential is unavailable",
-            });
-        }
-        resolvedRoute = routeResolution.route;
-        routeCredentialSecret = routeResolution.credentialSecret;
+    const modelSettings = await getUserModelSettings(userId, db);
+    const modelResolution = await resolveEffectiveChatModel({
+        requested: model,
+        chatModel,
+        lastSelectedModel: modelSettings.last_selected_chat_model,
+        apiKeys: modelSettings.api_keys,
+        userId,
+        db,
+    });
+    if (!modelResolution.ok) {
+        return void res.status(modelResolution.status).json({
+            code: modelResolution.code,
+            detail: modelResolution.detail,
+        });
+    }
+    const selectedModel = modelResolution.model;
+    const selectedReasoningLevel = resolveEffectiveReasoningLevel({
+        model: selectedModel,
+        requested: parsedReasoning.value,
+        chatReasoningLevel,
+        lastSelectedReasoningLevel: modelSettings.last_selected_reasoning_level,
+    });
+
+    if (
+        chatId &&
+        (chatModel !== selectedModel ||
+            chatReasoningLevel !== selectedReasoningLevel)
+    ) {
+        const { error } = await db
+            .from("chats")
+            .update({
+                model: selectedModel,
+                reasoning_level: selectedReasoningLevel,
+            })
+            .eq("id", chatId);
+        if (error) return void sendInternalError(res, error);
     }
 
     if (!chatId) {
-        if (!parsedRoute.value) {
-            return void res.status(400).json({
-                detail: "route is required when creating a chat",
-            });
-        }
-        if (
-            parsedModel.value &&
-            parsedModel.value !== parsedRoute.value.model
-        ) {
-            return void res.status(409).json({
-                code: "chat_route_mismatch",
-                detail: "The requested model does not match the chat route",
-            });
-        }
-        const routeResolution = await resolveModelRouteForUser(
-            userId,
-            parsedRoute.value,
-            db,
-        );
-        if (!routeResolution.ok) {
-            return void res.status(422).json({
-                code: routeResolution.code,
-                detail: routeResolution.detail,
-            });
-        }
-        resolvedRoute = routeResolution.route;
-        routeCredentialSecret = routeResolution.credentialSecret;
         // If creating a chat tied to a project, the user must have access
         // to the project (own or shared).
         const projectAccess = await validateAccessibleProjectId(
             resolvedProjectId,
             userId,
+            userEmail,
             db,
         );
         if (!projectAccess.ok)
@@ -552,9 +602,8 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             .insert({
                 user_id: userId,
                 project_id: resolvedProjectId,
-                model_provider: resolvedRoute.provider,
-                model: resolvedRoute.model,
-                credential_ref: resolvedRoute.credential_ref,
+                model: selectedModel,
+                reasoning_level: selectedReasoningLevel,
             })
             .select("id, title")
             .single();
@@ -566,6 +615,12 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         }
         chatId = newChat.id as string;
         chatTitle = newChat.title;
+    }
+
+    if (!chatId) {
+        return void res
+            .status(500)
+            .json({ detail: "Failed to initialize chat" });
     }
 
     devLog("[chat/stream] resolved chatId", chatId);
@@ -609,33 +664,22 @@ chatRouter.post("/", requireAuth, async (req, res) => {
     );
     const {
         api_keys: apiKeys,
-    } = await getUserModelSettings(userId, db);
-    // Extra system context: the Word add-in's active-document body. The
-    // document text is user-controlled and a prompt-injection vector, so
-    // buildWordDocumentContextPrompt nonce-fences it before it enters the
-    // system prompt.
-    const systemPromptExtra = parsedDocumentContext.documentContext
-        ? buildWordDocumentContextPrompt(
-              parsedDocumentContext.documentContext,
-              nonce,
-          )
-        : undefined;
+        title_model: titleModel,
+        personalisation,
+    } = modelSettings;
+    const personalisationPrompt = buildUserPersonalisationPrompt(
+        personalisation,
+        nonce,
+    );
     const apiMessages = buildMessages(
         enrichedMessages,
         docAvailability,
-        systemPromptExtra,
+        personalisationPrompt || undefined,
         undefined,
         nonce,
     );
 
-    const workflowStore = await buildWorkflowStore(userId, db);
-    if (!resolvedRoute) {
-        return void res.status(409).json({
-            code: "chat_route_required",
-            detail: "This chat has no pinned model route",
-        });
-    }
-    const pinnedRoute = resolvedRoute;
+    const workflowStore = await buildWorkflowStore(userId, userEmail, db);
 
     devLog("[chat/stream] starting LLM stream", {
         apiMessageCount: apiMessages.length,
@@ -643,21 +687,89 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         workflowCount: Object.keys(workflowStore).length,
     });
 
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no");
-    res.flushHeaders();
+    // Make the advertised identity durable before the response becomes an
+    // SSE stream. If this reservation fails, return a normal HTTP error while
+    // headers are still mutable; clients must never receive an ID that cannot
+    // subsequently be loaded from chat history.
+    if (assistantMessageId) {
+        const reserveError = await reserveAssistantMessage({
+            db,
+            table: "chat_messages",
+            id: assistantMessageId,
+            chatId,
+        });
+        if (reserveError) {
+            console.error(
+                "[chat/stream] failed to reserve assistant message",
+                reserveError,
+            );
+            return void res
+                .status(500)
+                .json({ detail: "Failed to start assistant response" });
+        }
+    }
 
-    const write = (line: string) => res.write(line);
-    const streamAbort = new AbortController();
-    let streamFinished = false;
-    res.on("close", () => {
-        if (!streamFinished) streamAbort.abort();
-    });
+    const stream = openAssistantSse(res);
+    const write = stream.write;
+    const updateReservedAssistantMessage =
+        createReservedAssistantMessageUpdater({
+            db,
+            table: "chat_messages",
+            id: assistantMessageId ?? "",
+            chatId,
+            enabled: !!assistantMessageId,
+        });
 
     try {
-        write(`data: ${JSON.stringify({ type: "chat_id", chatId })}\n\n`);
+        write(
+            `data: ${JSON.stringify({
+                type: "chat_id",
+                chatId,
+                ...(assistantMessageId ? { assistantMessageId } : {}),
+            })}\n\n`,
+        );
+
+        const shouldGenerateTitle =
+            !chatTitle && !!lastUser?.content && !askInputsResponse;
+        const titleMessage = lastUser
+            ? [
+                  lastUser.content,
+                  lastUser.workflow
+                      ? `Workflow: ${lastUser.workflow.title}`
+                      : "",
+                  lastUser.files?.length
+                      ? `Files: ${lastUser.files.map((file) => file.filename).join(", ")}`
+                      : "",
+              ]
+                  .filter(Boolean)
+                  .join("\n")
+            : "";
+        const titlePromise = shouldGenerateTitle
+            ? generateAssistantChatTitle({
+                  model: titleModelForChat(selectedModel, titleModel),
+                  message: titleMessage,
+                  apiKeys,
+              })
+                  .then(async (title) => {
+                      const { error } = await db
+                          .from("chats")
+                          .update({ title })
+                          .eq("id", chatId);
+                      if (error) throw error;
+                      chatTitle = title;
+                      if (!stream.signal.aborted) {
+                          write(
+                              `data: ${JSON.stringify({ type: "chat_title", chatId, title })}\n\n`,
+                          );
+                      }
+                  })
+                  .catch((error) => {
+                      console.error(
+                          "[chat/stream] failed to generate chat title",
+                          error,
+                      );
+                  })
+            : Promise.resolve();
 
         const { fullText, events, citations } = await runLLMStream({
             apiMessages,
@@ -667,19 +779,41 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             db,
             write,
             workflowStore,
-            model: pinnedRoute.model,
-            route: pinnedRoute,
-            credentialSecret: routeCredentialSecret,
+            model: selectedModel,
+            reasoning: selectedReasoningLevel,
             apiKeys,
-            signal: streamAbort.signal,
+            signal: stream.signal,
             projectId: resolvedProjectId,
             nonce,
+            // This route first makes the advertised assistant ID durable.
+            // It emits [DONE] only after the reserved row has been populated.
+            emitDone: false,
         });
 
         devLog("[chat/stream] LLM stream finished", {
             fullTextLen: fullText?.length ?? 0,
             eventCount: events?.length ?? 0,
         });
+
+        // Upstream providers occasionally end the stream cleanly but empty
+        // (observed via OpenRouter). Silence reads as a hung composer, so
+        // surface it — unless tools produced visible artifacts, which carry
+        // their own completion signal.
+        if (
+            !fullText?.trim() &&
+            (!events || events.every((event) => !("error" in event)))
+        ) {
+            write(
+                `data: ${JSON.stringify({
+                    type: "error",
+                    message:
+                        "The model returned an empty response. Try again, or pick a different model.",
+                    safe_to_display: true,
+                })}\n\n`,
+            );
+            write("data: [DONE]\n\n");
+            return;
+        }
 
         const persistedEvents = events;
         if (askInputsResponse) {
@@ -690,44 +824,81 @@ chatRouter.post("/", requireAuth, async (req, res) => {
                 citations,
             );
         } else {
-            await db.from("chat_messages").insert({
-                chat_id: chatId,
-                role: "assistant",
-                content: persistedEvents.length ? persistedEvents : null,
-                citations: citations.length ? citations : null,
-            });
+            const saveError = await updateReservedAssistantMessage(
+                persistedEvents.length ? persistedEvents : null,
+                citations.length ? citations : null,
+            );
+            if (saveError) {
+                console.error(
+                    "[chat/stream] failed to save assistant response",
+                    saveError,
+                );
+                write(
+                    `data: ${JSON.stringify({
+                        type: "error",
+                        message:
+                            "The response was generated but could not be saved.",
+                    })}\n\n`,
+                );
+                write("data: [DONE]\n\n");
+                return;
+            }
         }
 
+        await titlePromise;
+
         if (!chatTitle && lastUser?.content) {
-            await db
-                .from("chats")
-                .update({ title: lastUser.content.slice(0, 120) })
-                .eq("id", chatId);
+            const title = lastUser.content.slice(0, 120);
+            await db.from("chats").update({ title }).eq("id", chatId);
+            chatTitle = title;
+            if (shouldGenerateTitle && !stream.signal.aborted) {
+                write(
+                    `data: ${JSON.stringify({ type: "chat_title", chatId, title })}\n\n`,
+                );
+            }
         }
+        void recordChatTurn(
+            db,
+            {
+                userId,
+                userEmail,
+                chatId,
+                projectId: resolvedProjectId,
+                title: chatTitle ?? lastUser?.content?.slice(0, 120) ?? null,
+                model: selectedModel,
+            },
+            persistedEvents,
+        );
+        write("data: [DONE]\n\n");
     } catch (err) {
         if (isAbortError(err)) {
             devLog("[chat/stream] client aborted stream", { chatId });
+            void recordChatTurn(
+                db,
+                {
+                    userId,
+                    userEmail,
+                    chatId,
+                    projectId: resolvedProjectId,
+                    title: chatTitle,
+                    model: selectedModel,
+                    status: "cancelled",
+                },
+                null,
+            );
             if (err instanceof AssistantStreamError) {
                 const partial = buildCancelledAssistantMessage({
                     fullText: err.fullText,
                     events: err.events,
-                    buildCitations: (fullText, events) =>
-                        extractCitations(fullText, docIndex, events),
+                    buildCitations: (fullText) =>
+                        extractCitations(fullText, docIndex),
                 });
                 const saveError = askInputsResponse
                     ? null
-                    : (
-                          await db.from("chat_messages").insert({
-                              chat_id: chatId,
-                              role: "assistant",
-                              content: partial.events.length
-                                  ? partial.events
-                                  : null,
-                              citations: partial.citations.length
-                                  ? partial.citations
-                                  : null,
-                          })
-                      ).error;
+                    : await updateReservedAssistantMessage(
+                          partial.events.length ? partial.events : null,
+                          partial.citations.length ? partial.citations : null,
+                      );
                 if (askInputsResponse) {
                     await appendAssistantEventsToLastAssistantMessage(
                         db,
@@ -745,29 +916,22 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             }
             return;
         }
-        console.error("[chat/stream] error:", safeErrorLog(err));
-        const message = safeErrorMessage(err, "Stream error");
-                const errorEvents = err instanceof AssistantStreamError
-            ? err.events
-            : [{ type: "error" as const, message }];
+        console.error("[chat/stream] error:", err);
+        const message = ASSISTANT_ERROR_MESSAGE;
+        const errorEvents =
+            err instanceof AssistantStreamError
+                ? err.events
+                : [{ type: "error" as const, message }];
         const errorFullText =
             err instanceof AssistantStreamError ? err.fullText : "";
         try {
-            const citations = extractCitations(
-                errorFullText,
-                docIndex,
-                errorEvents,
-            );
+            const citations = extractCitations(errorFullText, docIndex);
             const saveError = askInputsResponse
                 ? null
-                : (
-                      await db.from("chat_messages").insert({
-                          chat_id: chatId,
-                          role: "assistant",
-                          content: errorEvents.length ? errorEvents : null,
-                          citations: citations.length ? citations : null,
-                      })
-                  ).error;
+                : await updateReservedAssistantMessage(
+                      errorEvents.length ? errorEvents : null,
+                      citations.length ? citations : null,
+                  );
             if (askInputsResponse) {
                 await appendAssistantEventsToLastAssistantMessage(
                     db,
@@ -782,15 +946,12 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             console.error("[chat/stream] failed to save error", saveErr);
         }
         try {
-            write(
-                `data: ${JSON.stringify({ type: "error", message })}\n\n`,
-            );
+            write(`data: ${JSON.stringify({ type: "error", message })}\n\n`);
             write("data: [DONE]\n\n");
         } catch {
             /* ignore */
         }
     } finally {
-        streamFinished = true;
-        res.end();
+        stream.finish();
     }
 });

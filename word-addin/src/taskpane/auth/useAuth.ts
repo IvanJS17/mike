@@ -3,8 +3,10 @@ import {
   getSessionState,
   initialize,
   signIn,
+  signInWithGoogle,
   signOut,
   subscribe,
+  type AddinAuthUser,
 } from "./session";
 
 // ---------------------------------------------------------------------------
@@ -13,11 +15,12 @@ import {
 // API client can share it; this hook just subscribes mounted components to it.
 // ---------------------------------------------------------------------------
 
-export interface AuthState {
-  token: string | null;
+interface AuthState {
+  user: AddinAuthUser | null;
   loading: boolean;
   error: string | null;
   login: (email: string, password: string) => Promise<void>;
+  loginWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -36,8 +39,9 @@ export function useAuth(): AuthState {
     (email: string, password: string) => signIn(email, password),
     []
   );
+  const loginWithGoogle = useCallback(() => signInWithGoogle(), []);
   const logout = useCallback(() => signOut(), []);
 
-  const { token, loading, error } = getSessionState();
-  return { token, loading, error, login, logout };
+  const { user, loading, error } = getSessionState();
+  return { user, loading, error, login, loginWithGoogle, logout };
 }

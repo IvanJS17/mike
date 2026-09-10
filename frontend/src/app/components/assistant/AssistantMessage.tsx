@@ -2,7 +2,11 @@
 
 import { useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
-import type { AssistantEvent, Citation, EditAnnotation } from "../shared/types";
+import type {
+    AssistantEvent,
+    Citation,
+    EditAnnotation,
+} from "../shared/types";
 import { EditCard } from "./EditCard";
 import { PreResponseWrapper } from "./PreResponseWrapper";
 import { ResponseStatus, type StatusState } from "./message/ResponseStatus";
@@ -16,7 +20,7 @@ import {
     AskInputsBlock,
     DocCreatedBlock,
     DocDownloadBlock,
-    DocEditedBlock,
+    DocEditBlock,
     DocFindBlock,
     DocReadBlock,
     DocReplicatedBlock,
@@ -29,10 +33,11 @@ interface Props {
     events?: AssistantEvent[];
     isStreaming?: boolean;
     isError?: boolean;
-    /** Human-readable error text rendered alongside the red LiTT icon. */
+    /** Human-readable error text rendered alongside the red Mike icon. */
     errorMessage?: string;
     citations?: Citation[];
     citationStatus?: "started" | "partial" | "final";
+    activeCitation?: Citation | null;
     onCitationClick?: (citation: Citation) => void;
     onOpenCitationSource?: (citation: Citation) => void;
     minHeight?: string;
@@ -100,6 +105,7 @@ export function AssistantMessage({
     errorMessage,
     citations = [],
     citationStatus,
+    activeCitation,
     onCitationClick,
     onOpenCitationSource,
     minHeight = "0px",
@@ -177,11 +183,11 @@ export function AssistantMessage({
                   { type: "content" }
               >)
             : null;
-        // Only smooth while the content event is still the visible tail. The
-        // moment the model emits a follow-up (tool call, reasoning, another
-        // content block), that content's text is frozen on the server — keeping
-        // it half-revealed below would make a tool-call wrapper appear under
-        // prose that still looks like it's typing.
+    // Only smooth while the content event is still the visible tail. The
+    // moment the model emits a follow-up (tool call, reasoning, another
+    // content block), that content's text is frozen on the server — keeping
+    // it half-revealed below would make a tool-call wrapper appear under
+    // prose that still looks like it's typing.
     const lastRenderableIdx = events
         ? events.reduce(
               (last, e, idx) => (isRenderableEvent(e) ? idx : last),
@@ -227,9 +233,8 @@ export function AssistantMessage({
             versionNumber: citation.version_number ?? null,
         });
     };
-    const canOpenCitationSource = (citation: Citation) =>
-        !!onOpenCitationSource ||
-        !!onOpenDocument;
+    const canOpenCitationSource = () =>
+        !!onOpenCitationSource || !!onOpenDocument;
     const showCitationBlock =
         !!citationStatus || (!isStreaming && citations.length > 0);
     const handleCopy = async () => {
@@ -391,16 +396,29 @@ export function AssistantMessage({
             );
         }
         if (event.type === "doc_read") {
-            const ann = citations.find((a) => a.filename === event.filename);
+            const ann = citations.find(
+                (a) => a.filename === event.filename,
+            );
             return (
                 <DocReadBlock
                     key={globalIdx}
                     filename={event.filename}
                     isStreaming={event.isStreaming}
                     onClick={
-                        !event.isStreaming && ann && onCitationClick
-                            ? () => onCitationClick(ann)
-                            : undefined
+                        !event.isStreaming &&
+                        event.document_id &&
+                        onOpenDocument
+                            ? () =>
+                                  onOpenDocument({
+                                      documentId: event.document_id!,
+                                      filename: event.filename,
+                                      versionId: event.version_id ?? null,
+                                      versionNumber:
+                                          event.version_number ?? null,
+                                  })
+                            : !event.isStreaming && ann && onCitationClick
+                              ? () => onCitationClick(ann)
+                              : undefined
                     }
                     showConnector={showConnector}
                 />
@@ -415,6 +433,20 @@ export function AssistantMessage({
                     totalMatches={event.total_matches}
                     isStreaming={!!event.isStreaming}
                     showConnector={showConnector}
+                    onClick={
+                        !event.isStreaming &&
+                        event.document_id &&
+                        onOpenDocument
+                            ? () =>
+                                  onOpenDocument({
+                                      documentId: event.document_id!,
+                                      filename: event.filename,
+                                      versionId: event.version_id ?? null,
+                                      versionNumber:
+                                          event.version_number ?? null,
+                                  })
+                            : undefined
+                    }
                 />
             );
         }
@@ -425,6 +457,20 @@ export function AssistantMessage({
                     filename={event.filename}
                     isStreaming={event.isStreaming}
                     showConnector={showConnector}
+                    onClick={
+                        !event.isStreaming &&
+                        event.document_id &&
+                        onOpenDocument
+                            ? () =>
+                                  onOpenDocument({
+                                      documentId: event.document_id!,
+                                      filename: event.filename,
+                                      versionId: event.version_id ?? null,
+                                      versionNumber:
+                                          event.version_number ?? null,
+                                  })
+                            : undefined
+                    }
                 />
             );
         }
@@ -437,20 +483,46 @@ export function AssistantMessage({
                     key={globalIdx}
                     filename={event.filename}
                     count={event.count}
+                    copies={event.copies}
                     isStreaming={!!event.isStreaming}
                     hasError={!!event.error}
                     showConnector={showConnector}
+                    onOpenCopy={
+                        !event.isStreaming && onOpenDocument
+                            ? (copy) =>
+                                  onOpenDocument({
+                                      documentId: copy.document_id,
+                                      filename: copy.new_filename,
+                                      versionId: copy.version_id,
+                                      versionNumber: 1,
+                                  })
+                            : undefined
+                    }
                 />
             );
         }
         if (event.type === "doc_edited") {
             return (
-                <DocEditedBlock
+                <DocEditBlock
                     key={globalIdx}
                     filename={event.filename}
                     isStreaming={event.isStreaming}
                     hasError={!!event.error}
                     showConnector={showConnector}
+                    onClick={
+                        !event.isStreaming &&
+                        event.document_id &&
+                        onOpenDocument
+                            ? () =>
+                                  onOpenDocument({
+                                      documentId: event.document_id,
+                                      filename: event.filename,
+                                      versionId: event.version_id || null,
+                                      versionNumber:
+                                          event.version_number ?? null,
+                                  })
+                            : undefined
+                    }
                 />
             );
         }
@@ -472,7 +544,7 @@ export function AssistantMessage({
             const response = askInputsResponseFor(globalIdx);
             return (
                 <AskInputsBlock
-                    key={globalIdx}
+                    key={`${globalIdx}-${response ? "complete" : "pending"}`}
                     event={event}
                     response={response}
                     showConnector={showConnector}
@@ -499,6 +571,7 @@ export function AssistantMessage({
                                             inlineCitationTargets={
                                                 inlineCitationTargets
                                             }
+                                            activeCitation={activeCitation}
                                             onCitationClick={onCitationClick}
                                             divRef={
                                                 isLastContent
@@ -635,7 +708,22 @@ export function AssistantMessage({
                                         filenameByDocId={filenameByDocId}
                                         cards={cards}
                                         resolvedCount={resolvedCount}
-                                        onViewClick={onEditViewClick}
+                                        onViewClick={
+                                            onOpenDocument
+                                                ? (annotation, filename) =>
+                                                      onOpenDocument({
+                                                          documentId:
+                                                              annotation.document_id,
+                                                          filename,
+                                                          versionId:
+                                                              annotation.version_id ??
+                                                              null,
+                                                          versionNumber:
+                                                              annotation.version_number ??
+                                                              null,
+                                                      })
+                                                : undefined
+                                        }
                                         onResolveStart={onEditResolveStart}
                                         onResolved={handleEditResolved}
                                         onError={onEditError}
@@ -765,6 +853,7 @@ export function AssistantMessage({
                 {showCitationBlock && (
                     <CitationsBlock
                         citations={citations}
+                        activeCitation={activeCitation}
                         onCitationClick={onCitationClick}
                         onOpenSource={handleOpenCitationSource}
                         canOpenSource={canOpenCitationSource}
@@ -780,13 +869,17 @@ export function AssistantMessage({
                 <div className="flex items-center gap-2 py-2 font-sans justify-start">
                     {!isStreaming && (
                         <button
+                            type="button"
+                            aria-label={
+                                isCopied ? "Response copied" : "Copy response"
+                            }
                             className="p-1.5 rounded text-gray-500 hover:text-gray-700 hover:bg-gray-100"
                             onClick={handleCopy}
                         >
                             {isCopied ? (
-                                <Check className="h-3.5 w-3.5 text-green-600" />
+                                <Check className="h-3 w-3 text-green-600" />
                             ) : (
-                                <Copy className="h-3.5 w-3.5" />
+                                <Copy className="h-3 w-3" />
                             )}
                         </button>
                     )}

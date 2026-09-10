@@ -34,13 +34,15 @@ import { SpreadsheetView } from "../shared/views/SpreadsheetView";
 import { DocxView } from "../shared/views/DocxView";
 import { FileTypeIcon } from "../shared/FileTypeIcon";
 import { SubfolderSvgIcon } from "../shared/FolderSvgIcon";
-import { CitationQuotesHeader } from "../assistant/CitationQuotesHeader";
+import { CitationQuotesSection } from "../assistant/CitationQuotesSection";
 import { cn } from "@/app/lib/utils";
 import {
-    APP_SURFACE_HOVER_CLASS,
-    APP_SURFACE_PRESSED_CLASS,
-    LIQUID_PANEL_SURFACE_CLASS,
+    LIQUID_GLASS_HOVER_CLASS,
+    LIQUID_GLASS_PRESSED_CLASS,
+    LIQUID_FLOAT_PANEL_SURFACE_CLASS,
 } from "@/app/components/ui/liquid-surface";
+import { GlassIconButton } from "@/app/components/ui/glass-icon-button";
+import { CitationPillUI } from "@/shared/ui/CitationPillUI";
 
 function isDocxDocument(d: {
     file_type?: string | null;
@@ -65,6 +67,8 @@ interface Props {
     onRegenerate?: () => Promise<void>;
     /** If true, open the document panel immediately */
     displayDocument?: boolean;
+    /** Show document metadata instead of analysis details. */
+    documentOnly?: boolean;
     /** Quote to highlight when opening document panel */
     citationQuote?: string;
     /** Page to scroll to when opening document panel */
@@ -116,6 +120,7 @@ export function TRSidePanel({
     onNavigate,
     onRegenerate,
     displayDocument = false,
+    documentOnly = false,
     citationQuote,
     citationPage,
     citationSheet,
@@ -156,6 +161,8 @@ export function TRSidePanel({
                 document.id === activeDocumentId &&
                 row.source_document_ids.includes(document.id),
         ) ?? initialDocument;
+    const activeVersionNumber =
+        doc?.active_version_number ?? doc?.latest_version_number ?? 1;
     const [documentPaneOpen, setDocumentPaneOpen] = useState(
         displayDocument && !!doc,
     );
@@ -319,7 +326,7 @@ export function TRSidePanel({
             ref={panelRef}
             className={cn(
                 "fixed z-100 flex flex-row",
-                LIQUID_PANEL_SURFACE_CLASS,
+                LIQUID_FLOAT_PANEL_SURFACE_CLASS,
                 "right-3 top-3 bottom-3 overflow-hidden",
             )}
         >
@@ -355,14 +362,13 @@ export function TRSidePanel({
                     {/* Quote row */}
                     {docCitation?.quote && (
                         <div className="-mx-3 shrink-0 py-2">
-                            <CitationQuotesHeader
+                            <CitationQuotesSection
                                 quotes={[
                                     {
                                         id: citationKey(cell.id, docCitation),
                                         quote: docCitation.quote,
-                                        inlineDetail:
+                                        quoteLabel:
                                             formatCitationLocation(docCitation),
-                                        citationText: `${doc.filename}, ${formatCitationLocation(docCitation)}`,
                                     },
                                 ]}
                                 activeQuoteId={citationKey(
@@ -370,7 +376,6 @@ export function TRSidePanel({
                                     docCitation,
                                 )}
                                 citationRef={docCitation.citationRef}
-                                citationText={`${doc.filename}, ${formatCitationLocation(docCitation)}`}
                             />
                         </div>
                     )}
@@ -415,7 +420,7 @@ export function TRSidePanel({
             {/* Info column — right, 300px fixed */}
             <div className="flex w-[300px] shrink-0 flex-col overflow-hidden">
                 {/* Header */}
-                <div className="mb-2 flex min-h-11 shrink-0 items-center justify-end gap-1.5 border-b border-white/30 px-3">
+                <div className="mb-2 flex min-h-11 shrink-0 items-center justify-end gap-1.5 px-3">
                     {doc && (
                         <button
                             type="button"
@@ -439,8 +444,9 @@ export function TRSidePanel({
                             <PanelLeft className="h-4 w-4" />
                         </button>
                     )}
-                    {onRegenerate && (
+                    {!documentOnly && onRegenerate && (
                         <button
+                            type="button"
                             onClick={async () => {
                                 setRegenerating(true);
                                 try {
@@ -451,7 +457,7 @@ export function TRSidePanel({
                             }}
                             disabled={regenerating}
                             title="Regenerate"
-                            className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 disabled:opacity-40"
+                            className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 disabled:opacity-40"
                         >
                             {regenerating ? (
                                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -460,230 +466,272 @@ export function TRSidePanel({
                             )}
                         </button>
                     )}
-                    <button
-                        type="button"
-                        onClick={onClose}
-                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-white/70 bg-white/55 text-gray-500 shadow-[inset_0_1px_0_rgba(255,255,255,0.75),inset_0_-1px_0_rgba(255,255,255,0.55),0_6px_18px_rgba(15,23,42,0.08)] backdrop-blur-xl transition-colors hover:bg-white/75 hover:text-gray-700"
-                        aria-label="Close"
-                    >
+                    <GlassIconButton onClick={onClose} aria-label="Close">
                         <X className="h-3.5 w-3.5" />
-                    </button>
+                    </GlassIconButton>
                 </div>
 
                 {/* Analysis panel */}
                 <div className="flex-1 overflow-y-auto">
                     <div className="pb-2 px-5">
-                        {/* Document field */}
-                        <div className="mb-4">
-                            <div className="mb-3 text-xs font-medium text-gray-900">
-                                {row.row_type === "folder"
-                                    ? "Folder"
-                                    : "Document"}
-                            </div>
-                            {row.row_type === "folder" ? (
-                                <div>
-                                    <button
-                                        type="button"
-                                        onClick={() =>
-                                            setFolderExpanded(
-                                                (expanded) => !expanded,
-                                            )
-                                        }
-                                        className={cn(
-                                            "flex min-h-6 w-full items-center gap-1.5 rounded-md px-1 text-left text-gray-800 transition-colors",
-                                            APP_SURFACE_HOVER_CLASS,
-                                            APP_SURFACE_PRESSED_CLASS,
-                                        )}
-                                        aria-expanded={folderExpanded}
-                                    >
-                                        <SubfolderSvgIcon
-                                            open={folderExpanded}
+                        {documentOnly ? (
+                            <>
+                                <div className="mb-4">
+                                    <div className="mb-3 text-xs font-medium text-gray-900">
+                                        Document
+                                    </div>
+                                    <div className="flex min-h-6 items-center gap-1.5">
+                                        <FileTypeIcon
+                                            fileType={
+                                                doc?.file_type ?? doc?.filename
+                                            }
                                             className="h-3 w-3 shrink-0"
                                         />
-                                        <span
-                                            className="min-w-0 flex-1 truncate text-xs leading-6"
-                                            title={row.label}
+                                        <div
+                                            className="min-w-0 flex-1 truncate text-xs leading-6 text-gray-800"
+                                            title={doc?.filename}
                                         >
-                                            {row.label}
-                                        </span>
-                                        <ChevronDown
-                                            className={cn(
-                                                "h-3 w-3 shrink-0 text-gray-500 transition-transform",
-                                                folderExpanded && "rotate-180",
+                                            {doc?.filename ?? row.label}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <div className="mb-3 text-xs font-medium text-gray-900">
+                                        Version
+                                    </div>
+                                    <div className="min-h-6 text-xs leading-6 text-gray-800">
+                                        V{activeVersionNumber}
+                                    </div>
+                                </div>
+                            </>
+                        ) : (
+                            <>
+                                {/* Document field */}
+                                <div className="mb-4">
+                                    <div className="mb-3 text-xs font-medium text-gray-900">
+                                        {row.row_type === "folder"
+                                            ? "Folder"
+                                            : "Document"}
+                                    </div>
+                                    {row.row_type === "folder" ? (
+                                        <div>
+                                            <button
+                                                type="button"
+                                                onClick={() =>
+                                                    setFolderExpanded(
+                                                        (expanded) => !expanded,
+                                                    )
+                                                }
+                                                className={cn(
+                                                    "flex min-h-6 w-full items-center gap-1.5 rounded-md px-1 text-left text-gray-800 transition-colors",
+                                                    LIQUID_GLASS_HOVER_CLASS,
+                                                    LIQUID_GLASS_PRESSED_CLASS,
+                                                )}
+                                                aria-expanded={folderExpanded}
+                                            >
+                                                <SubfolderSvgIcon
+                                                    open={folderExpanded}
+                                                    className="h-3 w-3 shrink-0"
+                                                />
+                                                <span
+                                                    className="min-w-0 flex-1 truncate text-xs leading-6"
+                                                    title={row.label}
+                                                >
+                                                    {row.label}
+                                                </span>
+                                                <ChevronDown
+                                                    className={cn(
+                                                        "h-3 w-3 shrink-0 text-gray-500 transition-transform",
+                                                        folderExpanded &&
+                                                            "rotate-180",
+                                                    )}
+                                                />
+                                            </button>
+                                            {folderExpanded && (
+                                                <div className="mt-1">
+                                                    {sourceDocuments.map(
+                                                        (sourceDocument) => (
+                                                            <button
+                                                                key={
+                                                                    sourceDocument.id
+                                                                }
+                                                                type="button"
+                                                                onClick={() =>
+                                                                    handleSourceDocumentOpen(
+                                                                        sourceDocument,
+                                                                    )
+                                                                }
+                                                                className={cn(
+                                                                    "flex min-h-6 w-full items-center gap-1.5 rounded-md py-1 pl-5 pr-1 text-left text-xs text-gray-800 transition-colors",
+                                                                    LIQUID_GLASS_HOVER_CLASS,
+                                                                    LIQUID_GLASS_PRESSED_CLASS,
+                                                                )}
+                                                                title={
+                                                                    sourceDocument.filename
+                                                                }
+                                                            >
+                                                                <FileTypeIcon
+                                                                    fileType={
+                                                                        sourceDocument.file_type ??
+                                                                        sourceDocument.filename
+                                                                    }
+                                                                    className="h-3 w-3 shrink-0"
+                                                                />
+                                                                <span className="min-w-0 flex-1 truncate">
+                                                                    {
+                                                                        sourceDocument.filename
+                                                                    }
+                                                                </span>
+                                                            </button>
+                                                        ),
+                                                    )}
+                                                </div>
                                             )}
-                                        />
-                                    </button>
-                                    {folderExpanded && (
-                                        <div className="mt-1">
-                                            {sourceDocuments.map(
-                                                (sourceDocument) => (
-                                                    <button
-                                                        key={sourceDocument.id}
-                                                        type="button"
-                                                        onClick={() =>
-                                                            handleSourceDocumentOpen(
-                                                                sourceDocument,
-                                                            )
-                                                        }
-                                                        className={cn(
-                                                            "flex min-h-6 w-full items-center gap-1.5 rounded-md py-1 pl-5 pr-1 text-left text-xs text-gray-800 transition-colors",
-                                                            APP_SURFACE_HOVER_CLASS,
-                                                            APP_SURFACE_PRESSED_CLASS,
-                                                        )}
-                                                        title={
-                                                            sourceDocument.filename
-                                                        }
-                                                    >
-                                                        <FileTypeIcon
-                                                            fileType={
-                                                                sourceDocument.file_type ??
-                                                                sourceDocument.filename
-                                                            }
-                                                            className="h-3 w-3 shrink-0"
-                                                        />
-                                                        <span className="min-w-0 flex-1 truncate">
-                                                            {
-                                                                sourceDocument.filename
-                                                            }
-                                                        </span>
-                                                    </button>
-                                                ),
-                                            )}
+                                        </div>
+                                    ) : (
+                                        <div className="flex min-h-6 items-center gap-1.5">
+                                            <FileTypeIcon
+                                                fileType={
+                                                    doc?.file_type ??
+                                                    doc?.filename
+                                                }
+                                                className="h-3 w-3"
+                                            />
+                                            <div
+                                                className="min-w-0 flex-1 truncate text-xs leading-6 text-gray-800"
+                                                title={row.label}
+                                            >
+                                                {row.label}
+                                            </div>
                                         </div>
                                     )}
                                 </div>
-                            ) : (
-                                <div className="flex min-h-6 items-center gap-1.5">
-                                    <FileTypeIcon
-                                        fileType={
-                                            doc?.file_type ?? doc?.filename
-                                        }
-                                        className="h-3 w-3"
-                                    />
-                                    <div
-                                        className="min-w-0 flex-1 truncate text-xs leading-6 text-gray-800"
-                                        title={row.label}
-                                    >
-                                        {row.label}
+
+                                {/* Column field */}
+                                <div className="mb-4">
+                                    <div className="mb-3 text-xs font-medium text-gray-900">
+                                        Column
+                                    </div>
+                                    <div className="min-h-6 truncate text-xs leading-6 text-gray-800">
+                                        {column.name}
                                     </div>
                                 </div>
-                            )}
-                        </div>
 
-                        {/* Column field */}
-                        <div className="mb-4">
-                            <div className="mb-3 text-xs font-medium text-gray-900">
-                                Column
-                            </div>
-                            <div className="min-h-6 truncate text-xs leading-6 text-gray-800">
-                                {column.name}
-                            </div>
-                        </div>
+                                {/* Flag section */}
+                                {cell.content?.flag && (
+                                    <div className="mb-5">
+                                        <h4 className="mb-2 text-xs font-medium text-gray-900">
+                                            Flag
+                                        </h4>
+                                        <span
+                                            className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${FLAG_BADGE[cell.content.flag] ?? FLAG_BADGE.grey}`}
+                                        >
+                                            {cell.content.flag
+                                                .charAt(0)
+                                                .toUpperCase() +
+                                                cell.content.flag.slice(1)}
+                                        </span>
+                                    </div>
+                                )}
 
-                        {/* Flag section */}
-                        {cell.content?.flag && (
-                            <div className="mb-5">
-                                <h4 className="mb-2 text-xs font-medium text-gray-900">
-                                    Flag
-                                </h4>
-                                <span
-                                    className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${FLAG_BADGE[cell.content.flag] ?? FLAG_BADGE.grey}`}
-                                >
-                                    {cell.content.flag.charAt(0).toUpperCase() +
-                                        cell.content.flag.slice(1)}
-                                </span>
-                            </div>
-                        )}
-
-                        {/* Results */}
-                        <div className="mb-6">
-                            <h4 className="mb-2 text-xs font-medium text-gray-900">
-                                Results
-                            </h4>
-                            <div className="text-xs leading-relaxed text-slate-600">
-                                <MarkdownContent
-                                    citations={summaryCitations}
-                                    onCitationClick={handleCitationOpen}
-                                    column={column}
-                                >
-                                    {summaryText || "—"}
-                                </MarkdownContent>
-                            </div>
-                        </div>
-
-                        {/* Reasoning */}
-                        {cell.content?.reasoning && (
-                            <div>
-                                <h4 className="mb-2 text-xs font-medium text-gray-900">
-                                    Reasoning
-                                </h4>
-                                <div className="text-xs leading-relaxed text-slate-600">
-                                    <MarkdownContent
-                                        citations={reasoningCitations}
-                                        onCitationClick={handleCitationOpen}
-                                        citationOffset={summaryCitations.length}
-                                        column={column}
-                                        inline
-                                    >
-                                        {reasoningText}
-                                    </MarkdownContent>
+                                {/* Results */}
+                                <div className="mb-6">
+                                    <h4 className="mb-2 text-xs font-medium text-gray-900">
+                                        Results
+                                    </h4>
+                                    <div className="text-xs leading-relaxed text-gray-700">
+                                        <MarkdownContent
+                                            citations={summaryCitations}
+                                            onCitationClick={handleCitationOpen}
+                                            column={column}
+                                        >
+                                            {summaryText || "—"}
+                                        </MarkdownContent>
+                                    </div>
                                 </div>
-                            </div>
+
+                                {/* Reasoning */}
+                                {cell.content?.reasoning && (
+                                    <div>
+                                        <h4 className="mb-2 text-xs font-medium text-gray-900">
+                                            Reasoning
+                                        </h4>
+                                        <div className="text-xs leading-relaxed text-gray-700">
+                                            <MarkdownContent
+                                                citations={reasoningCitations}
+                                                onCitationClick={
+                                                    handleCitationOpen
+                                                }
+                                                citationOffset={
+                                                    summaryCitations.length
+                                                }
+                                                column={column}
+                                                inline
+                                            >
+                                                {reasoningText}
+                                            </MarkdownContent>
+                                        </div>
+                                    </div>
+                                )}
+                            </>
                         )}
                     </div>
                 </div>
-                <div className="flex shrink-0 justify-center bg-white/25 pb-7 pt-1">
-                    <div className="grid grid-cols-3 grid-rows-3 gap-0.5">
-                        <CellNavigatorButton
-                            className="col-start-2 row-start-1"
-                            label="Previous row"
-                            title={previousRow?.label}
-                            disabled={!previousRow}
-                            onClick={() =>
-                                previousRow &&
-                                onNavigate(previousRow.id, column.index)
-                            }
-                        >
-                            <ChevronUp className="h-4 w-4" />
-                        </CellNavigatorButton>
-                        <CellNavigatorButton
-                            className="col-start-1 row-start-2"
-                            label="Previous column"
-                            title={previousColumn?.name}
-                            disabled={!previousColumn}
-                            onClick={() =>
-                                previousColumn &&
-                                onNavigate(row.id, previousColumn.index)
-                            }
-                        >
-                            <ChevronLeft className="h-4 w-4" />
-                        </CellNavigatorButton>
-                        <div className="col-start-2 row-start-2 h-7 w-7 rounded-md bg-white/35" />
-                        <CellNavigatorButton
-                            className="col-start-3 row-start-2"
-                            label="Next column"
-                            title={nextColumn?.name}
-                            disabled={!nextColumn}
-                            onClick={() =>
-                                nextColumn &&
-                                onNavigate(row.id, nextColumn.index)
-                            }
-                        >
-                            <ChevronRight className="h-4 w-4" />
-                        </CellNavigatorButton>
-                        <CellNavigatorButton
-                            className="col-start-2 row-start-3"
-                            label="Next row"
-                            title={nextRow?.label}
-                            disabled={!nextRow}
-                            onClick={() =>
-                                nextRow && onNavigate(nextRow.id, column.index)
-                            }
-                        >
-                            <ChevronDown className="h-4 w-4" />
-                        </CellNavigatorButton>
+                {!documentOnly && (
+                    <div className="flex shrink-0 justify-center bg-white/25 pb-7 pt-1">
+                        <div className="grid grid-cols-3 grid-rows-3 gap-0.5">
+                            <CellNavigatorButton
+                                className="col-start-2 row-start-1"
+                                label="Previous row"
+                                title={previousRow?.label}
+                                disabled={!previousRow}
+                                onClick={() =>
+                                    previousRow &&
+                                    onNavigate(previousRow.id, column.index)
+                                }
+                            >
+                                <ChevronUp className="h-4 w-4" />
+                            </CellNavigatorButton>
+                            <CellNavigatorButton
+                                className="col-start-1 row-start-2"
+                                label="Previous column"
+                                title={previousColumn?.name}
+                                disabled={!previousColumn}
+                                onClick={() =>
+                                    previousColumn &&
+                                    onNavigate(row.id, previousColumn.index)
+                                }
+                            >
+                                <ChevronLeft className="h-4 w-4" />
+                            </CellNavigatorButton>
+                            <div className="col-start-2 row-start-2 h-7 w-7 rounded-md bg-white/35" />
+                            <CellNavigatorButton
+                                className="col-start-3 row-start-2"
+                                label="Next column"
+                                title={nextColumn?.name}
+                                disabled={!nextColumn}
+                                onClick={() =>
+                                    nextColumn &&
+                                    onNavigate(row.id, nextColumn.index)
+                                }
+                            >
+                                <ChevronRight className="h-4 w-4" />
+                            </CellNavigatorButton>
+                            <CellNavigatorButton
+                                className="col-start-2 row-start-3"
+                                label="Next row"
+                                title={nextRow?.label}
+                                disabled={!nextRow}
+                                onClick={() =>
+                                    nextRow &&
+                                    onNavigate(nextRow.id, column.index)
+                                }
+                            >
+                                <ChevronDown className="h-4 w-4" />
+                            </CellNavigatorButton>
+                        </div>
                     </div>
-                </div>
+                )}
             </div>
         </div>
     );
@@ -713,8 +761,8 @@ function CellNavigatorButton({
             title={title ? `${label}: ${title}` : label}
             className={cn(
                 "flex h-7 w-7 items-center justify-center rounded-md text-gray-600 transition-colors disabled:cursor-default disabled:opacity-25",
-                APP_SURFACE_HOVER_CLASS,
-                APP_SURFACE_PRESSED_CLASS,
+                LIQUID_GLASS_HOVER_CLASS,
+                LIQUID_GLASS_PRESSED_CLASS,
                 className,
             )}
         >
@@ -751,8 +799,7 @@ function CitationBadge({
     onClick: (citation: TRPanelCitation) => void;
 }) {
     return (
-        <button
-            type="button"
+        <CitationPillUI
             data-page={citation.page}
             data-sheet={citation.sheet}
             data-cell={citation.cell}
@@ -769,10 +816,10 @@ function CitationBadge({
                     citationRef: index + 1,
                 })
             }
-            className="inline-flex items-center justify-center rounded-full bg-gray-200 w-3.5 h-3.5 text-[9px] font-medium text-gray-700 align-super cursor-pointer hover:bg-gray-300 transition-colors"
+            className="align-super"
         >
             {index + 1}
-        </button>
+        </CitationPillUI>
     );
 }
 

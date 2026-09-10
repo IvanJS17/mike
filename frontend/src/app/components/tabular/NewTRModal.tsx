@@ -11,10 +11,17 @@ import {
 } from "@/app/lib/mikeApi";
 import { FileDirectory } from "../shared/FileDirectory";
 import { Modal } from "../modals/Modal";
-import { ModalFieldLabel } from "../modals/ModalFieldLabel";
 import { ModalSelect } from "../modals/ModalSelect";
-import { ModalTextInput } from "../modals/ModalTextInput";
+import { FieldLabel, FormTextInput } from "../ui/form-field";
 import { ToggleSwitch } from "@/app/components/ui/toggle-switch";
+import {
+    ModelToggle,
+    type NoModelsReason,
+    type RouterSlug,
+} from "../assistant/ModelToggle";
+import { useUserProfile } from "@/app/contexts/UserProfileContext";
+import { isModelAvailable } from "@/app/lib/modelAvailability";
+import { NoModelsWarningPopup } from "../popups/NoModelsWarningPopup";
 
 const isDev = process.env.NODE_ENV !== "production";
 const devLog = (...args: Parameters<typeof console.log>) => {
@@ -27,15 +34,17 @@ interface Props {
     onClose: () => void;
     onAdd: (
         title: string,
-        projectId?: string,
-        documentIds?: string[],
-        columnsConfig?: Workflow["columns_config"],
-        documentGrouping?: "document" | "folder",
+        projectId: string | undefined,
+        documentIds: string[] | undefined,
+        columnsConfig: Workflow["columns_config"] | undefined,
+        documentGrouping: "document" | "folder" | undefined,
+        model: string,
     ) => void;
     projects?: Project[];
     /** When provided, skip the project/directory picker and show only these docs */
     projectDocs?: Document[];
     projectFolders?: Folder[];
+    projectId?: string;
     projectName?: string;
     projectCmNumber?: string | null;
 }
@@ -47,14 +56,21 @@ export function NewTRModal({
     projects = [],
     projectDocs: fixedProjectDocs,
     projectFolders: fixedProjectFolders,
+    projectId,
     projectName,
     projectCmNumber,
 }: Props) {
-    const isProjectMode = fixedProjectDocs !== undefined;
+    const isProjectMode = projectId !== undefined;
     const [step, setStep] = useState<"details" | "documents">("details");
     const [title, setTitle] = useState("");
     const [underProject, setUnderProject] = useState(false);
     const [selectedProjectId, setSelectedProjectId] = useState("");
+    const [selectedModel, setSelectedModel] = useState("");
+    const [noModelsWarning, setNoModelsWarning] =
+        useState<NoModelsReason | null>(null);
+    const { profile, loading: profileLoading, apiKeysDegraded } =
+        useUserProfile();
+    const apiKeys = apiKeysDegraded ? undefined : profile?.apiKeys;
 
     // Project-scoped docs (when underProject is true and no fixedProjectDocs)
     const [projectDocs, setProjectDocs] = useState<Document[]>([]);
@@ -108,9 +124,34 @@ export function NewTRModal({
             .finally(() => setLoadingWorkflows(false));
 
         if (isProjectMode) {
-            setSelectedDocuments(fixedProjectDocs ?? []);
+            const readyProjectDocuments = fixedProjectDocs ?? [];
+            setProjectDocs(readyProjectDocuments);
+            setSelectedDocuments(readyProjectDocuments);
         }
     }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    useEffect(() => {
+        if (!open || !profile?.tabularModel) return;
+        const defaultModel = profile.tabularModel;
+        const router = (["openrouter", "vercel", "opencode-go"] as const).find(
+            (slug) => defaultModel.startsWith(`${slug}/`),
+        );
+        const selectedByRouter: Record<RouterSlug, string[]> = {
+            openrouter: profile.openRouterModels,
+            vercel: profile.vercelModels,
+            "opencode-go": profile.openCodeGoModels,
+        };
+        const routerSelectionValid =
+            !router ||
+            selectedByRouter[router].includes(
+                defaultModel.slice(router.length + 1),
+            );
+        const providerAvailable =
+            !apiKeys || isModelAvailable(defaultModel, apiKeys);
+        if (routerSelectionValid && providerAvailable) {
+            setSelectedModel((current) => current || defaultModel);
+        }
+    }, [apiKeys, open, profile]);
 
     if (!open) return null;
 
@@ -119,6 +160,8 @@ export function NewTRModal({
         setTitle("");
         setUnderProject(false);
         setSelectedProjectId("");
+        setSelectedModel("");
+        setNoModelsWarning(null);
         setProjectDocs([]);
         setProjectFolders([]);
         setExtraStandaloneDocs([]);
@@ -139,6 +182,7 @@ export function NewTRModal({
     function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
         e.preventDefault();
         if (!title.trim()) return;
+        if (!selectedModel) return;
         if (underProject && !selectedProjectId) return;
         if (step === "details" || submitterValue(e) !== "create-review") {
             setStep("documents");
@@ -155,6 +199,7 @@ export function NewTRModal({
                 : undefined,
             selectedWorkflow?.columns_config ?? undefined,
             groupBySubfolder ? "folder" : "document",
+            selectedModel,
         );
         handleClose();
     }
@@ -183,14 +228,19 @@ export function NewTRModal({
         if (!files.length) return;
         setUploading(true);
         try {
+            const uploadProjectId = isProjectMode
+                ? projectId
+                : underProject
+                  ? selectedProjectId
+                  : undefined;
             const uploaded = await Promise.all(
                 files.map((f) =>
-                    underProject && selectedProjectId
-                        ? uploadProjectDocument(selectedProjectId, f)
+                    uploadProjectId
+                        ? uploadProjectDocument(uploadProjectId, f)
                         : uploadStandaloneDocument(f),
                 ),
             );
-            if (underProject && selectedProjectId) {
+            if (uploadProjectId) {
                 setProjectDocs((prev) => [...uploaded, ...prev]);
             } else {
                 setExtraStandaloneDocs((prev) => [...uploaded, ...prev]);
@@ -233,7 +283,7 @@ export function NewTRModal({
 
     // What to show in the directory depends on mode and toggle state
     const directoryDocuments = isProjectMode
-        ? (fixedProjectDocs ?? [])
+        ? projectDocs
         : underProject
           ? projectDocs
           : extraStandaloneDocs;
@@ -299,7 +349,8 @@ export function NewTRModal({
                           },
                           disabled:
                               !title.trim() ||
-                              (underProject && !selectedProjectId),
+                              (underProject && !selectedProjectId) ||
+                              !selectedModel,
                       }
                     : {
                           label: "Create",
@@ -309,7 +360,8 @@ export function NewTRModal({
                           value: "create-review",
                           disabled:
                               !title.trim() ||
-                              (underProject && !selectedProjectId),
+                              (underProject && !selectedProjectId) ||
+                              !selectedModel,
                       }
             }
         >
@@ -329,10 +381,10 @@ export function NewTRModal({
                 {step === "details" ? (
                     <div className="space-y-6">
                         <div>
-                            <ModalFieldLabel htmlFor="new-tr-title">
+                            <FieldLabel htmlFor="new-tr-title">
                                 Review name
-                            </ModalFieldLabel>
-                            <ModalTextInput
+                            </FieldLabel>
+                            <FormTextInput
                                 id="new-tr-title"
                                 type="text"
                                 value={title}
@@ -344,11 +396,26 @@ export function NewTRModal({
                             />
                         </div>
 
+                        <div>
+                            <FieldLabel as="p">Model</FieldLabel>
+                            <ModelToggle
+                                value={selectedModel}
+                                onChange={setSelectedModel}
+                                apiKeys={apiKeys}
+                                apiKeysLoading={profileLoading && !profile}
+                                openRouterModels={profile?.openRouterModels}
+                                vercelModels={profile?.vercelModels}
+                                openCodeGoModels={profile?.openCodeGoModels}
+                                onNoModelsClick={setNoModelsWarning}
+                                modalInput
+                            />
+                        </div>
+
                         {/* Workflow template */}
                         <div>
-                            <ModalFieldLabel as="p">
+                            <FieldLabel as="p">
                                 Workflow template
-                            </ModalFieldLabel>
+                            </FieldLabel>
                             <ModalSelect
                                 id="new-tr-workflow-template"
                                 value={selectedWorkflowId ?? ""}
@@ -363,9 +430,9 @@ export function NewTRModal({
                         {/* Create under a project toggle */}
                         {!isProjectMode && (
                             <div className="space-y-3">
-                                <ModalFieldLabel as="p">
+                                <FieldLabel as="p">
                                     Project
-                                </ModalFieldLabel>
+                                </FieldLabel>
                                 <ToggleSwitch
                                     checked={underProject}
                                     onCheckedChange={(next) => {
@@ -399,9 +466,9 @@ export function NewTRModal({
                         )}
 
                         <div>
-                            <ModalFieldLabel as="p">
+                            <FieldLabel as="p">
                                 Document grouping
-                            </ModalFieldLabel>
+                            </FieldLabel>
                             <ToggleSwitch
                                 checked={groupBySubfolder}
                                 onCheckedChange={setGroupBySubfolder}
@@ -426,6 +493,10 @@ export function NewTRModal({
                     </div>
                 )}
             </form>
+            <NoModelsWarningPopup
+                reason={noModelsWarning}
+                onClose={() => setNoModelsWarning(null)}
+            />
         </Modal>
     );
 }

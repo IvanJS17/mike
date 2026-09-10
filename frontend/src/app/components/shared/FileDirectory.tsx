@@ -1,20 +1,30 @@
 "use client";
 
-import { type ReactNode, useEffect, useMemo, useState } from "react";
 import {
-    Check,
-    Loader2,
-} from "lucide-react";
-import type { Document, LibraryFolder } from "./types";
+  type ReactNode,
+  type UIEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { Loader2 } from "lucide-react";
+import type { Document, LibraryFolder, Project } from "./types";
 import { FileTypeIcon } from "./FileTypeIcon";
 import { ProjectSvgIcon, SubfolderSvgIcon } from "./FolderSvgIcon";
 import { SearchBar } from "@/app/components/ui/search-bar";
 import { TabPillButton } from "@/app/components/ui/tab-pill-button";
 import { SkeletonLine } from "./TablePrimitive";
+import { TableLoadMoreRow } from "./TableLoadMoreRow";
 import { useDirectoryData, type DirectoryTab } from "./useDirectoryData";
+import { useDebouncedValue } from "@/app/hooks/useDebouncedValue";
 import {
-    APP_SURFACE_ACTIVE_CLASS,
-    APP_SURFACE_HOVER_CLASS,
+  searchLibraryDocuments,
+  searchProjectDirectory,
+} from "@/app/lib/mikeApi";
+import {
+    LIQUID_GLASS_MODAL_ROW_HOVER_CLASS,
+    LIQUID_GLASS_MODAL_ROW_SELECTED_CLASS,
 } from "@/app/components/ui/liquid-surface";
 
 type DirectoryFolder = Pick<
@@ -24,6 +34,10 @@ type DirectoryFolder = Pick<
 
 const DIRECTORY_GRID_CLASS =
     "grid grid-cols-[14px_14px_minmax(0,1fr)_48px_84px_64px] items-center gap-2";
+const DIRECTORY_ROW_ACTION_CLASS =
+    "col-span-5 grid min-w-0 grid-cols-[14px_minmax(0,1fr)_48px_84px_64px] items-center gap-2 text-left";
+const DIRECTORY_CHECKBOX_CLASS =
+    "h-2.5 w-2.5 shrink-0 justify-self-center cursor-pointer rounded border-gray-200 accent-black disabled:cursor-not-allowed";
 
 const DIRECTORY_TABS: { value: DirectoryTab; label: string }[] = [
     { value: "files", label: "Files" },
@@ -34,6 +48,56 @@ const ALL_DIRECTORY_TAB_VALUES = DIRECTORY_TABS.map((tab) => tab.value);
 
 const EMPTY_DOCUMENTS: Document[] = [];
 const EMPTY_FOLDERS: LibraryFolder[] = [];
+const EMPTY_FOLDER_IDS: Record<"files" | "templates", Set<string>> = {
+  files: new Set<string>(),
+  templates: new Set<string>(),
+};
+const EMPTY_LEVEL_STATE: Record<
+  "files" | "templates",
+  Record<string, boolean>
+> = { files: {}, templates: {} };
+const DIRECTORY_SEARCH_PAGE_SIZE = 40;
+
+function DirectorySelectionCheckbox({
+  checked,
+  disabled,
+  indeterminate,
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  disabled: boolean;
+  indeterminate: boolean;
+  label: string;
+  onChange: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (inputRef.current) {
+      inputRef.current.indeterminate = indeterminate;
+    }
+  }, [indeterminate]);
+
+  return (
+    <input
+      ref={inputRef}
+      type="checkbox"
+      checked={checked}
+      disabled={disabled}
+      onChange={onChange}
+      aria-checked={indeterminate ? "mixed" : checked}
+      aria-label={label}
+      className={DIRECTORY_CHECKBOX_CLASS}
+    />
+  );
+}
+
+function mergeDirectoryRows<T extends { id: string }>(current: T[], next: T[]) {
+  const rows = new Map(current.map((row) => [row.id, row]));
+  next.forEach((row) => rows.set(row.id, row));
+  return [...rows.values()];
+}
 
 function formatDate(iso: string | null) {
     if (!iso) return null;
@@ -53,9 +117,7 @@ function formatBytes(bytes: number | null | undefined) {
 
 function versionLabel(doc: Document) {
     const n = doc.active_version_number ?? doc.latest_version_number;
-    return typeof n === "number" && Number.isFinite(n) && n >= 1
-        ? `${n}`
-        : null;
+  return typeof n === "number" && Number.isFinite(n) && n >= 1 ? `${n}` : null;
 }
 
 export function DocFileIcon({ fileType }: { fileType: string | null }) {
@@ -73,6 +135,19 @@ interface FileDirectoryProps {
     tabs?: readonly DirectoryTab[];
     excludeProjectId?: string;
     folders?: DirectoryFolder[];
+  onExpandFolder?: (folderId: string) => void | Promise<void>;
+  documentsHasMoreByFolder?: Record<string, boolean>;
+  loadingFolderIds?: Set<string>;
+  loadingMoreFolderIds?: Set<string>;
+  loadedFolderIds?: Set<string>;
+  onLoadMoreFolderDocuments?: (folderId: string) => void | Promise<void>;
+  documentLimitByLevel?: Record<string, number>;
+  rootDocumentsHasMore?: boolean;
+  loadingMoreRootDocuments?: boolean;
+  onLoadMoreRootDocuments?: () => void | Promise<void>;
+  /** Documents already attached to the target resource. They remain visible
+   * and checked, but cannot be toggled again. */
+  disabledDocumentIds?: ReadonlySet<string>;
 }
 
 export function FileDirectory({
@@ -86,7 +161,19 @@ export function FileDirectory({
     tabs = ALL_DIRECTORY_TAB_VALUES,
     excludeProjectId,
     folders = EMPTY_FOLDERS,
+  onExpandFolder,
+  documentsHasMoreByFolder = {},
+  loadingFolderIds: externalLoadingFolderIds = new Set<string>(),
+  loadingMoreFolderIds: externalLoadingMoreFolderIds = new Set<string>(),
+  loadedFolderIds: externalLoadedFolderIds = new Set<string>(),
+  onLoadMoreFolderDocuments,
+  documentLimitByLevel = {},
+  rootDocumentsHasMore = false,
+  loadingMoreRootDocuments = false,
+  onLoadMoreRootDocuments,
+  disabledDocumentIds,
 }: FileDirectoryProps) {
+  const autoLoadTriggeredRef = useRef(false);
     const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
         new Set(),
     );
@@ -108,6 +195,13 @@ export function FileDirectory({
         setSelectedTab(initialDirectoryTab);
     }, [initialDirectoryTab]);
     const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search, 250);
+  const [searchDocuments, setSearchDocuments] = useState<Document[] | null>(
+    null,
+  );
+  const [searchProjects, setSearchProjects] = useState<Project[] | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchHasMore, setSearchHasMore] = useState(false);
     const {
         loadingTabs,
         standaloneDocuments,
@@ -115,8 +209,101 @@ export function FileDirectory({
         fileFolders: loadedFileFolders,
         templateFolders: loadedTemplateFolders,
         projects,
+    projectsHasMore = false,
+    loadingMoreProjects = false,
+    loadedProjectLevels = new Set<string>(),
+    loadingProjectLevels = new Set<string>(),
+    projectDocumentsHasMoreByLevel = {},
+    loadedFolderIds = EMPTY_FOLDER_IDS,
+    loadingFolderIds = EMPTY_FOLDER_IDS,
+    documentsHasMoreByLevel = EMPTY_LEVEL_STATE,
+    loadingMoreDocumentsByLevel = EMPTY_LEVEL_STATE,
         loadTab,
+    loadFolderChildren = async () => {},
+    loadMoreLibraryDocuments = async () => {},
+    loadMoreProjects = async () => {},
+    loadProjectLevel = async () => {},
+    loadMoreProjectDocuments = async () => {},
     } = useDirectoryData(showTabs, initialDirectoryTab);
+
+  useEffect(() => {
+    const term = debouncedSearch.trim();
+    if (!showTabs || !term) {
+      setSearchDocuments(null);
+      setSearchProjects(null);
+      setSearchLoading(false);
+      setSearchHasMore(false);
+      return;
+    }
+    const controller = new AbortController();
+    setSearchLoading(true);
+    setSearchDocuments(null);
+    setSearchProjects(null);
+    const request =
+      selectedTab === "projects"
+        ? searchProjectDirectory({
+            search: term,
+            limit: DIRECTORY_SEARCH_PAGE_SIZE + 1,
+            signal: controller.signal,
+          }).then((rows) => {
+            setSearchProjects(rows.slice(0, DIRECTORY_SEARCH_PAGE_SIZE));
+            setSearchHasMore(rows.length > DIRECTORY_SEARCH_PAGE_SIZE);
+          })
+        : searchLibraryDocuments(selectedTab, {
+            search: term,
+            limit: DIRECTORY_SEARCH_PAGE_SIZE + 1,
+            signal: controller.signal,
+          }).then((result) => {
+            setSearchDocuments(result.documents.slice(0, DIRECTORY_SEARCH_PAGE_SIZE));
+            setSearchHasMore(result.documents.length > DIRECTORY_SEARCH_PAGE_SIZE || result.documentsHasMore);
+          });
+    void request
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        console.error("[file-directory] search failed", error);
+        setSearchDocuments([]);
+        setSearchProjects([]);
+        setSearchHasMore(false);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setSearchLoading(false);
+      });
+    return () => controller.abort();
+  }, [debouncedSearch, selectedTab, showTabs]);
+
+  async function loadMoreSearchResults() {
+    const term = debouncedSearch.trim();
+    if (!term || searchLoading || !searchHasMore) return;
+    setSearchLoading(true);
+    try {
+      if (selectedTab === "projects") {
+        const offset = searchProjects?.length ?? 0;
+        const rows = await searchProjectDirectory({
+          search: term,
+          limit: DIRECTORY_SEARCH_PAGE_SIZE + 1,
+          offset,
+        });
+        const page = rows.slice(0, DIRECTORY_SEARCH_PAGE_SIZE);
+        setSearchProjects((current) =>
+          mergeDirectoryRows(current ?? [], page),
+        );
+        setSearchHasMore(rows.length > DIRECTORY_SEARCH_PAGE_SIZE);
+      } else {
+        const offset = searchDocuments?.length ?? 0;
+        const result = await searchLibraryDocuments(selectedTab, {
+          search: term,
+          limit: DIRECTORY_SEARCH_PAGE_SIZE,
+          offset,
+        });
+        setSearchDocuments((current) =>
+          mergeDirectoryRows(current ?? [], result.documents),
+        );
+        setSearchHasMore(result.documentsHasMore);
+      }
+    } finally {
+      setSearchLoading(false);
+    }
+  }
 
     useEffect(() => {
         if (
@@ -142,21 +329,15 @@ export function FileDirectory({
                 : documents,
         [documents, showTabs, standaloneDocuments],
     );
-    const directoryTemplateDocs = showTabs
-        ? templateDocuments
-        : EMPTY_DOCUMENTS;
-    const directoryFileFolders = showTabs
-        ? loadedFileFolders
-        : folders;
+  const directoryTemplateDocs = showTabs ? templateDocuments : EMPTY_DOCUMENTS;
+  const directoryFileFolders = showTabs ? loadedFileFolders : folders;
     const directoryTemplateFolders = showTabs
         ? loadedTemplateFolders
         : EMPTY_FOLDERS;
     const localDirectoryProjects = useMemo(
         () =>
             showTabs
-                ? projects.filter(
-                      (project) => project.id !== excludeProjectId,
-                  )
+        ? projects.filter((project) => project.id !== excludeProjectId)
                 : [],
         [excludeProjectId, projects, showTabs],
     );
@@ -164,10 +345,17 @@ export function FileDirectory({
         () => new Set(selectedDocuments.map((document) => document.id)),
         [selectedDocuments],
     );
+    const checkedIds = useMemo(() => {
+        const next = new Set(selectedIds);
+        disabledDocumentIds?.forEach((id) => next.add(id));
+        return next;
+    }, [disabledDocumentIds, selectedIds]);
 
     const q = search.trim().toLowerCase();
     const visibleStandaloneDocs = q
-        ? directoryStandaloneDocs.filter((doc) =>
+    ? showTabs && selectedTab === "files" && searchDocuments !== null
+      ? searchDocuments
+      : directoryStandaloneDocs.filter((doc) =>
               doc.filename.toLowerCase().includes(q),
           )
         : directoryStandaloneDocs;
@@ -177,12 +365,15 @@ export function FileDirectory({
           )
         : uploadingFilenames;
     const visibleTemplateDocs = q
-        ? directoryTemplateDocs.filter((doc) =>
+    ? showTabs && selectedTab === "templates" && searchDocuments !== null
+      ? searchDocuments
+      : directoryTemplateDocs.filter((doc) =>
               doc.filename.toLowerCase().includes(q),
           )
         : directoryTemplateDocs;
     const visibleDirectoryProjects = q
-        ? localDirectoryProjects
+    ? (searchProjects ??
+      localDirectoryProjects
               .map((project) => {
                   const docs = project.documents ?? [];
                   const projectMatches =
@@ -192,9 +383,7 @@ export function FileDirectory({
                       ...project,
                       documents: projectMatches
                           ? docs
-                          : docs.filter((doc) =>
-                                doc.filename.toLowerCase().includes(q),
-                            ),
+              : docs.filter((doc) => doc.filename.toLowerCase().includes(q)),
                   };
               })
               .filter((project) => {
@@ -204,15 +393,14 @@ export function FileDirectory({
                       project.name.toLowerCase().includes(q) ||
                       (project.cm_number ?? "").toLowerCase().includes(q)
                   );
-              })
+        }))
         : localDirectoryProjects;
     const activeTab = showTabs ? selectedTab : "files";
     const activeLoading = showTabs
-        ? !!loadingTabs[activeTab]
+    ? !!loadingTabs[activeTab] || (q.length > 0 && searchLoading)
         : externalLoading;
     const hasVisibleFiles =
-        visibleStandaloneDocs.length > 0 ||
-        visibleUploadingFilenames.length > 0;
+    visibleStandaloneDocs.length > 0 || visibleUploadingFilenames.length > 0;
     const hasVisibleProjects = visibleDirectoryProjects.length > 0;
     const hasVisibleTemplates = visibleTemplateDocs.length > 0;
     const activeTabHasNoResults =
@@ -220,8 +408,80 @@ export function FileDirectory({
         ((activeTab === "files" && !hasVisibleFiles) ||
             (activeTab === "projects" && !hasVisibleProjects) ||
             (activeTab === "templates" && !hasVisibleTemplates));
+  const activePageLoadingMore = q
+    ? searchLoading
+    : activeTab === "projects"
+      ? loadingMoreProjects
+      : activeTab === "templates"
+        ? !!loadingMoreDocumentsByLevel.templates.root
+        : showTabs
+          ? !!loadingMoreDocumentsByLevel.files.root
+          : loadingMoreRootDocuments;
+
+  useEffect(() => {
+    if (!activePageLoadingMore) autoLoadTriggeredRef.current = false;
+  }, [activePageLoadingMore]);
+
+  useEffect(() => {
+    autoLoadTriggeredRef.current = false;
+  }, [activeTab, q]);
+
+  function handleDirectoryScroll(event: UIEvent<HTMLDivElement>) {
+    if (autoLoadTriggeredRef.current) return;
+    const viewport = event.currentTarget;
+    const distanceFromBottom =
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+    if (distanceFromBottom > 80) return;
+
+    if (q) {
+      if (!searchHasMore || searchLoading) return;
+      autoLoadTriggeredRef.current = true;
+      void loadMoreSearchResults();
+      return;
+    }
+
+    if (activeTab === "projects") {
+      if (!projectsHasMore || loadingMoreProjects) return;
+      autoLoadTriggeredRef.current = true;
+      void loadMoreProjects();
+      return;
+    }
+
+    if (activeTab === "templates") {
+      if (
+        !documentsHasMoreByLevel.templates.root ||
+        loadingMoreDocumentsByLevel.templates.root
+      )
+        return;
+      autoLoadTriggeredRef.current = true;
+      void loadMoreLibraryDocuments("templates", null);
+      return;
+    }
+
+    if (showTabs) {
+      if (
+        !documentsHasMoreByLevel.files.root ||
+        loadingMoreDocumentsByLevel.files.root
+      )
+        return;
+      autoLoadTriggeredRef.current = true;
+      void loadMoreLibraryDocuments("files", null);
+      return;
+    }
+
+    if (
+      !rootDocumentsHasMore ||
+      loadingMoreRootDocuments ||
+      !onLoadMoreRootDocuments
+    )
+      return;
+    autoLoadTriggeredRef.current = true;
+    void onLoadMoreRootDocuments();
+  }
 
     function toggle(doc: Document) {
+        if (disabledDocumentIds?.has(doc.id)) return;
+
         const next = new Map(
             selectedDocuments.map((document) => [document.id, document]),
         );
@@ -234,6 +494,7 @@ export function FileDirectory({
     }
 
     function toggleFolder(projectId: string) {
+    const opening = !expandedProjects.has(projectId);
         setExpandedProjects((prev) => {
             const next = new Set(prev);
             if (next.has(projectId)) {
@@ -243,19 +504,25 @@ export function FileDirectory({
             }
             return next;
         });
+    if (opening) void loadProjectLevel(projectId, null);
     }
 
     function toggleDocuments(docs: Document[]) {
-        if (docs.length === 0) return;
+        const selectableDocs = docs.filter(
+            (doc) => !disabledDocumentIds?.has(doc.id),
+        );
+        if (selectableDocs.length === 0) return;
 
-        const allSelected = docs.every((doc) => selectedIds.has(doc.id));
+        const allSelected = selectableDocs.every((doc) =>
+            selectedIds.has(doc.id),
+        );
         const next = new Map(
             selectedDocuments.map((document) => [document.id, document]),
         );
         if (allSelected) {
-            docs.forEach((doc) => next.delete(doc.id));
+            selectableDocs.forEach((doc) => next.delete(doc.id));
         } else {
-            docs.forEach((doc) => next.set(doc.id, doc));
+            selectableDocs.forEach((doc) => next.set(doc.id, doc));
         }
         onChange([...next.values()]);
     }
@@ -289,7 +556,37 @@ export function FileDirectory({
         return [...directDocs, ...nestedDocs];
     }
 
-    function toggleLibraryFolder(folderId: string) {
+  function folderIsFullyLoaded(
+    allFolders: DirectoryFolder[],
+    folderId: string,
+    libraryTab?: "files" | "templates",
+    projectId?: string,
+  ): boolean {
+    const levelLoaded = libraryTab
+      ? loadedFolderIds[libraryTab].has(folderId)
+      : projectId
+        ? loadedProjectLevels.has(`${projectId}:${folderId}`)
+        : externalLoadedFolderIds.has(folderId);
+    const levelHasMore = libraryTab
+      ? !!documentsHasMoreByLevel[libraryTab][folderId]
+      : projectId
+        ? !!projectDocumentsHasMoreByLevel[`${projectId}:${folderId}`]
+        : !!documentsHasMoreByFolder[folderId];
+    return (
+      levelLoaded &&
+      !levelHasMore &&
+      childFolders(allFolders, folderId).every((child) =>
+        folderIsFullyLoaded(allFolders, child.id, libraryTab, projectId),
+      )
+    );
+  }
+
+  function toggleLibraryFolder(
+    folderId: string,
+    libraryTab?: "files" | "templates",
+    projectId?: string,
+  ) {
+    const opening = !expandedLibraryFolders.has(folderId);
         setExpandedLibraryFolders((prev) => {
             const next = new Set(prev);
             if (next.has(folderId)) {
@@ -299,6 +596,17 @@ export function FileDirectory({
             }
             return next;
         });
+    if (opening && libraryTab && !loadedFolderIds[libraryTab].has(folderId)) {
+      void loadFolderChildren(libraryTab, folderId);
+    } else if (
+      opening &&
+      projectId &&
+      !loadedProjectLevels.has(`${projectId}:${folderId}`)
+    ) {
+      void loadProjectLevel(projectId, folderId);
+    } else if (opening && !libraryTab && !projectId && onExpandFolder) {
+      void onExpandFolder(folderId);
+    }
     }
 
     function handleTabChange(tab: DirectoryTab) {
@@ -311,33 +619,30 @@ export function FileDirectory({
     }
 
     function renderDocumentRow(doc: Document, depth = 0) {
-        const selected = selectedIds.has(doc.id);
+        const selected = checkedIds.has(doc.id);
+        const disabled = disabledDocumentIds?.has(doc.id) ?? false;
         return (
-            <button
-                type="button"
+            <label
                 key={doc.id}
-                onClick={() => toggle(doc)}
                 style={{ paddingLeft: indentedRowPadding(depth) }}
-                className={`w-full rounded-md ${DIRECTORY_GRID_CLASS} py-2 pr-2 text-xs transition-all text-left  ${
-                    selected
-                        ? APP_SURFACE_ACTIVE_CLASS
-                        : APP_SURFACE_HOVER_CLASS
+                className={`w-full rounded-md ${DIRECTORY_GRID_CLASS} py-2 pr-2 text-left text-xs transition-all ${
+                    disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+                } ${
+          selected
+            ? LIQUID_GLASS_MODAL_ROW_SELECTED_CLASS
+            : LIQUID_GLASS_MODAL_ROW_HOVER_CLASS
                 }`}
             >
-                <span
-                    className={`shrink-0 h-3.5 w-3.5 rounded border flex items-center justify-center ${
-                        selected
-                            ? "bg-gray-900 border-gray-900"
-                            : "border-gray-300"
-                    }`}
-                >
-                    {selected && <Check className="h-2.5 w-2.5 text-white" />}
-                </span>
+                <DirectorySelectionCheckbox
+                    checked={selected}
+                    indeterminate={false}
+                    disabled={disabled}
+                    label={`Select ${doc.filename}`}
+                    onChange={() => toggle(doc)}
+                />
                 <DocFileIcon fileType={doc.file_type} />
                 <span
-                    className={`min-w-0 truncate ${
-                        selected ? "text-gray-900" : "text-gray-700"
-                    }`}
+          className={`min-w-0 truncate ${selected ? "text-gray-900" : "text-gray-700"}`}
                 >
                     {doc.filename}
                 </span>
@@ -346,7 +651,7 @@ export function FileDirectory({
                     created={formatDate(doc.created_at)}
                     size={formatBytes(doc.size_bytes)}
                 />
-            </button>
+            </label>
         );
     }
 
@@ -355,49 +660,72 @@ export function FileDirectory({
         docs: Document[],
         parentFolderId: string | null,
         depth = 0,
+    libraryTab?: "files" | "templates",
+    projectId?: string,
     ): ReactNode {
         return childFolders(folders, parentFolderId).map((folder) => {
             const docsInFolder = collectFolderDocuments(folders, docs, folder.id);
+      const directDocs = folderDocuments(docs, folder.id);
+      const visibleDirectDocs =
+        !q && documentLimitByLevel[folder.id] != null
+          ? directDocs.slice(0, documentLimitByLevel[folder.id])
+          : directDocs;
+      const folderSelectionReady = folderIsFullyLoaded(
+        folders,
+        folder.id,
+        libraryTab,
+        projectId,
+      );
             const allSelected =
                 docsInFolder.length > 0 &&
-                docsInFolder.every((doc) => selectedIds.has(doc.id));
+                docsInFolder.every((doc) => checkedIds.has(doc.id));
             const someSelected =
-                docsInFolder.some((doc) => selectedIds.has(doc.id)) &&
-                !allSelected;
+        docsInFolder.some((doc) => checkedIds.has(doc.id)) && !allSelected;
             const isExpanded = !!q || expandedLibraryFolders.has(folder.id);
             return (
                 <div key={folder.id}>
-                    <button
-                        type="button"
-                        onClick={() => toggleLibraryFolder(folder.id)}
+                    <div
                         style={{ paddingLeft: indentedRowPadding(depth) }}
-                        className={`w-full rounded-md ${DIRECTORY_GRID_CLASS} py-2 pr-2 text-xs transition-all text-left ${APP_SURFACE_HOVER_CLASS}`}
+                        className={`w-full rounded-md ${DIRECTORY_GRID_CLASS} py-2 pr-2 text-xs transition-all ${LIQUID_GLASS_MODAL_ROW_HOVER_CLASS}`}
                     >
-                        <span
-                            role="checkbox"
-                            aria-checked={someSelected ? "mixed" : allSelected}
-                            aria-label={`Select all files in ${folder.name}`}
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                toggleDocuments(docsInFolder);
-                            }}
-                            className={`shrink-0 h-3.5 w-3.5 rounded border flex items-center justify-center ${
-                                allSelected || someSelected
-                                    ? "bg-gray-900 border-gray-900"
-                                    : docsInFolder.length === 0
-                                      ? "border-gray-200 bg-gray-50"
-                                      : "border-gray-300"
-                            }`}
+                        <DirectorySelectionCheckbox
+                            checked={allSelected}
+                            indeterminate={someSelected}
+                            disabled={
+                                !folderSelectionReady ||
+                                docsInFolder.length === 0
+                            }
+                            label={
+                                folderSelectionReady
+                                    ? `Select all files in ${folder.name}`
+                                    : `Expand ${folder.name} and load all files before selecting it`
+                            }
+                            onChange={() => toggleDocuments(docsInFolder)}
+                        />
+                        <button
+                            type="button"
+                            aria-expanded={isExpanded}
+                            aria-label={`${isExpanded ? "Collapse" : "Expand"} ${folder.name}`}
+                            onClick={() =>
+                                toggleLibraryFolder(
+                                    folder.id,
+                                    libraryTab,
+                                    projectId,
+                                )
+                            }
+                            className={DIRECTORY_ROW_ACTION_CLASS}
                         >
-                            {allSelected && (
-                                <Check className="h-2.5 w-2.5 text-white" />
-                            )}
-                            {someSelected && <span className="h-px w-2 bg-white" />}
-                        </span>
+            {(libraryTab && loadingFolderIds[libraryTab].has(folder.id)) ||
+            (projectId &&
+              loadingProjectLevels.has(`${projectId}:${folder.id}`)) ||
+            externalLoadingFolderIds.has(folder.id) ? (
+              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-gray-400" />
+            ) : (
                         <SubfolderSvgIcon
                             open={isExpanded}
                             className="h-3.5 w-3.5 shrink-0"
                         />
+            )}
                         <span className="min-w-0 truncate font-medium text-gray-700">
                             {folder.name}
                         </span>
@@ -409,7 +737,8 @@ export function FileDirectory({
                             {docsInFolder.length}{" "}
                             {docsInFolder.length === 1 ? "file" : "files"}
                         </span>
-                    </button>
+                        </button>
+                    </div>
                     {isExpanded && (
                         <div>
                             {renderFolderRows(
@@ -417,16 +746,84 @@ export function FileDirectory({
                                 docs,
                                 folder.id,
                                 depth + 1,
+                libraryTab,
+                projectId,
                             )}
-                            {folderDocuments(docs, folder.id).map((doc) =>
+                            {visibleDirectDocs.map((doc) =>
                                 renderDocumentRow(doc, depth + 1),
                             )}
-                            {docsInFolder.length === 0 && (
+              {libraryTab && !q && (
+                <div
+                  style={{
+                    paddingLeft: indentedRowPadding(depth + 1),
+                  }}
+                >
+                  <TableLoadMoreRow
+                    autoLoadOnVisible
+                    loading={loadingFolderIds[libraryTab].has(folder.id)}
+                    hasMore={!!documentsHasMoreByLevel[libraryTab][folder.id]}
+                    itemCount={visibleDirectDocs.length}
+                    loadingMore={
+                      !!loadingMoreDocumentsByLevel[libraryTab][folder.id]
+                    }
+                    hasError={false}
+                    onLoadMore={() =>
+                      void loadMoreLibraryDocuments(libraryTab, folder.id)
+                    }
+                  />
+                </div>
+              )}
+              {projectId && !q && (
+                <div
+                  style={{
+                    paddingLeft: indentedRowPadding(depth + 1),
+                  }}
+                >
+                  <TableLoadMoreRow
+                    autoLoadOnVisible
+                    loading={loadingProjectLevels.has(
+                      `${projectId}:${folder.id}`,
+                    )}
+                    hasMore={
+                      !!projectDocumentsHasMoreByLevel[
+                        `${projectId}:${folder.id}`
+                      ]
+                    }
+                    itemCount={visibleDirectDocs.length}
+                    loadingMore={loadingProjectLevels.has(
+                      `more:${projectId}:${folder.id}`,
+                    )}
+                    hasError={false}
+                    onLoadMore={() =>
+                      void loadMoreProjectDocuments(projectId, folder.id)
+                    }
+                  />
+                </div>
+              )}
+              {!libraryTab && !projectId && onLoadMoreFolderDocuments && !q && (
+                <div
+                  style={{
+                    paddingLeft: indentedRowPadding(depth + 1),
+                  }}
+                >
+                  <TableLoadMoreRow
+                    autoLoadOnVisible
+                    loading={externalLoadingFolderIds.has(folder.id)}
+                    hasMore={!!documentsHasMoreByFolder[folder.id]}
+                    itemCount={visibleDirectDocs.length}
+                    loadingMore={externalLoadingMoreFolderIds.has(folder.id)}
+                    hasError={false}
+                    onLoadMore={() => void onLoadMoreFolderDocuments(folder.id)}
+                  />
+                </div>
+              )}
+              {folderDocuments(docs, folder.id).length === 0 &&
+                childFolders(folders, folder.id).length === 0 &&
+                (!libraryTab || loadedFolderIds[libraryTab].has(folder.id)) && (
                                 <p
                                     className="py-1 text-xs text-gray-400"
                                     style={{
-                                        paddingLeft:
-                                            indentedRowPadding(depth + 1),
+                      paddingLeft: indentedRowPadding(depth + 1),
                                     }}
                                 >
                                     Empty
@@ -466,8 +863,12 @@ export function FileDirectory({
                                 key={i}
                                 className={`${DIRECTORY_GRID_CLASS} rounded-md px-2 py-2`}
                             >
-                                <div className="h-3.5 w-3.5 rounded border border-gray-200 shrink-0" />
-                                <div className="h-3.5 w-3.5 rounded bg-gray-100 animate-pulse shrink-0" />
+                                <Loader2 className="h-2.5 w-2.5 shrink-0 justify-self-center animate-spin text-gray-400" />
+                                <FileTypeIcon
+                                    fileType={null}
+                                    muted
+                                    className="h-3.5 w-3.5"
+                                />
                                 <div
                                     className="h-3 rounded bg-gray-100 animate-pulse"
                                     style={{ width: `${w}%` }}
@@ -542,7 +943,11 @@ export function FileDirectory({
             ) : (
                 <div className="flex min-h-0 flex-1 flex-col">
                     <FileDirectoryHeader />
-                    <div className="min-h-0 flex-1 overflow-y-auto">
+                    <div
+                      aria-label="File directory"
+                      className="min-h-0 flex-1 overflow-y-auto"
+                      onScroll={handleDirectoryScroll}
+                    >
                     {activeTab === "files" && (
                         <>
                             {visibleUploadingFilenames.map((filename) => (
@@ -550,8 +955,12 @@ export function FileDirectory({
                                     key={`uploading-${filename}`}
                                     className={`w-full ${DIRECTORY_GRID_CLASS} py-2 pl-2 pr-2 text-xs text-left`}
                                 >
-                                    <span className="shrink-0 h-3.5 w-3.5 rounded border border-gray-300" />
-                                    <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400 shrink-0" />
+                                    <Loader2 className="h-2.5 w-2.5 shrink-0 justify-self-center animate-spin text-gray-400" />
+                                    <FileTypeIcon
+                                        fileType={filename}
+                                        muted
+                                        className="h-3.5 w-3.5"
+                                    />
                                     <span className="flex-1 truncate text-gray-400">
                                         {filename}
                                     </span>
@@ -567,11 +976,63 @@ export function FileDirectory({
                                     directoryFileFolders,
                                     directoryStandaloneDocs,
                                     null,
+                    0,
+                    showTabs ? "files" : undefined,
                                 )}
                             {(q
                                 ? visibleStandaloneDocs
-                                : folderDocuments(directoryStandaloneDocs, null)
+                                : documentLimitByLevel.root != null
+                                  ? folderDocuments(
+                                      directoryStandaloneDocs,
+                                      null,
+                                    ).slice(0, documentLimitByLevel.root)
+                                  : folderDocuments(
+                                      directoryStandaloneDocs,
+                                      null,
+                                    )
                             ).map((doc) => renderDocumentRow(doc))}
+                {!q && (
+                  <TableLoadMoreRow
+                    loading={false}
+                    hasMore={
+                      showTabs
+                        ? !!documentsHasMoreByLevel.files.root
+                        : rootDocumentsHasMore
+                    }
+                    itemCount={
+                      documentLimitByLevel.root != null
+                        ? Math.min(
+                            folderDocuments(directoryStandaloneDocs, null)
+                              .length,
+                            documentLimitByLevel.root,
+                          )
+                        : folderDocuments(directoryStandaloneDocs, null).length
+                    }
+                    loadingMore={
+                      showTabs
+                        ? !!loadingMoreDocumentsByLevel.files.root
+                        : loadingMoreRootDocuments
+                    }
+                    hasError={false}
+                    onLoadMore={() => {
+                      if (showTabs) {
+                        void loadMoreLibraryDocuments("files", null);
+                      } else {
+                        void onLoadMoreRootDocuments?.();
+                      }
+                    }}
+                  />
+                )}
+                {q && (
+                  <TableLoadMoreRow
+                    loading={false}
+                    hasMore={searchHasMore}
+                    itemCount={visibleStandaloneDocs.length}
+                    loadingMore={searchLoading}
+                    hasError={false}
+                    onLoadMore={() => void loadMoreSearchResults()}
+                  />
+                )}
                             {!q &&
                                 visibleStandaloneDocs.length === 0 &&
                                 directoryFileFolders.length === 0 &&
@@ -590,11 +1051,37 @@ export function FileDirectory({
                                     directoryTemplateFolders,
                                     directoryTemplateDocs,
                                     null,
+                    0,
+                    "templates",
                                 )}
                             {(q
                                 ? visibleTemplateDocs
                                 : folderDocuments(directoryTemplateDocs, null)
                             ).map((doc) => renderDocumentRow(doc))}
+                {!q && (
+                  <TableLoadMoreRow
+                    loading={false}
+                    hasMore={!!documentsHasMoreByLevel.templates.root}
+                    itemCount={
+                      folderDocuments(directoryTemplateDocs, null).length
+                    }
+                    loadingMore={!!loadingMoreDocumentsByLevel.templates.root}
+                    hasError={false}
+                    onLoadMore={() =>
+                      void loadMoreLibraryDocuments("templates", null)
+                    }
+                  />
+                )}
+                {q && (
+                  <TableLoadMoreRow
+                    loading={false}
+                    hasMore={searchHasMore}
+                    itemCount={visibleTemplateDocs.length}
+                    loadingMore={searchLoading}
+                    hasError={false}
+                    onLoadMore={() => void loadMoreSearchResults()}
+                  />
+                )}
                             {!q &&
                                 visibleTemplateDocs.length === 0 &&
                                 directoryTemplateFolders.length === 0 && (
@@ -607,57 +1094,64 @@ export function FileDirectory({
 
                     {activeTab === "projects" &&
                         visibleDirectoryProjects.map((project) => {
-                            const isExpanded =
-                                !!q || expandedProjects.has(project.id);
                             const docs = project.documents ?? [];
+                const isExpanded = q
+                  ? docs.length > 0 || expandedProjects.has(project.id)
+                  : expandedProjects.has(project.id);
                             const projectFolders = project.folders ?? [];
+                const projectRootKey = `${project.id}:root`;
+                const projectSelectionReady =
+                  loadedProjectLevels.has(projectRootKey) &&
+                  !projectDocumentsHasMoreByLevel[projectRootKey] &&
+                  childFolders(projectFolders, null).every((folder) =>
+                    folderIsFullyLoaded(
+                      projectFolders,
+                      folder.id,
+                      undefined,
+                      project.id,
+                    ),
+                  );
                             const projectDocIds = docs.map((doc) => doc.id);
                             const allProjectDocsSelected =
                                 projectDocIds.length > 0 &&
-                                projectDocIds.every((id) =>
-                                    selectedIds.has(id),
-                                );
+                  projectDocIds.every((id) => checkedIds.has(id));
                             const someProjectDocsSelected =
-                                projectDocIds.some((id) =>
-                                    selectedIds.has(id),
-                                ) && !allProjectDocsSelected;
+                  projectDocIds.some((id) => checkedIds.has(id)) &&
+                  !allProjectDocsSelected;
                             return (
                                 <div key={project.id}>
-                                    <button
-                                        type="button"
-                                        onClick={() =>
-                                            toggleFolder(project.id)
-                                        }
-                                        className={`w-full rounded-md ${DIRECTORY_GRID_CLASS} px-2 py-2 text-xs transition-all text-left ${APP_SURFACE_HOVER_CLASS}`}
+                                    <div
+                                        className={`w-full rounded-md ${DIRECTORY_GRID_CLASS} px-2 py-2 text-xs transition-all text-left ${LIQUID_GLASS_MODAL_ROW_HOVER_CLASS}`}
                                     >
-                                        <span
-                                            role="checkbox"
-                                            aria-checked={
+                                        <DirectorySelectionCheckbox
+                                            checked={allProjectDocsSelected}
+                                            indeterminate={
                                                 someProjectDocsSelected
-                                                    ? "mixed"
-                                                    : allProjectDocsSelected
                                             }
-                                            aria-label={`Select all files in ${project.name}`}
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                toggleDocuments(docs);
-                                            }}
-                                            className={`shrink-0 h-3.5 w-3.5 rounded border flex items-center justify-center ${
-                                                allProjectDocsSelected ||
-                                                someProjectDocsSelected
-                                                    ? "bg-gray-900 border-gray-900"
-                                                    : docs.length === 0
-                                                      ? "border-gray-200 bg-gray-50"
-                                                      : "border-gray-300"
-                                            }`}
+                                            disabled={
+                                                !projectSelectionReady ||
+                                                docs.length === 0
+                                            }
+                                            label={
+                                                projectSelectionReady
+                                                    ? `Select all files in ${project.name}`
+                                                    : `Expand ${project.name} and load all files before selecting it`
+                                            }
+                                            onChange={() =>
+                                                toggleDocuments(docs)
+                                            }
+                                        />
+                                        <button
+                                            type="button"
+                                            aria-expanded={isExpanded}
+                                            aria-label={`${isExpanded ? "Collapse" : "Expand"} ${project.name}`}
+                                            onClick={() =>
+                                                toggleFolder(project.id)
+                                            }
+                                            className={
+                                                DIRECTORY_ROW_ACTION_CLASS
+                                            }
                                         >
-                                            {allProjectDocsSelected && (
-                                                <Check className="h-2.5 w-2.5 text-white" />
-                                            )}
-                                            {someProjectDocsSelected && (
-                                                <span className="h-px w-2 bg-white" />
-                                            )}
-                                        </span>
                                         <ProjectSvgIcon
                                             open={isExpanded}
                                             className="h-3.5 w-3.5 shrink-0"
@@ -670,24 +1164,23 @@ export function FileDirectory({
                                                 </span>
                                             )}
                                         </span>
+                      <span className="truncate text-gray-400">-</span>
                                         <span className="truncate text-gray-400">
-                                            -
-                                        </span>
-                                        <span className="truncate text-gray-400">
-                                            {formatDate(project.created_at) ??
-                                                "--"}
+                        {formatDate(project.created_at) ?? "--"}
                                         </span>
                                         <span className="truncate text-right text-gray-400">
-                                            {docs.length}{" "}
-                                            {docs.length === 1
-                                                ? "file"
-                                                : "files"}
+                        {docs.length} {docs.length === 1 ? "file" : "files"}
                                         </span>
-                                    </button>
+                                        </button>
+                                    </div>
                                     {isExpanded && (
                                         <div>
-                                            {docs.length === 0 &&
-                                            projectFolders.length === 0 ? (
+                        {loadingProjectLevels.has(`${project.id}:root`) ? (
+                          <p className="flex items-center gap-2 pl-7 py-2 text-xs text-gray-400">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            Loading project files
+                          </p>
+                        ) : docs.length === 0 && projectFolders.length === 0 ? (
                                                 <p className="pl-7 py-1 text-xs text-gray-400">
                                                     Empty
                                                 </p>
@@ -699,18 +1192,33 @@ export function FileDirectory({
                                                             docs,
                                                             null,
                                                             1,
+                                undefined,
+                                project.id,
                                                         )}
-                                                    {(q
-                                                        ? docs
-                                                        : folderDocuments(
-                                                              docs,
+                            {(q ? docs : folderDocuments(docs, null)).map(
+                              (doc) => renderDocumentRow(doc, 1),
+                            )}
+                            {!q && (
+                              <TableLoadMoreRow
+                                autoLoadOnVisible
+                                loading={false}
+                                hasMore={
+                                  !!projectDocumentsHasMoreByLevel[
+                                    `${project.id}:root`
+                                  ]
+                                }
+                                itemCount={folderDocuments(docs, null).length}
+                                loadingMore={loadingProjectLevels.has(
+                                  `more:${project.id}:root`,
+                                )}
+                                hasError={false}
+                                onLoadMore={() =>
+                                  void loadMoreProjectDocuments(
+                                    project.id,
                                                               null,
                                                           )
-                                                    ).map((doc) =>
-                                                        renderDocumentRow(
-                                                            doc,
-                                                            1,
-                                                        ),
+                                }
+                              />
                                                     )}
                                                 </>
                                             )}
@@ -726,6 +1234,26 @@ export function FileDirectory({
                                 No projects yet
                             </p>
                         )}
+            {activeTab === "projects" && !q && (
+              <TableLoadMoreRow
+                loading={false}
+                hasMore={projectsHasMore}
+                itemCount={visibleDirectoryProjects.length}
+                loadingMore={loadingMoreProjects}
+                hasError={false}
+                onLoadMore={() => void loadMoreProjects()}
+              />
+            )}
+            {activeTab === "projects" && !!q && (
+              <TableLoadMoreRow
+                loading={false}
+                hasMore={searchHasMore}
+                itemCount={visibleDirectoryProjects.length}
+                loadingMore={searchLoading}
+                hasError={false}
+                onLoadMore={() => void loadMoreSearchResults()}
+              />
+            )}
                     </div>
                 </div>
             )}
@@ -759,9 +1287,7 @@ function FileDirectoryMetaCells({
         <>
             <span className="truncate text-gray-400">{version ?? "--"}</span>
             <span className="truncate text-gray-400">{created ?? "--"}</span>
-            <span className="truncate text-right text-gray-400">
-                {size ?? "--"}
-            </span>
+      <span className="truncate text-right text-gray-400">{size ?? "--"}</span>
         </>
     );
 }

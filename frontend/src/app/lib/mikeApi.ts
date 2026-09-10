@@ -1,10 +1,11 @@
 /**
- * Mike API client — all requests to the Node.js backend.
- * Attaches the Supabase auth token for user authentication.
+ * Mike API client — all browser requests use the same-origin `/api` gateway.
+ * Authentication is carried only by the backend-managed HttpOnly cookie.
  */
 
-import { supabase } from "@/app/lib/supabase";
+import { authenticatedFetch } from "@/app/lib/authEvents";
 import type {
+    AskInputResponseItem,
     AssistantEvent,
     Chat,
     ChatDetailOut,
@@ -13,14 +14,22 @@ import type {
     Folder,
     LibraryFolder,
     Message,
+    MessageFile,
     OpenSourceWorkflowContributorMode,
     OpenSourceWorkflowResponse,
     Project,
+    QuickAction,
     Workflow,
+    WorkflowAddon,
+    WorkflowReferenceDocument,
     WorkflowContributor,
     TabularReview,
     TabularReviewDetailOut,
 } from "@/app/components/shared/types";
+
+type AskInputsResponsePayload = {
+    responses: AskInputResponseItem[];
+};
 
 // Server-side shape before mapping
 interface ServerMessage {
@@ -28,7 +37,7 @@ interface ServerMessage {
     chat_id: string;
     role: "user" | "assistant";
     content: string | AssistantEvent[] | null;
-    files?: { filename: string; document_id?: string }[] | null;
+    files?: MessageFile[] | null;
     workflow?: { id: string; title: string } | null;
     citations?: Citation[] | null;
     created_at: string;
@@ -38,8 +47,8 @@ interface ServerChatDetailOut {
     messages: ServerMessage[];
 }
 
-const API_BASE =
-    process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
+export const API_BASE = "/api";
+const apiFetch: typeof fetch = authenticatedFetch;
 const isDev = process.env.NODE_ENV !== "production";
 const devLog = (...args: Parameters<typeof console.log>) => {
     if (isDev) console.log(...args);
@@ -48,20 +57,97 @@ const devLog = (...args: Parameters<typeof console.log>) => {
 export class MikeApiError extends Error {
     status: number;
     code: string | null;
-    data: unknown;
+    requestId: string | null;
 
     constructor(args: {
         message: string;
         status: number;
         code?: string | null;
-        data?: unknown;
+        requestId?: string | null;
     }) {
         super(args.message);
         this.name = "MikeApiError";
         this.status = args.status;
         this.code = args.code ?? null;
-        this.data = args.data ?? null;
+        this.requestId = args.requestId ?? null;
     }
+}
+
+export const INTERNAL_ERROR_MESSAGE = "Something went wrong. Please try again.";
+export const MALFORMED_ERROR_RESPONSE_MESSAGE =
+    "The request could not be completed. Please try again.";
+
+export type MatterDriveFolderRole =
+    | "matter_owner"
+    | "editor"
+    | "viewer"
+    | "technical_operator"
+    | "org_owner"
+    | "workspace_admin";
+
+export interface MatterDriveFolderSettings {
+    matter_id: string;
+    project_id: string;
+    drive_folder_id: string | null;
+    role: MatterDriveFolderRole;
+    can_edit: boolean;
+}
+
+export async function getMatterDriveFolder(
+    projectId: string,
+    matterId: string,
+): Promise<MatterDriveFolderSettings> {
+    return apiRequest<MatterDriveFolderSettings>(
+        `/projects/${encodeURIComponent(projectId)}/matters/${encodeURIComponent(matterId)}/drive-folder`,
+    );
+}
+
+export async function updateMatterDriveFolder(
+    projectId: string,
+    matterId: string,
+    driveFolderId: string | null,
+): Promise<MatterDriveFolderSettings> {
+    return apiRequest<MatterDriveFolderSettings>(
+        `/projects/${encodeURIComponent(projectId)}/matters/${encodeURIComponent(matterId)}/drive-folder`,
+        {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ drive_folder_id: driveFolderId }),
+        },
+    );
+}
+
+export type DrivePublicationOutcome =
+    | "pending"
+    | "uploaded"
+    | "unknown_outcome"
+    | "reconciled"
+    | "failed";
+
+export interface DrivePublicationStatus {
+    publication_id: string;
+    export_id: string;
+    execution_id: string;
+    review_revision: number;
+    revision: number;
+    outcome: DrivePublicationOutcome;
+    attempts: number;
+    approved_artifact_sha256: string;
+    provider_file_id: string | null;
+    failure_code: string | null;
+}
+
+export type DrivePublicationDisposition =
+    | "uploaded"
+    | "replayed"
+    | "reconciled"
+    | "failed"
+    | "unknown_outcome";
+
+export interface DrivePublicationWriteResult {
+    outcome: DrivePublicationOutcome;
+    disposition: DrivePublicationDisposition;
+    publication: DrivePublicationStatus;
 }
 
 export function isMfaRequiredError(error: unknown) {
@@ -72,23 +158,13 @@ export function isMfaRequiredError(error: unknown) {
     );
 }
 
-async function getAuthHeader(): Promise<Record<string, string>> {
-    const {
-        data: { session },
-    } = await supabase.auth.getSession();
-    if (!session?.access_token) return {};
-    return { Authorization: `Bearer ${session.access_token}` };
-}
-
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
-    const authHeaders = await getAuthHeader();
     const { headers: initHeaders, ...restInit } = init ?? {};
-    const response = await fetch(`${API_BASE}${path}`, {
+    const response = await apiFetch(`${API_BASE}${path}`, {
         cache: "no-store",
         ...restInit,
         headers: {
             Accept: "application/json",
-            ...authHeaders,
             ...(initHeaders as Record<string, string> | undefined),
         },
     });
@@ -111,12 +187,10 @@ async function apiBlobRequest(path: string): Promise<{
     blob: Blob;
     filename: string | null;
 }> {
-    const authHeaders = await getAuthHeader();
-    const response = await fetch(`${API_BASE}${path}`, {
+    const response = await apiFetch(`${API_BASE}${path}`, {
         cache: "no-store",
         headers: {
             Accept: "application/json",
-            ...authHeaders,
         },
     });
 
@@ -138,375 +212,44 @@ async function toApiError(response: Response, path: string) {
         const parsed = JSON.parse(text) as {
             detail?: unknown;
             code?: unknown;
+            request_id?: unknown;
         };
+        const requestId =
+            typeof parsed.request_id === "string"
+                ? parsed.request_id
+                : response.headers.get("x-request-id");
         devLog("[mike-api] non-ok response", {
             path,
             status: response.status,
             code: parsed.code,
-            detail: parsed.detail,
+            requestId,
         });
         return new MikeApiError({
             status: response.status,
             code: typeof parsed.code === "string" ? parsed.code : null,
+            requestId,
             message:
-                typeof parsed.detail === "string" && parsed.detail
-                    ? parsed.detail
-                    : `API error: ${response.status}`,
-            data: parsed,
+                response.status >= 500
+                    ? INTERNAL_ERROR_MESSAGE
+                    : typeof parsed.detail === "string" && parsed.detail
+                      ? parsed.detail
+                      : `API error: ${response.status}`,
         });
     } catch {
         devLog("[mike-api] non-ok non-json response", {
             path,
             status: response.status,
-            bodyPreview: text.slice(0, 200),
+            requestId: response.headers.get("x-request-id"),
         });
         return new MikeApiError({
             status: response.status,
-            message: text || `API error: ${response.status}`,
+            requestId: response.headers.get("x-request-id"),
+            message:
+                response.status >= 500
+                    ? INTERNAL_ERROR_MESSAGE
+                    : MALFORMED_ERROR_RESPONSE_MESSAGE,
         });
     }
-}
-
-export type AiModelRoute = {
-    provider: string;
-    model: string;
-    credential_ref: string;
-};
-
-export type AiExecution = {
-    id: string;
-    status: "pending" | "running" | "succeeded" | "failed";
-    error_class: string | null;
-    matter_id: string | null;
-    project_id: string;
-    document_id: string;
-    document_version_id: string;
-    route: AiModelRoute;
-    input_sha256: string;
-    document_content_sha256: string;
-    output_id: string | null;
-    receipt_id: string | null;
-    created_at: string;
-    started_at: string | null;
-    finished_at: string | null;
-};
-
-export type AiReceipt = {
-    id: string;
-    execution_id: string;
-    receipt_version: string;
-    canonical_json: Record<string, unknown>;
-    receipt_sha256: string;
-    created_at: string;
-};
-
-export type AiOutput = {
-    id: string;
-    execution_id: string;
-    output_format: "markdown";
-    output_text: string;
-    output_sha256: string;
-    citation_refs: Record<string, unknown>[];
-    created_at: string;
-};
-
-export type AiReviewStatus = "in_progress" | "approved" | "changes_requested";
-export type AiReviewItemStatus = "pending" | "accepted" | "rejected" | "edited";
-
-export type AiReviewItem = {
-    id: string;
-    review_id: string;
-    item_key: string;
-    original_text: string;
-    finding_text: string;
-    citation_refs: Record<string, unknown>[];
-    status: AiReviewItemStatus;
-    comment: string | null;
-    created_at: string;
-    updated_at: string;
-};
-
-export type AiReviewDecision = {
-    id: string;
-    review_id: string;
-    review_item_id: string | null;
-    actor_user_id: string;
-    decision: AiReviewItemStatus | "approved" | "changes_requested";
-    before_state: Record<string, unknown>;
-    after_state: Record<string, unknown>;
-    comment: string | null;
-    created_at: string;
-};
-
-export type AiReview = {
-    id: string;
-    execution_id: string;
-    matter_id: string;
-    project_id: string;
-    reviewer_user_id: string;
-    status: AiReviewStatus;
-    created_at: string;
-    completed_at: string | null;
-    items: AiReviewItem[];
-    decisions: AiReviewDecision[];
-};
-
-export type AiReviewReport = {
-    id: string;
-    review_id: string;
-    execution_id: string;
-    matter_id: string;
-    project_id: string;
-    source_document_version_id: string;
-    document_id: string;
-    document_version_id: string;
-    report_version: number;
-    filename: string;
-    content_sha256: string;
-    actor_user_id: string;
-    created_at: string;
-    download_url: string;
-};
-
-export type AiReviewDrivePublicationStatus = "pending" | "published" | "failed";
-
-export type AiReviewDrivePublication = {
-    id: string;
-    export_id: string;
-    review_id: string;
-    execution_id: string;
-    matter_id: string;
-    project_id: string;
-    drive_folder_id: string;
-    file_id: string | null;
-    sha256: string;
-    format_version: string;
-    status: AiReviewDrivePublicationStatus;
-    size_bytes: number | null;
-    checksum: string | null;
-    failure_code: string | null;
-    error?: string | null;
-    actor_user_id: string;
-    created_at: string;
-    updated_at: string;
-};
-
-export type MatterDriveFolderSettings = {
-    matter_id: string;
-    project_id: string;
-    drive_folder_id: string | null;
-    role: "matter_owner" | "editor" | "viewer" | "technical_operator" | string;
-    can_edit: boolean;
-};
-
-export async function createAiExecutionReview(
-    projectId: string,
-    executionId: string,
-): Promise<AiReview> {
-    return apiRequest<AiReview>(
-        `/projects/${projectId}/ai-executions/${executionId}/review`,
-        {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({}),
-        },
-    );
-}
-
-export async function getAiExecutionReview(
-    projectId: string,
-    executionId: string,
-): Promise<AiReview> {
-    return apiRequest<AiReview>(
-        `/projects/${projectId}/ai-executions/${executionId}/review`,
-    );
-}
-
-export async function decideAiReviewItem(
-    projectId: string,
-    executionId: string,
-    itemId: string,
-    payload: {
-        decision: "accepted" | "rejected" | "edited";
-        finding_text?: string;
-        comment?: string | null;
-    },
-): Promise<{ item: AiReviewItem; decision: AiReviewDecision }> {
-    return apiRequest<{ item: AiReviewItem; decision: AiReviewDecision }>(
-        `/projects/${projectId}/ai-executions/${executionId}/review/items/${itemId}/decision`,
-        {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        },
-    );
-}
-
-export async function completeAiExecutionReview(
-    projectId: string,
-    executionId: string,
-    payload: { status: "approved" | "changes_requested"; comment?: string | null },
-): Promise<AiReview> {
-    return apiRequest<AiReview>(
-        `/projects/${projectId}/ai-executions/${executionId}/review/complete`,
-        {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        },
-    );
-}
-
-export async function exportAiReviewReport(
-    projectId: string,
-    executionId: string,
-): Promise<AiReviewReport> {
-    return apiRequest<AiReviewReport>(
-        `/projects/${projectId}/ai-executions/${executionId}/review/report`,
-        {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({}),
-        },
-    );
-}
-
-export async function downloadAiReviewReport(
-    projectId: string,
-    executionId: string,
-): Promise<{ blob: Blob; filename: string | null; report: AiReviewReport }> {
-    const report = await exportAiReviewReport(projectId, executionId);
-    const download = await apiBlobRequest(
-        `/projects/${projectId}/ai-executions/${executionId}/review/report/download`,
-    );
-    return { ...download, report };
-}
-
-function isAiReviewDrivePublication(
-    value: unknown,
-): value is AiReviewDrivePublication {
-    if (!value || typeof value !== "object") return false;
-    const row = value as Record<string, unknown>;
-    return (
-        typeof row.id === "string" &&
-        typeof row.export_id === "string" &&
-        typeof row.review_id === "string" &&
-        typeof row.execution_id === "string" &&
-        typeof row.matter_id === "string" &&
-        typeof row.project_id === "string" &&
-        typeof row.drive_folder_id === "string" &&
-        typeof row.sha256 === "string" &&
-        (row.status === "pending" ||
-            row.status === "published" ||
-            row.status === "failed")
-    );
-}
-
-export async function publishAiReviewReportToDrive(
-    projectId: string,
-    executionId: string,
-): Promise<AiReviewDrivePublication> {
-    try {
-        return await apiRequest<AiReviewDrivePublication>(
-            `/projects/${projectId}/ai-executions/${executionId}/review/report/publish`,
-            {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({}),
-            },
-        );
-    } catch (error) {
-        if (error instanceof MikeApiError && error.code === "drive_publication_failed") {
-            const publication =
-                (error.data as { publication?: unknown } | null)?.publication;
-            if (isAiReviewDrivePublication(publication)) return publication;
-        }
-        throw error;
-    }
-}
-
-export async function getAiReviewDrivePublication(
-    projectId: string,
-    executionId: string,
-): Promise<AiReviewDrivePublication> {
-    return apiRequest<AiReviewDrivePublication>(
-        `/projects/${projectId}/ai-executions/${executionId}/review/report/publish`,
-    );
-}
-
-export async function getMatterDriveFolder(
-    projectId: string,
-    matterId: string,
-): Promise<MatterDriveFolderSettings> {
-    return apiRequest<MatterDriveFolderSettings>(
-        `/projects/${projectId}/matters/${matterId}/drive-folder`,
-    );
-}
-
-export async function updateMatterDriveFolder(
-    projectId: string,
-    matterId: string,
-    driveFolderId: string | null,
-): Promise<MatterDriveFolderSettings> {
-    return apiRequest<MatterDriveFolderSettings>(
-        `/projects/${projectId}/matters/${matterId}/drive-folder`,
-        {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ drive_folder_id: driveFolderId }),
-        },
-    );
-}
-
-export async function listAiExecutions(
-    projectId: string,
-): Promise<AiExecution[]> {
-    return apiRequest<AiExecution[]>(
-        `/projects/${projectId}/ai-executions`,
-    );
-}
-
-export async function createAiExecution(
-    projectId: string,
-    payload: {
-        matter_id: string;
-        document_version_id: string;
-        workflow_id?: string;
-        route: AiModelRoute;
-    },
-): Promise<AiExecution> {
-    return apiRequest<AiExecution>(`/projects/${projectId}/ai-executions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-    });
-}
-
-export async function getAiExecution(
-    projectId: string,
-    executionId: string,
-): Promise<AiExecution> {
-    return apiRequest<AiExecution>(
-        `/projects/${projectId}/ai-executions/${executionId}`,
-    );
-}
-
-export async function getAiExecutionReceipt(
-    projectId: string,
-    executionId: string,
-): Promise<AiReceipt> {
-    return apiRequest<AiReceipt>(
-        `/projects/${projectId}/ai-executions/${executionId}/receipt`,
-    );
-}
-
-export async function getAiExecutionOutput(
-    projectId: string,
-    executionId: string,
-): Promise<AiOutput> {
-    return apiRequest<AiOutput>(
-        `/projects/${projectId}/ai-executions/${executionId}/output`,
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -520,15 +263,146 @@ export async function listProjects(options?: {
     return apiRequest<Project[]>(`/projects${query}`);
 }
 
+// Paginated overview sibling of listProjects(), used by ProjectsOverview.tsx.
+// Deliberately a separate function, not an overload of listProjects — the
+// backend route decides whether to paginate based on whether any of these
+// query params are present at all, so listProjects() must keep sending none
+// of them (legacy project pickers still need the full unpaginated list).
+export async function listProjectsPage(pagination?: {
+    limit?: number;
+    offset?: number;
+    search?: string;
+    sortKey?: string;
+    sortDirection?: "asc" | "desc";
+    scope?: "all" | "mine" | "shared";
+    practice?: string;
+    ownerUserId?: string;
+    signal?: AbortSignal;
+}): Promise<Project[]> {
+    const params = new URLSearchParams();
+    if (pagination?.limit) params.set("limit", String(pagination.limit));
+    if (pagination?.offset) params.set("offset", String(pagination.offset));
+    if (pagination?.search) params.set("search", pagination.search);
+    if (pagination?.sortKey) params.set("sort_key", pagination.sortKey);
+    if (pagination?.sortDirection)
+        params.set("sort_direction", pagination.sortDirection);
+    if (pagination?.scope && pagination.scope !== "all")
+        params.set("scope", pagination.scope);
+    if (pagination?.practice) params.set("practice", pagination.practice);
+    if (pagination?.ownerUserId)
+        params.set("owner_user_id", pagination.ownerUserId);
+
+    const qs = params.toString() ? `?${params.toString()}` : "";
+    return apiRequest<Project[]>(`/projects${qs}`, {
+        signal: pagination?.signal,
+    });
+}
+
+export async function listProjectSummaries(pagination?: {
+    limit?: number;
+    offset?: number;
+    signal?: AbortSignal;
+}): Promise<Project[]> {
+    const params = new URLSearchParams();
+    if (pagination?.limit != null)
+        params.set("limit", String(pagination.limit));
+    if (pagination?.offset != null)
+        params.set("offset", String(pagination.offset));
+    params.set("view", "summary");
+    return apiRequest<Project[]>(`/projects?${params.toString()}`, {
+        signal: pagination?.signal,
+    });
+}
+
+export interface ProjectDirectoryLevel {
+    documents: Document[];
+    folders: Folder[];
+    documentsHasMore: boolean;
+}
+
+export async function getProjectDirectoryLevel(
+    projectId: string,
+    options?: {
+        parentFolderId?: string | null;
+        limit?: number;
+        offset?: number;
+        signal?: AbortSignal;
+    },
+): Promise<ProjectDirectoryLevel> {
+    const params = new URLSearchParams();
+    if (options?.parentFolderId)
+        params.set("parent_folder_id", options.parentFolderId);
+    if (options?.limit != null) params.set("limit", String(options.limit));
+    if (options?.offset != null) params.set("offset", String(options.offset));
+    const query = params.toString();
+    return apiRequest<ProjectDirectoryLevel>(
+        `/projects/${projectId}/directory${query ? `?${query}` : ""}`,
+        {
+            signal: options?.signal,
+        },
+    );
+}
+
+export async function searchProjectDirectory(options: {
+    search: string;
+    limit?: number;
+    offset?: number;
+    signal?: AbortSignal;
+}): Promise<Project[]> {
+    const params = new URLSearchParams({
+        view: "directory-search",
+        search: options.search,
+    });
+    if (options.limit != null) params.set("limit", String(options.limit));
+    if (options.offset != null) params.set("offset", String(options.offset));
+    return apiRequest<Project[]>(`/projects?${params}`, {
+        signal: options.signal,
+    });
+}
+
+export async function listProjectIds(options?: {
+    search?: string;
+    scope?: "all" | "mine" | "shared";
+    practice?: string;
+    ownerUserId?: string;
+    signal?: AbortSignal;
+}): Promise<{ id: string; user_id: string }[]> {
+    const params = new URLSearchParams();
+    if (options?.search) params.set("search", options.search);
+    if (options?.scope && options.scope !== "all")
+        params.set("scope", options.scope);
+    if (options?.practice) params.set("practice", options.practice);
+    if (options?.ownerUserId) params.set("owner_user_id", options.ownerUserId);
+
+    const qs = params.toString() ? `?${params.toString()}` : "";
+    return apiRequest<{ id: string; user_id: string }[]>(`/projects/ids${qs}`, {
+        signal: options?.signal,
+    });
+}
+
+export interface ProjectFilterOptions {
+    practices: string[];
+    owners: { value: string; label: string }[];
+}
+
+export async function getProjectFilterOptions(
+    signal?: AbortSignal,
+): Promise<ProjectFilterOptions> {
+    return apiRequest<ProjectFilterOptions>("/projects/filter-options", {
+        signal,
+    });
+}
+
 export async function createProject(
     name: string,
     cm_number?: string,
     practice?: string,
+    shared_with?: string[],
 ): Promise<Project> {
     return apiRequest<Project>("/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, cm_number, practice }),
+        body: JSON.stringify({ name, cm_number, practice, shared_with }),
     });
 }
 
@@ -569,16 +443,50 @@ export async function exportTabularReviewsData(): Promise<{
     return apiBlobRequest("/user/tabular-reviews/export");
 }
 
+export type PracticeSetting =
+    "private_practice" | "in_house" | "not_practising";
+
+export type ProfessionalTitle =
+    | "Partner"
+    | "Senior Associate"
+    | "Associate"
+    | "Law Clerk"
+    | "Counsel"
+    | "General Counsel"
+    | "Legal Counsel"
+    | "Other";
+
+export interface PersonalisationDetails {
+    jurisdiction?: string | null;
+    practiceSetting?: PracticeSetting | null;
+    professionalTitle?: ProfessionalTitle | null;
+    practiceAreas?: string[];
+}
+
 export interface UserProfile {
     displayName: string | null;
     organisation: string | null;
+    jurisdiction: string | null;
+    practiceSetting: PracticeSetting | null;
+    professionalTitle: ProfessionalTitle | null;
+    practiceAreas: string[];
+    onboardingVersion: number | null;
+    onboardingComplete: boolean;
+    passwordSet: boolean;
     messageCreditsUsed: number;
     creditsResetDate: string;
     creditsRemaining: number;
     tier: string;
-    titleModel: string;
-    tabularModel: string;
+    titleModel: string | null;
+    tabularModel: string | null;
+    lastSelectedChatModel: string | null;
+    lastSelectedReasoningLevel: NonNullable<Message["reasoning"]>;
     mfaOnLogin: boolean;
+    quickActionsVisible: boolean;
+    darkMode: boolean;
+    openRouterModels: string[];
+    vercelModels: string[];
+    openCodeGoModels: string[];
     apiKeyStatus: ApiKeyStatus;
 }
 
@@ -586,6 +494,81 @@ export interface UserLookupResult {
     exists: boolean;
     email: string;
     display_name: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Audit history
+// ---------------------------------------------------------------------------
+
+export interface AuditEvent {
+    id: string;
+    created_at: string;
+    user_display_name: string | null;
+    user_email: string | null;
+    action: string;
+    status: string;
+    title: string | null;
+    surface: string | null;
+    project_id: string | null;
+    chat_id: string | null;
+    document_id: string | null;
+    review_id: string | null;
+    model: string | null;
+    detail: Record<string, unknown> | null;
+}
+
+export async function getAuditHistory(
+    params: {
+        q?: string;
+        action?: string;
+        status?: string;
+        surface?: string;
+        from?: string;
+        to?: string;
+        sortBy?: "created_at" | "user_email" | "title" | "model";
+        sortDirection?: "asc" | "desc";
+        page?: number;
+    },
+    signal?: AbortSignal,
+): Promise<{
+    events: AuditEvent[];
+    total: number;
+    page: number;
+    pageSize: number;
+}> {
+    const qs = new URLSearchParams();
+    if (params.q) qs.set("q", params.q);
+    if (params.action) qs.set("action", params.action);
+    if (params.status) qs.set("status", params.status);
+    if (params.surface) qs.set("surface", params.surface);
+    if (params.from) qs.set("from", params.from);
+    if (params.to) qs.set("to", params.to);
+    if (params.sortBy) qs.set("sort_by", params.sortBy);
+    if (params.sortDirection) qs.set("sort_dir", params.sortDirection);
+    if (params.page) qs.set("page", String(params.page));
+    return apiRequest(`/audit?${qs.toString()}`, { signal });
+}
+
+export async function exportAuditHistory(params: {
+    q?: string;
+    action?: string;
+    status?: string;
+    surface?: string;
+    from?: string;
+    to?: string;
+    sortBy?: "created_at" | "user_email" | "title" | "model";
+    sortDirection?: "asc" | "desc";
+}): Promise<{ blob: Blob; filename: string | null }> {
+    const qs = new URLSearchParams();
+    if (params.q) qs.set("q", params.q);
+    if (params.action) qs.set("action", params.action);
+    if (params.status) qs.set("status", params.status);
+    if (params.surface) qs.set("surface", params.surface);
+    if (params.from) qs.set("from", params.from);
+    if (params.to) qs.set("to", params.to);
+    if (params.sortBy) qs.set("sort_by", params.sortBy);
+    if (params.sortDirection) qs.set("sort_dir", params.sortDirection);
+    return apiBlobRequest(`/audit/export?${qs.toString()}`);
 }
 
 export async function getUserProfile(): Promise<UserProfile> {
@@ -603,13 +586,40 @@ export async function lookupUserByEmail(
 export async function updateUserProfile(payload: {
     displayName?: string | null;
     organisation?: string | null;
-    titleModel?: string;
-    tabularModel?: string;
+    jurisdiction?: string | null;
+    practiceSetting?: PracticeSetting | null;
+    professionalTitle?: ProfessionalTitle | null;
+    practiceAreas?: string[];
+    titleModel?: string | null;
+    tabularModel?: string | null;
+    lastSelectedChatModel?: string | null;
+    lastSelectedReasoningLevel?: NonNullable<Message["reasoning"]>;
+    quickActionsVisible?: boolean;
+    darkMode?: boolean;
+    openRouterModels?: string[];
+    vercelModels?: string[];
+    openCodeGoModels?: string[];
 }): Promise<UserProfile> {
     return apiRequest<UserProfile>("/user/profile", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+    });
+}
+
+export async function completeUserOnboarding(
+    payload: PersonalisationDetails = {},
+): Promise<UserProfile> {
+    return apiRequest<UserProfile>("/user/onboarding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    });
+}
+
+export async function syncUserPasswordSet(): Promise<UserProfile> {
+    return apiRequest<UserProfile>("/user/security/password-set", {
+        method: "POST",
     });
 }
 
@@ -628,8 +638,7 @@ export type ApiKeyProvider =
     | "gemini"
     | "openai"
     | "openrouter"
-    | "deepseek"
-    | "opencode-zen"
+    | "vercel"
     | "opencode-go";
 export type ApiKeySource = "user" | "env" | null;
 export type ApiKeyState = Record<
@@ -654,6 +663,17 @@ export interface OllamaModelOption {
     group: "Local";
 }
 
+export interface RouterCatalogModel {
+    id: string;
+    label: string;
+    pricing?: {
+        input?: string;
+        output?: string;
+        variesByProvider?: boolean;
+        tiered?: boolean;
+    };
+}
+
 export async function getOllamaModels(): Promise<OllamaModelOption[]> {
     const { models } = await apiRequest<{ models: OllamaModelOption[] }>(
         "/models/ollama",
@@ -661,41 +681,25 @@ export async function getOllamaModels(): Promise<OllamaModelOption[]> {
     return models;
 }
 
-export type GovernedLlmProvider = ApiKeyProvider;
-
-export interface ModelRoute {
-    provider: GovernedLlmProvider;
-    model: string;
-    credential_ref: string;
+export async function getOpenRouterModels(): Promise<RouterCatalogModel[]> {
+    const { models } = await apiRequest<{ models: RouterCatalogModel[] }>(
+        "/models/openrouter",
+    );
+    return models;
 }
 
-export function modelRouteFromChat(chat: Chat): ModelRoute | null {
-    if (!chat.model_provider || !chat.model || !chat.credential_ref) return null;
-    return {
-        provider: chat.model_provider,
-        model: chat.model,
-        credential_ref: chat.credential_ref,
-    };
+export async function getVercelModels(): Promise<RouterCatalogModel[]> {
+    const { models } = await apiRequest<{ models: RouterCatalogModel[] }>(
+        "/models/vercel",
+    );
+    return models;
 }
 
-export interface CatalogRoute extends ModelRoute {
-    source: "live" | "curated";
-    availability: "catalog";
-    catalog_available: true;
-}
-
-export interface ModelCatalog {
-    routes: CatalogRoute[];
-    catalogs: {
-        provider: GovernedLlmProvider;
-        credential_ref: string;
-        source: "live" | "curated";
-        catalog_available: boolean;
-    }[];
-}
-
-export async function getModelCatalog(): Promise<ModelCatalog> {
-    return apiRequest<ModelCatalog>("/models/catalog");
+export async function getOpenCodeGoModels(): Promise<RouterCatalogModel[]> {
+    const { models } = await apiRequest<{ models: RouterCatalogModel[] }>(
+        "/models/opencode-go",
+    );
+    return models;
 }
 
 export async function saveApiKey(
@@ -799,13 +803,16 @@ export async function refreshMcpConnectorTools(
     );
 }
 
-export async function startMcpConnectorOAuth(
-    connectorId: string,
-): Promise<{ authorizationUrl: string | null; alreadyAuthorized: boolean }> {
-    return apiRequest<{ authorizationUrl: string | null; alreadyAuthorized: boolean }>(
-        `/user/mcp-connectors/${connectorId}/oauth/start`,
-        { method: "POST" },
-    );
+export async function startMcpConnectorOAuth(connectorId: string): Promise<{
+    authorizationUrl: string | null;
+    alreadyAuthorized: boolean;
+    callbackOrigin: string;
+}> {
+    return apiRequest<{
+        authorizationUrl: string | null;
+        alreadyAuthorized: boolean;
+        callbackOrigin: string;
+    }>(`/user/mcp-connectors/${connectorId}/oauth/start`, { method: "POST" });
 }
 
 export async function setMcpToolEnabled(
@@ -827,12 +834,107 @@ export async function getProject(projectId: string): Promise<Project> {
     return apiRequest<Project>(`/projects/${projectId}`);
 }
 
+/** Read persisted review data; consumers must validate scope and runtime shape. */
+export async function getHumanReviewState(
+    projectId: string,
+    executionId: string,
+): Promise<unknown> {
+    return apiRequest<unknown>(
+        `/projects/${encodeURIComponent(projectId)}/ai-executions/${encodeURIComponent(executionId)}/review`,
+    );
+}
+
+export type ApprovedReviewReportResult = {
+    export_id: string;
+    artifact: {
+        idempotency_key: string;
+        review_id: string;
+        review_revision: number;
+        execution_id: string;
+        organization_id: string;
+        matter_id: string;
+        project_id: string;
+        document_id: string;
+        document_version_id: string;
+        source_document_sha256: string;
+        evidence_receipt_sha256: string;
+        filename: string;
+        mime_type: string;
+        artifact_sha256: string;
+    };
+    receipt: {
+        disposition: "applied" | "replayed";
+        review_id: string;
+        review_revision: number;
+        execution_id: string;
+        artifact_sha256: string;
+        idempotency_key: string;
+    };
+};
+
+export async function createApprovedReviewReport(
+    projectId: string,
+    executionId: string,
+    expectedReviewRevision: number,
+    idempotencyKey: string,
+): Promise<ApprovedReviewReportResult> {
+    const path = `/projects/${encodeURIComponent(projectId)}/ai-executions/${encodeURIComponent(executionId)}/review/approved-report`;
+    return apiRequest<ApprovedReviewReportResult>(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            expected_review_revision: expectedReviewRevision,
+            idempotency_key: idempotencyKey,
+        }),
+    });
+}
+
+export async function getDrivePublicationStatus(
+    projectId: string,
+    executionId: string,
+    publicationId: string,
+): Promise<DrivePublicationStatus> {
+    const path = `/projects/${encodeURIComponent(projectId)}/ai-executions/${encodeURIComponent(executionId)}/review/drive-publications/${encodeURIComponent(publicationId)}`;
+    return apiRequest<DrivePublicationStatus>(path);
+}
+
+export async function publishDrivePublication(
+    projectId: string,
+    executionId: string,
+    exportId: string,
+    expectedReviewRevision: number,
+): Promise<DrivePublicationWriteResult> {
+    const path = `/projects/${encodeURIComponent(projectId)}/ai-executions/${encodeURIComponent(executionId)}/review/drive-publications`;
+    return apiRequest<DrivePublicationWriteResult>(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            export_id: exportId,
+            expected_review_revision: expectedReviewRevision,
+        }),
+    });
+}
+
+export async function reconcileDrivePublication(
+    projectId: string,
+    executionId: string,
+    publicationId: string,
+): Promise<DrivePublicationWriteResult> {
+    const path = `/projects/${encodeURIComponent(projectId)}/ai-executions/${encodeURIComponent(executionId)}/review/drive-publications/${encodeURIComponent(publicationId)}/reconcile`;
+    return apiRequest<DrivePublicationWriteResult>(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+    });
+}
+
 export async function updateProject(
     projectId: string,
     payload: {
         name?: string;
         cm_number?: string;
         practice?: string | null;
+        shared_with?: string[];
     },
 ): Promise<Project> {
     return apiRequest<Project>(`/projects/${projectId}`, {
@@ -846,6 +948,21 @@ export async function deleteProject(projectId: string): Promise<void> {
     await apiRequest(`/projects/${projectId}`, { method: "DELETE" });
 }
 
+export interface ProjectPeople {
+    owner: {
+        user_id: string;
+        email: string | null;
+        display_name: string | null;
+    };
+    members: { email: string; display_name: string | null }[];
+}
+
+export async function getProjectPeople(
+    projectId: string,
+): Promise<ProjectPeople> {
+    return apiRequest<ProjectPeople>(`/projects/${projectId}/people`);
+}
+
 // ---------------------------------------------------------------------------
 // Documents
 // ---------------------------------------------------------------------------
@@ -853,6 +970,42 @@ export async function deleteProject(projectId: string): Promise<void> {
 // ---------------------------------------------------------------------------
 // Folders
 // ---------------------------------------------------------------------------
+
+export type FolderConflictResolution = "error" | "reuse" | "rename";
+
+export type FolderPathResolution<TFolder> =
+    | {
+          conflict: true;
+          folder_name: string;
+          existing_folder_id: string;
+          suggested_name: string;
+      }
+    | {
+          conflict: false;
+          folder_id: string;
+          resolved_name: string;
+          folders: TFolder[];
+      };
+
+export async function resolveProjectFolderPath(
+    projectId: string,
+    segments: string[],
+    baseFolderId: string | null,
+    conflictResolution: FolderConflictResolution = "error",
+): Promise<FolderPathResolution<Folder>> {
+    return apiRequest<FolderPathResolution<Folder>>(
+        `/projects/${projectId}/folder-paths/resolve`,
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                segments,
+                base_folder_id: baseFolderId,
+                conflict_resolution: conflictResolution,
+            }),
+        },
+    );
+}
 
 export async function createProjectFolder(
     projectId: string,
@@ -874,14 +1027,11 @@ export async function renameProjectFolder(
     folderId: string,
     name: string,
 ): Promise<Folder> {
-    return apiRequest<Folder>(
-        `/projects/${projectId}/folders/${folderId}`,
-        {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name }),
-        },
-    );
+    return apiRequest<Folder>(`/projects/${projectId}/folders/${folderId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+    });
 }
 
 export async function deleteProjectFolder(
@@ -898,14 +1048,11 @@ export async function moveSubfolderToFolder(
     folderId: string,
     parentFolderId: string | null,
 ): Promise<Folder> {
-    return apiRequest<Folder>(
-        `/projects/${projectId}/folders/${folderId}`,
-        {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ parent_folder_id: parentFolderId }),
-        },
-    );
+    return apiRequest<Folder>(`/projects/${projectId}/folders/${folderId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parent_folder_id: parentFolderId }),
+    });
 }
 
 export async function moveDocumentToFolder(
@@ -943,27 +1090,151 @@ export type LibraryKind = "files" | "templates";
 export interface LibraryCollection {
     documents: Document[];
     folders: LibraryFolder[];
+    documentsHasMore: boolean;
+}
+
+export interface LibraryPagination {
+    limit?: number;
+    offset?: number;
+}
+
+export interface LibrarySearchParams extends LibraryPagination {
+    search?: string;
+    fileType?: string;
+    sortKey?: "name" | "type" | "size" | "version" | "created" | "updated";
+    sortDirection?: "asc" | "desc";
+    signal?: AbortSignal;
+}
+
+export interface LibrarySearchResults {
+    documents: Document[];
+    documentsHasMore: boolean;
+}
+
+function libraryPaginationQuery(pagination?: LibraryPagination): string {
+    const params = new URLSearchParams();
+    if (pagination?.limit != null)
+        params.set("limit", String(pagination.limit));
+    if (pagination?.offset != null)
+        params.set("offset", String(pagination.offset));
+    const qs = params.toString();
+    return qs ? `?${qs}` : "";
 }
 
 export async function getLibrary(
     kind: LibraryKind,
+    pagination?: LibraryPagination,
 ): Promise<LibraryCollection> {
-    return apiRequest<LibraryCollection>(`/library/${kind}`);
+    return apiRequest<LibraryCollection>(
+        `/library/${kind}${libraryPaginationQuery(pagination)}`,
+    );
+}
+
+export async function getLibraryFolderChildren(
+    kind: LibraryKind,
+    folderId: string,
+    pagination?: LibraryPagination,
+): Promise<LibraryCollection> {
+    const params = new URLSearchParams({ parent_folder_id: folderId });
+    if (pagination?.limit != null)
+        params.set("limit", String(pagination.limit));
+    if (pagination?.offset != null)
+        params.set("offset", String(pagination.offset));
+    return apiRequest<LibraryCollection>(
+        `/library/${kind}?${params.toString()}`,
+    );
+}
+
+export async function getLibraryFolderPath(
+    kind: LibraryKind,
+    folderId: string,
+): Promise<{ folders: LibraryFolder[] }> {
+    return apiRequest<{ folders: LibraryFolder[] }>(
+        `/library/${kind}/folders/${folderId}`,
+    );
+}
+
+export async function getLibraryLevels(
+    kind: LibraryKind,
+    levels: { parentId: string | null; limit: number }[],
+): Promise<{
+    levels: Array<LibraryCollection & { parentId: string | null }>;
+}> {
+    return apiRequest(`/library/${kind}/levels`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ levels }),
+    });
+}
+
+export async function searchLibraryDocuments(
+    kind: LibraryKind,
+    options: LibrarySearchParams,
+): Promise<LibrarySearchResults> {
+    const params = new URLSearchParams({ view: "search" });
+    if (options.limit != null) params.set("limit", String(options.limit));
+    if (options.offset != null) params.set("offset", String(options.offset));
+    if (options.search) params.set("search", options.search);
+    if (options.fileType) params.set("file_type", options.fileType);
+    if (options.sortKey) params.set("sort_key", options.sortKey);
+    if (options.sortDirection)
+        params.set("sort_direction", options.sortDirection);
+    return apiRequest<LibrarySearchResults>(
+        `/library/${kind}?${params.toString()}`,
+        { signal: options.signal },
+    );
+}
+
+export async function getLibraryFilterOptions(
+    kind: LibraryKind,
+): Promise<{ fileTypes: string[] }> {
+    return apiRequest<{ fileTypes: string[] }>(
+        `/library/${kind}/filter-options`,
+    );
+}
+
+export async function listLibraryDocumentIds(
+    kind: LibraryKind,
+    options?: { search?: string; fileType?: string; signal?: AbortSignal },
+): Promise<string[]> {
+    const params = new URLSearchParams();
+    if (options?.search) params.set("search", options.search);
+    if (options?.fileType) params.set("file_type", options.fileType);
+    const query = params.toString();
+    return apiRequest<string[]>(
+        `/library/${kind}/ids${query ? `?${query}` : ""}`,
+        { signal: options?.signal },
+    );
+}
+
+export async function bulkDeleteLibraryDocuments(
+    kind: LibraryKind,
+    ids: string[],
+): Promise<{ deletedIds: string[] }> {
+    return apiRequest<{ deletedIds: string[] }>(
+        `/library/${kind}/documents/bulk-delete`,
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids }),
+        },
+    );
 }
 
 export async function uploadLibraryDocument(
     kind: LibraryKind,
     file: File,
+    folderId?: string | null,
 ): Promise<Document> {
-    const authHeaders = await getAuthHeader();
     const form = new FormData();
     form.append("file", file);
-    const response = await fetch(`${API_BASE}/library/${kind}/documents`, {
+    if (folderId) form.append("folder_id", folderId);
+    const response = await apiFetch(`${API_BASE}/library/${kind}/documents`, {
         method: "POST",
-        headers: { ...authHeaders },
         body: form,
     });
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok)
+        throw await toApiError(response, `/library/${kind}/documents`);
     return response.json() as Promise<Document>;
 }
 
@@ -980,6 +1251,26 @@ export async function createLibraryFolder(
             parent_folder_id: parentFolderId ?? null,
         }),
     });
+}
+
+export async function resolveLibraryFolderPath(
+    kind: LibraryKind,
+    segments: string[],
+    baseFolderId: string | null,
+    conflictResolution: FolderConflictResolution = "error",
+): Promise<FolderPathResolution<LibraryFolder>> {
+    return apiRequest<FolderPathResolution<LibraryFolder>>(
+        `/library/${kind}/folder-paths/resolve`,
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                segments,
+                base_folder_id: baseFolderId,
+                conflict_resolution: conflictResolution,
+            }),
+        },
+    );
 }
 
 export async function renameLibraryFolder(
@@ -1077,19 +1368,21 @@ export async function uploadDocumentVersion(
     file: File,
     filename?: string,
 ): Promise<DocumentVersion> {
-    const authHeaders = await getAuthHeader();
     const form = new FormData();
     form.append("file", file);
     if (filename) form.append("filename", filename);
-    const response = await fetch(
+    const response = await apiFetch(
         `${API_BASE}/single-documents/${documentId}/versions`,
         {
             method: "POST",
-            headers: { ...authHeaders },
             body: form,
         },
     );
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok)
+        throw await toApiError(
+            response,
+            `/single-documents/${documentId}/versions`,
+        );
     return response.json() as Promise<DocumentVersion>;
 }
 
@@ -1099,19 +1392,21 @@ export async function replaceDocumentVersionFile(
     file: File,
     filename?: string,
 ): Promise<DocumentVersion> {
-    const authHeaders = await getAuthHeader();
     const form = new FormData();
     form.append("file", file);
     if (filename) form.append("filename", filename);
-    const response = await fetch(
+    const response = await apiFetch(
         `${API_BASE}/single-documents/${documentId}/versions/${versionId}/file`,
         {
             method: "PUT",
-            headers: { ...authHeaders },
             body: form,
         },
     );
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok)
+        throw await toApiError(
+            response,
+            `/single-documents/${documentId}/versions/${versionId}/file`,
+        );
     return response.json() as Promise<DocumentVersion>;
 }
 
@@ -1163,34 +1458,31 @@ export async function deleteDocumentVersion(
 export async function uploadProjectDocument(
     projectId: string,
     file: File,
+    folderId?: string | null,
 ): Promise<Document> {
-    const authHeaders = await getAuthHeader();
     const form = new FormData();
     form.append("file", file);
-    const response = await fetch(
+    if (folderId) form.append("folder_id", folderId);
+    const response = await apiFetch(
         `${API_BASE}/projects/${projectId}/documents`,
         {
             method: "POST",
-            headers: { ...authHeaders },
             body: form,
         },
     );
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok)
+        throw await toApiError(response, `/projects/${projectId}/documents`);
     return response.json() as Promise<Document>;
 }
 
-export async function uploadStandaloneDocument(
-    file: File,
-): Promise<Document> {
-    const authHeaders = await getAuthHeader();
+export async function uploadStandaloneDocument(file: File): Promise<Document> {
     const form = new FormData();
     form.append("file", file);
-    const response = await fetch(`${API_BASE}/single-documents`, {
+    const response = await apiFetch(`${API_BASE}/single-documents`, {
         method: "POST",
-        headers: { ...authHeaders },
         body: form,
     });
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) throw await toApiError(response, "/single-documents");
     return response.json() as Promise<Document>;
 }
 
@@ -1202,6 +1494,26 @@ export async function deleteDocument(documentId: string): Promise<void> {
     await apiRequest(`/single-documents/${documentId}`, { method: "DELETE" });
 }
 
+export interface DocumentEditResolution {
+    ok: boolean;
+    already_resolved?: boolean;
+    status?: "accepted" | "rejected";
+    version_id: string | null;
+    download_url: string | null;
+    remaining_pending?: number;
+}
+
+export async function resolveDocumentEdit(
+    documentId: string,
+    editId: string,
+    verb: "accept" | "reject",
+): Promise<DocumentEditResolution> {
+    return apiRequest<DocumentEditResolution>(
+        `/single-documents/${encodeURIComponent(documentId)}/edits/${encodeURIComponent(editId)}/${verb}`,
+        { method: "POST" },
+    );
+}
+
 export async function getDocumentUrl(
     documentId: string,
     versionId?: string | null,
@@ -1210,34 +1522,22 @@ export async function getDocumentUrl(
     return apiRequest(`/single-documents/${documentId}/url${qs}`);
 }
 
-export async function downloadDocumentFile(
-    documentId: string,
-    versionId?: string | null,
-): Promise<{ blob: Blob; filename: string }> {
-    const grant = await getDocumentUrl(documentId, versionId);
-    const response = await apiBlobRequest(grant.url);
-    return {
-        blob: response.blob,
-        filename: response.filename ?? grant.filename,
-    };
-}
-
 export async function downloadDocumentsZip(
     documentIds: string[],
 ): Promise<Blob> {
-    const authHeaders = await getAuthHeader();
-    const response = await fetch(`${API_BASE}/single-documents/download-zip`, {
-        method: "POST",
-        cache: "no-store",
-        headers: {
-            "Content-Type": "application/json",
-            ...authHeaders,
+    const response = await apiFetch(
+        `${API_BASE}/single-documents/download-zip`,
+        {
+            method: "POST",
+            cache: "no-store",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ document_ids: documentIds }),
         },
-        body: JSON.stringify({ document_ids: documentIds }),
-    });
+    );
     if (!response.ok) {
-        const detail = await response.text();
-        throw new Error(detail || `API error: ${response.status}`);
+        throw await toApiError(response, "/single-documents/download-zip");
     }
     return response.blob();
 }
@@ -1246,20 +1546,23 @@ export async function downloadDocumentsZip(
 // Chat
 // ---------------------------------------------------------------------------
 
-export async function createChat(payload: {
-    route: ModelRoute;
+export async function createChat(payload?: {
     project_id?: string;
 }): Promise<{ id: string }> {
     return apiRequest<{ id: string }>("/chat/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(payload ?? {}),
     });
 }
 
-export async function listChats(options?: { limit?: number }): Promise<Chat[]> {
+export async function listChats(options?: {
+    limit?: number;
+    offset?: number;
+}): Promise<Chat[]> {
     const params = new URLSearchParams();
     if (options?.limit) params.set("limit", String(options.limit));
+    if (options?.offset) params.set("offset", String(options.offset));
     const query = params.toString();
     return apiRequest<Chat[]>(`/chat${query ? `?${query}` : ""}`);
 }
@@ -1306,6 +1609,47 @@ export async function renameChat(chatId: string, title: string): Promise<void> {
     });
 }
 
+export async function updateChatModel(
+    chatId: string,
+    model: string,
+): Promise<{ id: string; title: string | null; model: string }> {
+    return apiRequest(`/chat/${chatId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+        keepalive: true,
+    });
+}
+
+export async function updateChatReasoningLevel(
+    chatId: string,
+    reasoningLevel: NonNullable<Message["reasoning"]>,
+): Promise<{
+    id: string;
+    title: string | null;
+    model: string;
+    reasoning_level: NonNullable<Message["reasoning"]>;
+}> {
+    return apiRequest(`/chat/${chatId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reasoningLevel }),
+        keepalive: true,
+    });
+}
+
+export async function updateLastSelectedChatSettings(payload: {
+    lastSelectedChatModel?: string;
+    lastSelectedReasoningLevel?: NonNullable<Message["reasoning"]>;
+}): Promise<UserProfile> {
+    return apiRequest<UserProfile>("/user/profile", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        keepalive: true,
+    });
+}
+
 export async function deleteChat(chatId: string): Promise<void> {
     await apiRequest(`/chat/${chatId}`, { method: "DELETE" });
 }
@@ -1313,50 +1657,37 @@ export async function deleteChat(chatId: string): Promise<void> {
 export async function generateChatTitle(
     chatId: string,
     message: string,
+    model: string,
 ): Promise<{ title: string }> {
     return apiRequest<{ title: string }>(`/chat/${chatId}/generate-title`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ message, model }),
     });
 }
+
+
 
 export async function streamChat(payload: {
     messages: {
         role: string;
         content: string;
-        files?: { filename: string; document_id?: string }[];
+        files?: MessageFile[];
         workflow?: { id: string; title: string };
     }[];
     chat_id?: string;
     project_id?: string;
-    ask_inputs_response?: {
-        responses: (
-            | {
-                  id: string;
-                  kind: "choice";
-                  question: string;
-                  answer?: string;
-                  skipped?: boolean;
-              }
-            | {
-                  id: string;
-                  kind: "documents";
-                  filenames: string[];
-                  skipped?: boolean;
-              }
-        )[];
-    };
+    model?: string;
+    reasoning?: Message["reasoning"];
+    ask_inputs_response?: AskInputsResponsePayload;
     signal?: AbortSignal;
 }): Promise<Response> {
     const { signal, ...body } = payload;
-    const authHeaders = await getAuthHeader();
-    return fetch(`${API_BASE}/chat`, {
+    return apiFetch(`${API_BASE}/chat`, {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
             Accept: "text/event-stream",
-            ...authHeaders,
         },
         body: JSON.stringify(body),
         signal,
@@ -1366,7 +1697,7 @@ export async function streamChat(payload: {
 type StreamChatMessage = {
     role: string;
     content: string;
-    files?: { filename: string; document_id?: string }[];
+    files?: MessageFile[];
     workflow?: { id: string; title: string };
 };
 
@@ -1374,35 +1705,19 @@ export async function streamProjectChat(payload: {
     projectId: string;
     messages: StreamChatMessage[];
     chat_id?: string;
+    model?: string;
+    reasoning?: Message["reasoning"];
     displayed_doc?: { filename: string; document_id: string };
     attached_documents?: { filename: string; document_id: string }[];
-    ask_inputs_response?: {
-        responses: (
-            | {
-                  id: string;
-                  kind: "choice";
-                  question: string;
-                  answer?: string;
-                  skipped?: boolean;
-              }
-            | {
-                  id: string;
-                  kind: "documents";
-                  filenames: string[];
-                  skipped?: boolean;
-              }
-        )[];
-    };
+    ask_inputs_response?: AskInputsResponsePayload;
     signal?: AbortSignal;
 }): Promise<Response> {
     const { projectId, signal, ...body } = payload;
-    const authHeaders = await getAuthHeader();
-    return fetch(`${API_BASE}/projects/${projectId}/chat`, {
+    return apiFetch(`${API_BASE}/projects/${projectId}/chat`, {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
             Accept: "text/event-stream",
-            ...authHeaders,
         },
         body: JSON.stringify(body),
         signal,
@@ -1431,7 +1746,8 @@ export async function listTabularReviews(
     if (pagination?.offset) params.set("offset", String(pagination.offset));
     if (pagination?.search) params.set("search", pagination.search);
     if (pagination?.sortKey) params.set("sort_key", pagination.sortKey);
-    if (pagination?.sortDirection) params.set("sort_direction", pagination.sortDirection);
+    if (pagination?.sortDirection)
+        params.set("sort_direction", pagination.sortDirection);
     if (pagination?.scope && pagination.scope !== "all")
         params.set("scope", pagination.scope);
 
@@ -1469,6 +1785,7 @@ export async function createTabularReview(payload: {
     workflow_id?: string;
     project_id?: string;
     document_grouping?: "document" | "folder";
+    model: string;
 }): Promise<TabularReview> {
     return apiRequest<TabularReview>("/tabular-review", {
         method: "POST",
@@ -1491,6 +1808,8 @@ export async function updateTabularReview(
         document_ids?: string[];
         project_id?: string | null;
         document_grouping?: "document" | "folder";
+        model?: string;
+        shared_with?: string[];
     },
 ): Promise<TabularReview> {
     return apiRequest<TabularReview>(`/tabular-review/${reviewId}`, {
@@ -1498,6 +1817,12 @@ export async function updateTabularReview(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
     });
+}
+
+export async function getTabularReviewPeople(
+    reviewId: string,
+): Promise<ProjectPeople> {
+    return apiRequest<ProjectPeople>(`/tabular-review/${reviewId}/people`);
 }
 
 export async function generateTabularColumnPrompt(
@@ -1546,11 +1871,14 @@ export async function deleteTabularReview(reviewId: string): Promise<void> {
 
 export async function streamTabularGeneration(
     reviewId: string,
+    expectedUpdatedAt: string,
+    signal?: AbortSignal,
 ): Promise<Response> {
-    const authHeaders = await getAuthHeader();
-    return fetch(`${API_BASE}/tabular-review/${reviewId}/generate`, {
+    return apiFetch(`${API_BASE}/tabular-review/${reviewId}/generate`, {
         method: "POST",
-        headers: { ...authHeaders },
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_updated_at: expectedUpdatedAt }),
+        signal,
     });
 }
 
@@ -1560,16 +1888,19 @@ export async function streamTabularChat(
     chat_id?: string | null,
     signal?: AbortSignal,
     context?: { reviewTitle?: string | null; projectName?: string | null },
+    model?: Message["model"],
+    reasoning?: Message["reasoning"],
 ): Promise<Response> {
-    const authHeaders = await getAuthHeader();
-    return fetch(`${API_BASE}/tabular-review/${reviewId}/chat`, {
+    return apiFetch(`${API_BASE}/tabular-review/${reviewId}/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
             messages,
             chat_id: chat_id ?? undefined,
             review_title: context?.reviewTitle ?? undefined,
             project_name: context?.projectName ?? undefined,
+            model,
+            reasoning,
         }),
         signal: signal ?? undefined,
     });
@@ -1604,8 +1935,32 @@ export interface TRDisplayMessage {
 export interface TRChat {
     id: string;
     title: string | null;
+    model: string | null;
+    reasoning_level: NonNullable<Message["reasoning"]> | null;
     created_at: string;
     updated_at: string;
+}
+
+const TABULAR_CHAT_SELECTION_PREFIX = "tabular-review-chat:";
+
+export function tabularChatSelectionKey(
+    reviewId: string,
+    chatId: string,
+): string {
+    return `${TABULAR_CHAT_SELECTION_PREFIX}${reviewId}:${chatId}`;
+}
+
+export function parseTabularChatSelectionKey(
+    selectionKey: string,
+): { reviewId: string; chatId: string } | null {
+    if (!selectionKey.startsWith(TABULAR_CHAT_SELECTION_PREFIX)) return null;
+    const value = selectionKey.slice(TABULAR_CHAT_SELECTION_PREFIX.length);
+    const separatorIndex = value.indexOf(":");
+    if (separatorIndex <= 0 || separatorIndex === value.length - 1) return null;
+    return {
+        reviewId: value.slice(0, separatorIndex),
+        chatId: value.slice(separatorIndex + 1),
+    };
 }
 
 export function mapTRMessages(raw: RawTRMessage[]): TRDisplayMessage[] {
@@ -1667,6 +2022,32 @@ export async function renameTabularChat(
     });
 }
 
+export async function updateTabularChatModel(
+    reviewId: string,
+    chatId: string,
+    model: string,
+): Promise<TRChat> {
+    return apiRequest(`/tabular-review/${reviewId}/chats/${chatId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+        keepalive: true,
+    });
+}
+
+export async function updateTabularChatReasoningLevel(
+    reviewId: string,
+    chatId: string,
+    reasoningLevel: NonNullable<Message["reasoning"]>,
+): Promise<TRChat> {
+    return apiRequest(`/tabular-review/${reviewId}/chats/${chatId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reasoningLevel }),
+        keepalive: true,
+    });
+}
+
 export async function regenerateTabularCell(
     reviewId: string,
     rowId: string,
@@ -1703,10 +2084,113 @@ export async function clearTabularCells(
 
 type WorkflowType = Workflow["metadata"]["type"];
 
-export async function listWorkflows(
-    type: WorkflowType,
+export async function listWorkflows(type?: WorkflowType): Promise<Workflow[]> {
+    return apiRequest<Workflow[]>(
+        type ? `/workflows?type=${type}` : "/workflows",
+    );
+}
+
+// Paginated sibling of listWorkflows() used only by WorkflowList.tsx.
+// Deliberately a separate function, not an overload — the backend route
+// decides whether to paginate based on whether any of these query params
+// are present at all, so listWorkflows() must keep sending none of them
+// (every other caller — the workflow picker modal, the chat slash-menu
+// picker, UseWorkflowModal's own independent fetch — needs the exact legacy
+// response shape, system workflows included). Returns DB-backed rows only
+// (always is_system: false) — system workflows come from listSystemWorkflows.
+export async function listWorkflowsPage(pagination?: {
+    limit?: number;
+    offset?: number;
+    search?: string;
+    sortKey?: string;
+    sortDirection?: "asc" | "desc";
+    scope?: "all" | "owned" | "shared";
+    type?: WorkflowType;
+    practice?: string;
+    language?: string;
+    jurisdiction?: string;
+    signal?: AbortSignal;
+}): Promise<Workflow[]> {
+    const params = new URLSearchParams();
+    if (pagination?.type) params.set("type", pagination.type);
+    if (pagination?.limit) params.set("limit", String(pagination.limit));
+    if (pagination?.offset) params.set("offset", String(pagination.offset));
+    if (pagination?.search) params.set("search", pagination.search);
+    if (pagination?.sortKey) params.set("sort_key", pagination.sortKey);
+    if (pagination?.sortDirection)
+        params.set("sort_direction", pagination.sortDirection);
+    if (pagination?.scope && pagination.scope !== "all")
+        params.set("scope", pagination.scope);
+    if (pagination?.practice) params.set("practice", pagination.practice);
+    if (pagination?.language) params.set("language", pagination.language);
+    if (pagination?.jurisdiction)
+        params.set("jurisdiction", pagination.jurisdiction);
+
+    const qs = params.toString() ? `?${params.toString()}` : "";
+    return apiRequest<Workflow[]>(`/workflows${qs}`, {
+        signal: pagination?.signal,
+    });
+}
+
+export async function listWorkflowIds(options?: {
+    search?: string;
+    scope?: "all" | "owned" | "shared";
+    type?: WorkflowType;
+    practice?: string;
+    language?: string;
+    jurisdiction?: string;
+    signal?: AbortSignal;
+}): Promise<{ id: string; user_id: string }[]> {
+    const params = new URLSearchParams();
+    if (options?.type) params.set("type", options.type);
+    if (options?.search) params.set("search", options.search);
+    if (options?.scope && options.scope !== "all")
+        params.set("scope", options.scope);
+    if (options?.practice) params.set("practice", options.practice);
+    if (options?.language) params.set("language", options.language);
+    if (options?.jurisdiction) params.set("jurisdiction", options.jurisdiction);
+
+    const qs = params.toString() ? `?${params.toString()}` : "";
+    return apiRequest<{ id: string; user_id: string }[]>(
+        `/workflows/ids${qs}`,
+        {
+            signal: options?.signal,
+        },
+    );
+}
+
+// Always-unpaginated: the static, code-generated system-workflow list (37
+// entries, zero user-data growth). Fetched once by usePaginatedWorkflows and
+// kept fully in memory rather than folded into the paginated RPC above.
+export async function listSystemWorkflows(
+    type?: WorkflowType,
 ): Promise<Workflow[]> {
-    return apiRequest<Workflow[]>(`/workflows?type=${type}`);
+    const qs = type ? `?type=${type}` : "";
+    return apiRequest<Workflow[]>(`/workflows/system${qs}`);
+}
+
+export interface WorkflowFilterOptions {
+    practices: string[];
+    languages: string[];
+    jurisdictions: string[];
+}
+
+export async function getWorkflowFilterOptions(options?: {
+    type?: WorkflowType;
+    scope?: "all" | "owned" | "shared";
+    signal?: AbortSignal;
+}): Promise<WorkflowFilterOptions> {
+    const params = new URLSearchParams();
+    if (options?.type) params.set("type", options.type);
+    if (options?.scope && options.scope !== "all")
+        params.set("scope", options.scope);
+    const query = params.toString();
+    return apiRequest<WorkflowFilterOptions>(
+        `/workflows/filter-options${query ? `?${query}` : ""}`,
+        {
+            signal: options?.signal,
+        },
+    );
 }
 
 export async function getWorkflow(workflowId: string): Promise<Workflow> {
@@ -1786,4 +2270,159 @@ export async function hideWorkflow(workflowId: string): Promise<void> {
 
 export async function unhideWorkflow(workflowId: string): Promise<void> {
     await apiRequest(`/workflows/hidden/${workflowId}`, { method: "DELETE" });
+}
+
+export async function shareWorkflow(
+    workflowId: string,
+    payload: { emails: string[]; allow_edit: boolean },
+): Promise<void> {
+    await apiRequest<void>(`/workflows/${workflowId}/share`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    });
+}
+
+export async function listWorkflowShares(workflowId: string): Promise<
+    {
+        id: string;
+        shared_with_email: string;
+        allow_edit: boolean;
+        created_at: string;
+    }[]
+> {
+    return apiRequest(`/workflows/${workflowId}/shares`);
+}
+
+export async function deleteWorkflowShare(
+    workflowId: string,
+    shareId: string,
+): Promise<void> {
+    await apiRequest(`/workflows/${workflowId}/shares/${shareId}`, {
+        method: "DELETE",
+    });
+}
+
+export async function listQuickActions(
+    surface: QuickAction["surface"] = "app",
+): Promise<QuickAction[]> {
+    return apiRequest<QuickAction[]>(`/quick-actions?surface=${surface}`);
+}
+
+export async function createQuickAction(payload: {
+    workflow_id: string;
+    name: string;
+    prompt: string;
+    document_upload: boolean;
+    surface: QuickAction["surface"];
+    enabled?: boolean;
+    sort_order?: number;
+}): Promise<QuickAction> {
+    return apiRequest<QuickAction>("/quick-actions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    });
+}
+
+export async function updateQuickAction(
+    quickActionId: string,
+    payload: Partial<
+        Pick<
+            QuickAction,
+            | "workflow_id"
+            | "name"
+            | "prompt"
+            | "document_upload"
+            | "surface"
+            | "enabled"
+            | "sort_order"
+        >
+    >,
+): Promise<QuickAction> {
+    return apiRequest<QuickAction>(`/quick-actions/${quickActionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    });
+}
+
+export async function deleteQuickAction(quickActionId: string): Promise<void> {
+    await apiRequest(`/quick-actions/${quickActionId}`, { method: "DELETE" });
+}
+
+export async function listWorkflowAddons(): Promise<WorkflowAddon[]> {
+    return apiRequest<WorkflowAddon[]>("/workflow-addons");
+}
+
+export async function getWorkflowAddon(
+    addonId: string,
+): Promise<WorkflowAddon> {
+    return apiRequest<WorkflowAddon>(`/workflow-addons/${addonId}`);
+}
+
+export async function importWorkflowAddon(addonId: string): Promise<Workflow> {
+    return apiRequest<Workflow>(`/workflow-addons/${addonId}/import`, {
+        method: "POST",
+    });
+}
+
+export async function listWorkflowReferenceFiles(
+    workflowId: string,
+): Promise<WorkflowReferenceDocument[]> {
+    return apiRequest<WorkflowReferenceDocument[]>(
+        `/workflows/${workflowId}/reference-files`,
+    );
+}
+
+export async function uploadWorkflowReferenceFile(
+    workflowId: string,
+    file: File,
+): Promise<WorkflowReferenceDocument> {
+    const form = new FormData();
+    form.append("file", file);
+    const response = await apiFetch(
+        `${API_BASE}/workflows/${workflowId}/reference-files`,
+        { method: "POST", body: form },
+    );
+    if (!response.ok)
+        throw await toApiError(response, "/workflows/reference-files");
+    return response.json() as Promise<WorkflowReferenceDocument>;
+}
+
+export async function replaceWorkflowReferenceFile(
+    workflowId: string,
+    referenceId: string,
+    file: File,
+): Promise<WorkflowReferenceDocument> {
+    const form = new FormData();
+    form.append("file", file);
+    const path = `/workflows/${workflowId}/reference-files/${referenceId}`;
+    const response = await apiFetch(`${API_BASE}${path}`, {
+        method: "PUT",
+        body: form,
+    });
+    if (!response.ok) throw await toApiError(response, path);
+    return response.json() as Promise<WorkflowReferenceDocument>;
+}
+
+export async function getWorkflowReferenceUrl(
+    workflowId: string,
+    referenceId: string,
+): Promise<{ url: string; filename: string }> {
+    return apiRequest<{ url: string; filename: string }>(
+        `/workflows/${workflowId}/reference-files/${referenceId}/url`,
+    );
+}
+
+export async function deleteWorkflowReferenceFile(
+    workflowId: string,
+    referenceId: string,
+): Promise<void> {
+    await apiRequest(
+        `/workflows/${workflowId}/reference-files/${referenceId}`,
+        {
+            method: "DELETE",
+        },
+    );
 }

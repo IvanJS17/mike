@@ -3,46 +3,32 @@ import { createServerSupabase } from "./supabase";
 import type { UserApiKeys } from "./llm";
 
 type Db = ReturnType<typeof createServerSupabase>;
-export type ApiKeyProvider = LlmApiKeyProvider;
-export type LlmApiKeyProvider =
+export type ApiKeyProvider =
     | "claude"
     | "gemini"
     | "openai"
     | "openrouter"
-    | "deepseek"
-    | "opencode-zen"
+    | "vercel"
     | "opencode-go";
 export type ApiKeySource = "user" | "env" | null;
 export type ApiKeyStatus = Record<ApiKeyProvider, boolean> & {
     sources: Record<ApiKeyProvider, ApiKeySource>;
 };
 
-export const LLM_API_KEY_PROVIDERS: LlmApiKeyProvider[] = [
-    "claude",
-    "gemini",
-    "openai",
-    "openrouter",
-    "deepseek",
-    "opencode-zen",
-    "opencode-go",
-];
-
-export function environmentCredentialReference(provider: string): string {
-    return `${provider}:env`;
-}
-
 type EncryptedKeyRow = {
     provider: ApiKeyProvider;
     encrypted_key: string;
     iv: string;
     auth_tag: string;
-    credential_ref?: string | null;
-    version?: number | null;
-    enabled?: boolean | null;
 };
 
 const PROVIDERS: ApiKeyProvider[] = [
-    ...LLM_API_KEY_PROVIDERS,
+    "claude",
+    "gemini",
+    "openai",
+    "openrouter",
+    "vercel",
+    "opencode-go",
 ];
 
 function envApiKey(provider: ApiKeyProvider): string | null {
@@ -59,12 +45,14 @@ function envApiKey(provider: ApiKeyProvider): string | null {
             return process.env.OPENAI_API_KEY?.trim() || null;
         case "openrouter":
             return process.env.OPENROUTER_API_KEY?.trim() || null;
-        case "deepseek":
-            return process.env.DEEPSEEK_API_KEY?.trim() || null;
-        case "opencode-zen":
-            return process.env.OPENCODE_ZEN_API_KEY?.trim() || null;
+        case "vercel":
+            return (
+                process.env.AI_GATEWAY_API_KEY?.trim() ||
+                process.env.VERCEL_AI_GATEWAY_API_KEY?.trim() ||
+                null
+            );
         case "opencode-go":
-            return process.env.OPENCODE_GO_API_KEY?.trim() || null;
+            return process.env.OPENCODE_API_KEY?.trim() || null;
         default:
             return null;
     }
@@ -126,98 +114,6 @@ export function normalizeApiKeyProvider(value: string): ApiKeyProvider | null {
     return isProvider(value) ? value : null;
 }
 
-export type ResolvedUserLlmCredential = {
-    provider: LlmApiKeyProvider;
-    credential_ref: string;
-    secret: string;
-};
-
-export async function resolveUserLlmCredential(
-    userId: string,
-    provider: LlmApiKeyProvider,
-    credentialRef: string,
-    db: Db = createServerSupabase(),
-): Promise<ResolvedUserLlmCredential | null> {
-    const environmentSecret = envApiKey(provider);
-    if (
-        environmentSecret &&
-        credentialRef === environmentCredentialReference(provider)
-    ) {
-        return {
-            provider,
-            credential_ref: credentialRef,
-            secret: environmentSecret,
-        };
-    }
-
-    const { data, error } = await db
-        .from("user_api_keys")
-        .select("provider, credential_ref, encrypted_key, iv, auth_tag, enabled")
-        .eq("user_id", userId)
-        .eq("provider", provider)
-        .eq("credential_ref", credentialRef)
-        .maybeSingle();
-    if (error) throw error;
-
-    const row = data as EncryptedKeyRow | null;
-    if (
-        !row ||
-        row.provider !== provider ||
-        row.credential_ref !== credentialRef ||
-        row.enabled === false
-    ) {
-        return null;
-    }
-    const secret = decrypt(row);
-    if (!secret?.trim()) return null;
-    return { provider, credential_ref: credentialRef, secret };
-}
-
-export async function listUserLlmCredentials(
-    userId: string,
-    db: Db = createServerSupabase(),
-): Promise<ResolvedUserLlmCredential[]> {
-    const credentials: ResolvedUserLlmCredential[] = [];
-    const seen = new Set<string>();
-    const add = (credential: ResolvedUserLlmCredential) => {
-        const key = `${credential.provider}:${credential.credential_ref}`;
-        if (seen.has(key)) return;
-        seen.add(key);
-        credentials.push(credential);
-    };
-
-    for (const provider of LLM_API_KEY_PROVIDERS) {
-        const secret = envApiKey(provider);
-        if (secret) {
-            add({
-                provider,
-                credential_ref: environmentCredentialReference(provider),
-                secret,
-            });
-        }
-    }
-
-    const { data, error } = await db
-        .from("user_api_keys")
-        .select(
-            "provider, credential_ref, encrypted_key, iv, auth_tag, enabled",
-        )
-        .eq("user_id", userId);
-    if (error) throw error;
-
-    for (const row of (data ?? []) as EncryptedKeyRow[]) {
-        const provider = normalizeApiKeyProvider(String(row.provider));
-        if (!provider) continue;
-        const credentialRef = row.credential_ref?.trim();
-        if (!credentialRef || row.enabled === false) continue;
-        const secret = decrypt(row);
-        if (!secret?.trim()) continue;
-        add({ provider, credential_ref: credentialRef, secret });
-    }
-
-    return credentials;
-}
-
 export async function getUserApiKeyStatus(
     userId: string,
     db: Db = createServerSupabase(),
@@ -227,16 +123,14 @@ export async function getUserApiKeyStatus(
         gemini: false,
         openai: false,
         openrouter: false,
-        deepseek: false,
-        "opencode-zen": false,
+        vercel: false,
         "opencode-go": false,
         sources: {
             claude: null,
             gemini: null,
             openai: null,
             openrouter: null,
-            deepseek: null,
-            "opencode-zen": null,
+            vercel: null,
             "opencode-go": null,
         },
     };
@@ -250,14 +144,13 @@ export async function getUserApiKeyStatus(
 
     const { data, error } = await db
         .from("user_api_keys")
-        .select("provider, enabled")
+        .select("provider")
         .eq("user_id", userId);
     if (error) throw error;
 
     for (const row of data ?? []) {
-        if ((row as { enabled?: boolean | null }).enabled === false) continue;
         const provider = normalizeApiKeyProvider(String(row.provider));
-        if (provider && !status[provider]) {
+        if (provider) {
             status[provider] = true;
             status.sources[provider] = "user";
         }
@@ -275,23 +168,21 @@ export async function getUserApiKeys(
         gemini: envApiKey("gemini"),
         openai: envApiKey("openai"),
         openrouter: envApiKey("openrouter"),
-        deepseek: envApiKey("deepseek"),
-        "opencode-zen": envApiKey("opencode-zen"),
+        vercel: envApiKey("vercel"),
         "opencode-go": envApiKey("opencode-go"),
     };
 
     const { data, error } = await db
         .from("user_api_keys")
-        .select("provider, encrypted_key, iv, auth_tag, enabled")
+        .select("provider, encrypted_key, iv, auth_tag")
         .eq("user_id", userId);
     if (error) throw error;
 
     for (const row of (data ?? []) as EncryptedKeyRow[]) {
         const provider = normalizeApiKeyProvider(row.provider);
         if (!provider) continue;
-        if (row.enabled === false) continue;
-        if (apiKeys[provider]?.trim()) continue;
-        apiKeys[provider] = decrypt(row);
+        const userKey = decrypt(row)?.trim() || null;
+        if (userKey) apiKeys[provider] = userKey;
     }
 
     return apiKeys;
@@ -304,15 +195,10 @@ export async function saveUserApiKey(
     db: Db = createServerSupabase(),
 ): Promise<void> {
     const normalized = value?.trim() || null;
-
     if (!normalized) {
         const { error } = await db
             .from("user_api_keys")
-            .update({
-                ...encrypt(`revoked:${crypto.randomUUID()}`),
-                enabled: false,
-                updated_at: new Date().toISOString(),
-            })
+            .delete()
             .eq("user_id", userId)
             .eq("provider", provider);
         if (error) throw error;
@@ -323,7 +209,6 @@ export async function saveUserApiKey(
         {
             user_id: userId,
             provider,
-            enabled: true,
             ...encrypt(normalized),
             updated_at: new Date().toISOString(),
         },

@@ -30,6 +30,9 @@ const IDENTITY = {
     key: "doc-0:documents/contract.pdf",
     docLabel: "doc-0",
     filename: FILENAME,
+    documentId: "document-1",
+    versionId: "version-2",
+    versionNumber: 2,
     storagePath: "documents/contract.pdf",
 };
 
@@ -72,7 +75,6 @@ async function dispatchDocumentTool(
         undefined,
         turnReadState,
         undefined,
-        undefined,
         NONCE,
     );
 }
@@ -82,7 +84,10 @@ function firstToolContent(result: Awaited<ReturnType<typeof runToolCalls>>) {
 }
 
 function expectFencedFilename(content: string) {
-    expect(content).toContain(`Document filename: ${spotlight(FILENAME, NONCE)}`);
+    expect(content).toContain(spotlight(FILENAME, NONCE));
+    expect(content).not.toContain(
+        `[Citation requirement for doc-0 ("${FILENAME}")]`,
+    );
 }
 
 describe("document tool spotlighting", () => {
@@ -99,6 +104,14 @@ describe("document tool spotlighting", () => {
         expectFencedFilename(content);
         expect(content).toContain(spotlight(DOCUMENT_CONTENT, NONCE));
         expect(readDocumentContent).toHaveBeenCalledTimes(1);
+        expect(result.docsRead).toEqual([
+            {
+                filename: FILENAME,
+                document_id: "document-1",
+                version_id: "version-2",
+                version_number: 2,
+            },
+        ]);
     });
 
     it("fences the filename returned by a duplicate read_document", async () => {

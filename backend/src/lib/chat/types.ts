@@ -20,10 +20,35 @@ export const devLog = (...args: Parameters<typeof console.log>) => {
 
 export type DocStore = Map<
   string,
-  { storage_path: string; file_type: string; filename: string }
+  {
+    storage_path: string;
+    file_type: string;
+    filename: string;
+    /** Identifies source material that must be copied before it is edited. */
+    source_kind?: "document" | "library_template" | "workflow_asset";
+    /**
+     * Request-scoped plain text that is already available in memory. Inline
+     * documents still flow through read_document so their body only reaches
+     * the model when it chooses to read them.
+     */
+    inline_text?: string;
+  }
 >;
 
-export type WorkflowStore = Map<string, { title: string; skill_md: string }>;
+export type WorkflowStore = Map<
+  string,
+  {
+    title: string;
+    skill_md: string;
+    listed?: boolean;
+    reference_files?: {
+      reference_id: string;
+      filename: string;
+      file_type: string;
+      storage_path: string;
+    }[];
+  }
+>;
 
 export type DocIndex = Record<
   string,
@@ -53,7 +78,12 @@ export type ToolCall = {
 export type ChatMessage = {
   role: string;
   content: string | null;
-  files?: { filename: string; document_id?: string }[];
+  files?: {
+    filename: string;
+    document_id?: string;
+    version_id?: string;
+    version_number?: number;
+  }[];
   workflow?: { id: string; title: string };
 };
 
@@ -106,6 +136,8 @@ export type AskInputOption = {
   value: string;
 };
 
+export const MAX_ASK_INPUT_TEXT_LENGTH = 5_000;
+
 export type AskInputItem =
   | {
       id: string;
@@ -114,6 +146,12 @@ export type AskInputItem =
       options: AskInputOption[];
       allow_other: boolean;
       other_label: string;
+      response_prefix?: string;
+    }
+  | {
+      id: string;
+      kind: "text";
+      question: string;
       response_prefix?: string;
     }
   | {
@@ -132,6 +170,13 @@ export type AskInputResponseItem =
   | {
       id: string;
       kind: "choice";
+      question: string;
+      answer?: string;
+      skipped?: boolean;
+    }
+  | {
+      id: string;
+      kind: "text";
       question: string;
       answer?: string;
       skipped?: boolean;

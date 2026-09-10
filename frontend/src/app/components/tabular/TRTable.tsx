@@ -17,17 +17,18 @@ import { TabularCell as TabularCellComponent } from "./TabularCell";
 import { TREditColumnMenu } from "./TREditColumnMenu";
 import {
     TABLE_CHECKBOX_CLASS,
-    SkeletonDot,
+    SkeletonCheckbox,
     SkeletonLine,
     TableScrollArea,
 } from "../shared/TablePrimitive";
+import { EmptyState } from "@/app/components/ui/empty-state";
 import { PillButton } from "@/app/components/ui/pill-button";
 import { TabularReviewSkeuoIcon } from "@/app/components/shared/AppSidebarSkeuoIcons";
 import { TRFirstColumnCell } from "./TRFirstColumnCell";
 import {
-    APP_SURFACE_ACTIVE_CLASS,
-    APP_SURFACE_GROUP_HOVER_CLASS,
-    APP_SURFACE_HOVER_CLASS,
+    LIQUID_GLASS_SELECTED_CLASS,
+    LIQUID_GLASS_GROUP_HOVER_CLASS,
+    LIQUID_GLASS_HOVER_CLASS,
 } from "@/app/components/ui/liquid-surface";
 
 const SKELETON_COLS = 4;
@@ -61,6 +62,7 @@ interface Props {
     dragOverFiles?: boolean;
     highlightedCell?: { colIdx: number; rowIdx: number } | null;
     onSelectionChange: (ids: string[]) => void;
+    onDocumentOpen: (row: TabularReviewRow, document: Document) => void;
     onExpand: (cell: TabularCell) => void;
     onCitationClick: (
         cell: TabularCell,
@@ -92,6 +94,7 @@ export const TRTable = forwardRef<TRTableHandle, Props>(function TRTable(
         dragOverFiles = false,
         highlightedCell,
         onSelectionChange,
+        onDocumentOpen,
         onExpand,
         onCitationClick,
         onUpdateColumn,
@@ -189,9 +192,9 @@ export const TRTable = forwardRef<TRTableHandle, Props>(function TRTable(
                         style={{ minWidth: skeletonContentWidth }}
                     >
                         <div
-                            className={`sticky left-0 z-[80] ${DOC_COL_W} ${TR_STICKY_CELL_BG} flex items-center border-b border-r border-gray-200 py-2 pl-4 pr-2 text-xs font-medium text-gray-500`}
+                            className={`sticky left-0 z-[80] ${DOC_COL_W} ${TR_STICKY_CELL_BG} flex items-center border-b border-r border-gray-200 py-2 pl-3 pr-2 text-xs font-medium text-gray-500`}
                         >
-                            <SkeletonDot className="mr-4" />
+                            <SkeletonCheckbox />
                             <span>{firstColumnLabel}</span>
                         </div>
                         {Array.from({ length: SKELETON_COLS }).map((_, i) => (
@@ -212,8 +215,9 @@ export const TRTable = forwardRef<TRTableHandle, Props>(function TRTable(
                             className="flex h-8"
                             style={{ minWidth: skeletonContentWidth }}
                         >
-                            <div className={`sticky left-0 z-[60] ${DOC_COL_W} ${TR_STICKY_CELL_BG} flex items-center border-b border-r border-gray-200 py-2 pl-4 pr-2`}>
-                                <SkeletonDot className="mr-4" />
+                            <div className={`sticky left-0 z-[60] ${DOC_COL_W} ${TR_STICKY_CELL_BG} flex items-center border-b border-r border-gray-200 py-2 pl-3 pr-2`}>
+                                <SkeletonCheckbox />
+                                <div className="mr-2 h-3.5 w-3.5 shrink-0 rounded bg-gray-100 animate-pulse" />
                                 <SkeletonLine className="h-4 w-32" />
                             </div>
                             {Array.from({ length: SKELETON_COLS }).map((_, col) => (
@@ -241,7 +245,7 @@ export const TRTable = forwardRef<TRTableHandle, Props>(function TRTable(
                 header={
                     <div className={`shrink-0 flex h-10 items-center border-b border-gray-200 ${TR_HEADER_BG}`}>
                         <div
-                            className={`${DOC_COL_W} ${TR_STICKY_CELL_BG} flex items-center border-r border-gray-200 py-2 pl-4 pr-2 text-xs font-medium text-gray-500 select-none`}
+                            className={`${DOC_COL_W} ${TR_STICKY_CELL_BG} flex items-center border-r border-gray-200 py-2 pl-3 pr-2 text-xs font-medium text-gray-500 select-none`}
                         >
                             {firstColumnLabel}
                         </div>
@@ -253,35 +257,34 @@ export const TRTable = forwardRef<TRTableHandle, Props>(function TRTable(
                     {dragOverFiles && (
                         <div className="absolute inset-0 z-[90] border-2 border-blue-400 bg-blue-50/40 pointer-events-none" />
                     )}
-                    <div className="flex flex-1 flex-col items-start justify-center w-full max-w-xs mx-auto">
-                        <TabularReviewSkeuoIcon className="mb-4 h-8 w-8" />
-                        <p className="text-2xl font-medium font-serif text-gray-900">
-                            Tabular Review
-                        </p>
-                        <p className="mt-1 text-xs text-gray-400 text-left">
-                            Add columns and documents to get started.
-                        </p>
-                        <div className="mt-4 flex items-center gap-2">
-                            <PillButton
-                                tone="black"
-                                size="sm"
-                                onClick={onAddColumn}
-                                className="px-3"
-                            >
-                                <Plus className="h-3.5 w-3.5" />
-                                Add Columns
-                            </PillButton>
-                            <PillButton
-                                tone="white"
-                                size="sm"
-                                onClick={onAddDocuments}
-                                className="px-3"
-                            >
-                                <Upload className="h-3.5 w-3.5" />
-                                Add Documents
-                            </PillButton>
-                        </div>
-                    </div>
+                    <EmptyState
+                        className="mx-auto w-full max-w-xs flex-1 justify-center"
+                        icon={<TabularReviewSkeuoIcon />}
+                        title="Tabular Review"
+                        description="Add columns and documents to get started."
+                        action={
+                            <div className="flex items-center gap-2">
+                                <PillButton
+                                    tone="black"
+                                    size="sm"
+                                    onClick={onAddColumn}
+                                    className="px-3"
+                                >
+                                    <Plus className="h-3.5 w-3.5" />
+                                    Add Columns
+                                </PillButton>
+                                <PillButton
+                                    tone="white"
+                                    size="sm"
+                                    onClick={onAddDocuments}
+                                    className="px-3"
+                                >
+                                    <Upload className="h-3.5 w-3.5" />
+                                    Add Documents
+                                </PillButton>
+                            </div>
+                        }
+                    />
                 </div>
             </TableScrollArea>
         );
@@ -297,7 +300,7 @@ export const TRTable = forwardRef<TRTableHandle, Props>(function TRTable(
                     style={{ minWidth: totalContentWidth }}
                 >
                     <div
-                        className={`sticky left-0 z-[80] ${DOC_COL_W} ${TR_STICKY_CELL_BG} border-b border-r border-gray-200 flex items-center py-2 pl-4 pr-2 text-left text-xs font-medium text-gray-500 select-none`}
+                        className={`sticky left-0 z-[80] ${DOC_COL_W} ${TR_STICKY_CELL_BG} border-b border-r border-gray-200 flex items-center py-2 pl-3 pr-2 text-left text-xs font-medium text-gray-500 select-none`}
                     >
                         <input
                             type="checkbox"
@@ -307,6 +310,7 @@ export const TRTable = forwardRef<TRTableHandle, Props>(function TRTable(
                             }}
                             onChange={toggleAll}
                             className={TABLE_CHECKBOX_CLASS}
+                            aria-label={`Select all ${firstColumnLabel.toLowerCase()}`}
                         />
                         <span>{firstColumnLabel}</span>
                     </div>
@@ -351,12 +355,13 @@ export const TRTable = forwardRef<TRTableHandle, Props>(function TRTable(
                         style={{ minWidth: totalContentWidth }}
                     >
                         <div
-                            className={`sticky left-0 z-[60] ${DOC_COL_W} ${TR_STICKY_CELL_BG} border-b border-r border-gray-200 py-2 pl-4 pr-2 text-xs text-gray-400 flex items-center`}
+                            className={`sticky left-0 z-[60] ${DOC_COL_W} ${TR_STICKY_CELL_BG} border-b border-r border-gray-200 py-2 pl-3 pr-2 text-xs text-gray-400 flex items-center`}
                         >
                             <input
                                 type="checkbox"
                                 disabled
-                                className="mr-4 h-2.5 w-2.5 shrink-0 rounded border-gray-200 cursor-default accent-black disabled:opacity-100"
+                                className="mr-3 h-2.5 w-2.5 shrink-0 rounded border-gray-200 cursor-default accent-black disabled:opacity-100"
+                                aria-label={`Select ${filename}`}
                             />
                             <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin shrink-0" />
                             <span className="line-clamp-1" title={filename}>
@@ -382,10 +387,10 @@ export const TRTable = forwardRef<TRTableHandle, Props>(function TRTable(
                             (document): document is Document => !!document,
                         );
                     const rowBg = isSelected
-                        ? APP_SURFACE_ACTIVE_CLASS
-                        : APP_SURFACE_HOVER_CLASS;
+                        ? LIQUID_GLASS_SELECTED_CLASS
+                        : LIQUID_GLASS_HOVER_CLASS;
                     const stickyRowBg = isSelected
-                        ? APP_SURFACE_ACTIVE_CLASS
+                        ? LIQUID_GLASS_SELECTED_CLASS
                         : TR_STICKY_CELL_BG;
                     return (
                         <div
@@ -399,7 +404,10 @@ export const TRTable = forwardRef<TRTableHandle, Props>(function TRTable(
                                 selected={isSelected}
                                 closeSignal={scrollCloseSignal}
                                 onToggleSelection={() => toggleRow(row.id)}
-                                className={`sticky left-0 z-[60] ${DOC_COL_W} border-b border-r border-gray-200 py-2 pl-4 pr-2 text-xs text-gray-800 flex items-center transition-colors ${stickyRowBg} ${isSelected ? "" : APP_SURFACE_GROUP_HOVER_CLASS}`}
+                                onDocumentOpen={(document) =>
+                                    onDocumentOpen(row, document)
+                                }
+                                className={`sticky left-0 z-[60] ${DOC_COL_W} border-b border-r border-gray-200 py-2 pl-3 pr-2 text-xs text-gray-800 flex items-center transition-colors ${stickyRowBg} ${isSelected ? "" : LIQUID_GLASS_GROUP_HOVER_CLASS}`}
                             />
                             {columns.map((col) => {
                                 const cell = getCell(row, col.index);

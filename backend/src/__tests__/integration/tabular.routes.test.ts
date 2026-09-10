@@ -30,46 +30,93 @@ type QueryResult = { data: unknown; error: unknown };
 
 let supabaseState: {
     rpc: QueryResult;
+    rpcCalls: { fn: string; args: unknown }[];
+    operations: string[];
     tables: Record<string, QueryResult>;
     inserts: { table: string; payload: unknown }[];
+    updates: { table: string; payload: unknown }[];
 };
 
 function resetSupabaseState() {
     supabaseState = {
         rpc: { data: [], error: null },
+        rpcCalls: [],
+        operations: [],
         tables: {},
         inserts: [],
+        updates: [],
     };
 }
 resetSupabaseState();
 
 function resultForTable(table: string): QueryResult {
-    return supabaseState.tables[table] ?? { data: null, error: null };
+    const result = supabaseState.tables[table] ?? { data: null, error: null };
+    if (
+        table === "tabular_reviews" &&
+        result.data &&
+        typeof result.data === "object" &&
+        !Array.isArray(result.data) &&
+        !("model" in result.data)
+    ) {
+        return {
+            ...result,
+            data: { ...result.data, model: "claude-sonnet-5" },
+        };
+    }
+    return result;
 }
 
 function makeQuery(table: string) {
     const q: Record<string, unknown> = {};
     const chain = [
-        "select", "update", "delete", "upsert",
-        "eq", "neq", "in", "is", "or", "not", "lt", "gt", "gte", "lte",
-        "filter", "order", "limit", "range", "contains",
+    "select",
+    "delete",
+    "upsert",
+    "eq",
+    "neq",
+    "in",
+    "is",
+    "or",
+    "not",
+    "lt",
+    "gt",
+    "gte",
+    "lte",
+    "filter",
+    "order",
+    "limit",
+    "range",
+    "contains",
     ];
     for (const m of chain) q[m] = vi.fn(() => q);
     q.insert = vi.fn((payload: unknown) => {
         supabaseState.inserts.push({ table, payload });
         return q;
     });
+    q.update = vi.fn((payload: unknown) => {
+        supabaseState.updates.push({ table, payload });
+        return q;
+    });
     q.single = vi.fn(() => Promise.resolve(resultForTable(table)));
     q.maybeSingle = vi.fn(() => Promise.resolve(resultForTable(table)));
-    q.then = (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
-        Promise.resolve(resultForTable(table)).then(resolve, reject);
+  q.then = (
+    resolve: (v: unknown) => unknown,
+    reject?: (e: unknown) => unknown,
+  ) => Promise.resolve(resultForTable(table)).then(resolve, reject);
     return q;
 }
 
 function mockSupabase() {
     return {
-        from: vi.fn((table: string) => makeQuery(table)),
-        rpc: vi.fn(() => Promise.resolve(supabaseState.rpc)),
+        from: vi.fn((table: string) => {
+            supabaseState.operations.push(`from:${table}`);
+            return makeQuery(table);
+        }),
+        rpc: vi.fn((fn: string, args: unknown) => {
+            supabaseState.operations.push(`rpc:${fn}`);
+            supabaseState.rpcCalls.push({ fn, args });
+            return Promise.resolve(supabaseState.rpc);
+        }),
         auth: {
             getUser: () =>
                 Promise.resolve({ data: { user: { id: "u1" } }, error: null }),
@@ -107,6 +154,8 @@ vi.mock("../../lib/access", () => ({
 vi.mock("../../lib/userSettings", () => ({
     getUserModelSettings: (...args: unknown[]) => getUserModelSettings(...args),
     getUserApiKeys: vi.fn(async () => ({})),
+    persistLastSelectedChatModel: vi.fn(async () => null),
+    persistLastSelectedReasoningLevel: vi.fn(async () => null),
 }));
 
 // Version-path enrichment hits the DB in real life; no-op it so route
@@ -129,7 +178,7 @@ describe("tabular.routes", () => {
         checkProjectAccess.mockResolvedValue({
             ok: true,
             isOwner: true,
-            project: { id: "p1", user_id: "u1" },
+            project: { id: "p1", user_id: "u1", shared_with: null },
         });
         // Default: every requested doc is accessible (identity passthrough).
         filterAccessibleDocumentIds.mockImplementation(
@@ -137,7 +186,9 @@ describe("tabular.routes", () => {
         );
         getUserModelSettings.mockResolvedValue({
             title_model: "claude-haiku-4-5",
-            tabular_model: "claude-sonnet-4-5",
+            tabular_model: "claude-sonnet-5",
+            last_selected_chat_model: "claude-sonnet-5",
+            last_selected_reasoning_level: "high",
             legal_research_us: false,
             api_keys: { claude: "sk-test" },
         });
@@ -151,7 +202,9 @@ describe("tabular.routes", () => {
                 error: null,
             };
 
-            const res = await request(app).get("/tabular-review").set(...AUTH);
+      const res = await request(app)
+        .get("/tabular-review")
+        .set(...AUTH);
 
             expect(res.status).toBe(200);
             expect(res.body).toEqual([{ id: "r1", title: "Alpha" }]);
@@ -160,15 +213,32 @@ describe("tabular.routes", () => {
         it("returns 500 with detail when the RPC errors", async () => {
             supabaseState.rpc = { data: null, error: { message: "boom" } };
 
-            const res = await request(app).get("/tabular-review").set(...AUTH);
+      const res = await request(app)
+        .get("/tabular-review")
+        .set(...AUTH);
 
             expect(res.status).toBe(500);
-            expect(res.body.detail).toBe("boom");
+            expect(res.body.detail).toBe("Something went wrong. Please try again.");
         });
     });
 
     // ── POST /tabular-review (create) ─────────────────────────────────────
     describe("POST /tabular-review", () => {
+        it("rejects creation without an explicit model", async () => {
+            const res = await request(app)
+                .post("/tabular-review")
+                .set(...AUTH)
+                .send({ document_ids: [], columns_config: [] });
+
+            expect(res.status).toBe(400);
+            expect(res.body.code).toBe("model_required");
+            expect(
+                supabaseState.inserts.some(
+                    (insert) => insert.table === "tabular_reviews",
+                ),
+            ).toBe(false);
+        });
+
         it("creates a review (201) and only persists accessible documents", async () => {
             supabaseState.tables.tabular_reviews = {
                 data: { id: "r9", title: "Gamma", document_ids: ["d1"] },
@@ -209,6 +279,7 @@ describe("tabular.routes", () => {
                     title: "Gamma",
                     document_ids: ["d1", "d2"],
                     columns_config: [{ index: 0, name: "Col", prompt: "p" }],
+                    model: "claude-sonnet-5",
                 });
 
             expect(res.status).toBe(201);
@@ -242,9 +313,27 @@ describe("tabular.routes", () => {
             };
             supabaseState.tables.documents = {
                 data: [
-                    { id: "d1", filename: "A.pdf", file_type: "pdf", project_id: "p1", folder_id: "f1" },
-                    { id: "d2", filename: "B.pdf", file_type: "pdf", project_id: "p1", folder_id: "f1" },
-                    { id: "d3", filename: "Loose.pdf", file_type: "pdf", project_id: "p1", folder_id: null },
+          {
+            id: "d1",
+            filename: "A.pdf",
+            file_type: "pdf",
+            project_id: "p1",
+            folder_id: "f1",
+          },
+          {
+            id: "d2",
+            filename: "B.pdf",
+            file_type: "pdf",
+            project_id: "p1",
+            folder_id: "f1",
+          },
+          {
+            id: "d3",
+            filename: "Loose.pdf",
+            file_type: "pdf",
+            project_id: "p1",
+            folder_id: null,
+          },
                 ],
                 error: null,
             };
@@ -287,13 +376,18 @@ describe("tabular.routes", () => {
                     document_ids: ["d1", "d2", "d3"],
                     document_grouping: "folder",
                     columns_config: [{ index: 0, name: "Col", prompt: "p" }],
+                    model: "claude-sonnet-5",
                 });
 
             expect(res.status).toBe(201);
-            expect(supabaseState.inserts.find((i) => i.table === "tabular_reviews")?.payload)
-                .toMatchObject({ document_grouping: "folder" });
-            expect(supabaseState.inserts.find((i) => i.table === "tabular_review_rows")?.payload)
-                .toEqual([
+      expect(
+        supabaseState.inserts.find((i) => i.table === "tabular_reviews")
+          ?.payload,
+      ).toMatchObject({ document_grouping: "folder" });
+      expect(
+        supabaseState.inserts.find((i) => i.table === "tabular_review_rows")
+          ?.payload,
+      ).toEqual([
                     {
                         review_id: "r10",
                         label: "Contracts",
@@ -313,14 +407,18 @@ describe("tabular.routes", () => {
                         sort_index: 1,
                     },
                 ]);
-            expect(supabaseState.inserts.find((i) => i.table === "tabular_review_row_sources")?.payload)
-                .toEqual([
+      expect(
+        supabaseState.inserts.find(
+          (i) => i.table === "tabular_review_row_sources",
+        )?.payload,
+      ).toEqual([
                     { row_id: "row-folder", document_id: "d1", sort_index: 0 },
                     { row_id: "row-folder", document_id: "d2", sort_index: 1 },
                     { row_id: "row-document", document_id: "d3", sort_index: 0 },
                 ]);
-            expect(supabaseState.inserts.find((i) => i.table === "tabular_cells")?.payload)
-                .toEqual([
+      expect(
+        supabaseState.inserts.find((i) => i.table === "tabular_cells")?.payload,
+      ).toEqual([
                     {
                         review_id: "r10",
                         row_id: "row-folder",
@@ -398,6 +496,7 @@ describe("tabular.routes", () => {
                     document_ids: ["d1", "d2"],
                     document_grouping: "folder",
                     columns_config: [{ index: 0, name: "Col", prompt: "p" }],
+                    model: "claude-sonnet-5",
                 });
 
             expect(res.status).toBe(201);
@@ -444,6 +543,7 @@ describe("tabular.routes", () => {
                     project_id: "p-nope",
                     document_ids: [],
                     columns_config: [],
+                    model: "claude-sonnet-5",
                 });
 
             expect(res.status).toBe(404);
@@ -459,10 +559,14 @@ describe("tabular.routes", () => {
             const res = await request(app)
                 .post("/tabular-review")
                 .set(...AUTH)
-                .send({ document_ids: [], columns_config: [] });
+                .send({
+                    document_ids: [],
+                    columns_config: [],
+                    model: "claude-sonnet-5",
+                });
 
             expect(res.status).toBe(500);
-            expect(res.body.detail).toBe("insert failed");
+            expect(res.body.detail).toBe("Something went wrong. Please try again.");
         });
     });
 
@@ -502,6 +606,8 @@ describe("tabular.routes", () => {
                     project_id: null,
                     document_ids: ["d1"],
                     columns_config: [],
+                    active_generation_id: "generation-1",
+                    generation_lease_expires_at: "2099-01-01T00:00:00.000Z",
                 },
                 error: null,
             };
@@ -527,7 +633,11 @@ describe("tabular.routes", () => {
                 .set(...AUTH);
 
             expect(res.status).toBe(200);
-            expect(res.body.review).toMatchObject({ id: "r1", is_owner: true });
+            expect(res.body.review).toMatchObject({
+                id: "r1",
+                is_owner: true,
+                is_running: true,
+            });
             expect(res.body.cells).toHaveLength(1);
             expect(res.body.documents).toEqual([
                 { id: "d1", current_version_id: null },
@@ -546,6 +656,18 @@ describe("tabular.routes", () => {
             expect(res.status).toBe(400);
             expect(res.body.detail).toBe(
                 "project_id must be a non-empty string or null",
+            );
+        });
+
+        it("returns 400 when sharing the review with yourself", async () => {
+            const res = await request(app)
+                .patch("/tabular-review/r1")
+                .set(...AUTH)
+                .send({ shared_with: ["U1@Test.Local"] });
+
+            expect(res.status).toBe(400);
+            expect(res.body.detail).toBe(
+                "You cannot share a tabular review with yourself.",
             );
         });
 
@@ -601,7 +723,7 @@ describe("tabular.routes", () => {
                 .set(...AUTH);
 
             expect(res.status).toBe(500);
-            expect(res.body.detail).toBe("delete failed");
+            expect(res.body.detail).toBe("Something went wrong. Please try again.");
         });
     });
 
@@ -633,9 +755,15 @@ describe("tabular.routes", () => {
             expect(res.body.detail).toBe("Review not found");
         });
 
-        it("returns 204 on success", async () => {
+        it("rejects clearing cells while generation holds the review lease", async () => {
             supabaseState.tables.tabular_reviews = {
-                data: { id: "r1", user_id: "u1", project_id: null },
+                data: {
+                    id: "r1",
+                    user_id: "u1",
+                    project_id: null,
+                    active_generation_id: "00000000-0000-4000-8000-000000000001",
+                    generation_lease_expires_at: "2099-01-01T00:00:00.000Z",
+                },
                 error: null,
             };
 
@@ -644,7 +772,61 @@ describe("tabular.routes", () => {
                 .set(...AUTH)
                 .send({ row_ids: ["row-1"] });
 
+            expect(res.status).toBe(409);
+            expect(res.body).toEqual({
+                code: "review_running",
+                detail: "This tabular review is currently running.",
+            });
+            expect(supabaseState.operations).not.toContain("from:tabular_cells");
+        });
+
+        it("atomically rejects clearing when a run starts after the review read", async () => {
+            supabaseState.tables.tabular_reviews = {
+                data: {
+                    id: "r1",
+                    user_id: "u1",
+                    project_id: null,
+                    updated_at: "2026-08-22T10:00:00.000Z",
+                },
+                error: null,
+            };
+            supabaseState.rpc = { data: "running", error: null };
+
+            const res = await request(app)
+                .post("/tabular-review/r1/clear-cells")
+                .set(...AUTH)
+                .send({ row_ids: ["row-1"] });
+
+            expect(res.status).toBe(409);
+            expect(res.body.code).toBe("review_running");
+            expect(supabaseState.rpcCalls[0]?.fn).toBe(
+                "begin_tabular_review_generation",
+            );
+            expect(supabaseState.operations).not.toContain("from:tabular_cells");
+        });
+
+        it("returns 204 on success", async () => {
+            supabaseState.tables.tabular_reviews = {
+                data: {
+                    id: "r1",
+                    user_id: "u1",
+                    project_id: null,
+                    updated_at: "2026-08-22T10:00:00.000Z",
+                },
+                error: null,
+            };
+            supabaseState.rpc = { data: "started", error: null };
+
+            const res = await request(app)
+                .post("/tabular-review/r1/clear-cells")
+                .set(...AUTH)
+                .send({ row_ids: ["row-1"] });
+
             expect(res.status).toBe(204);
+            expect(supabaseState.rpcCalls.map(({ fn }) => fn)).toEqual([
+                "begin_tabular_review_generation",
+                "finish_tabular_review_generation",
+            ]);
         });
     });
 
@@ -657,9 +839,7 @@ describe("tabular.routes", () => {
                 .send({});
 
             expect(res.status).toBe(400);
-            expect(res.body.detail).toBe(
-                "row_id and column_index are required",
-            );
+      expect(res.body.detail).toBe("row_id and column_index are required");
         });
 
         it("returns 404 when review access is denied", async () => {
@@ -676,6 +856,77 @@ describe("tabular.routes", () => {
 
             expect(res.status).toBe(404);
             expect(res.body.detail).toBe("Review not found");
+        });
+
+        it("rejects cell regeneration while generation holds the review lease", async () => {
+            supabaseState.tables.tabular_reviews = {
+                data: {
+                    id: "r1",
+                    user_id: "u1",
+                    project_id: null,
+                    active_generation_id: "00000000-0000-4000-8000-000000000001",
+                    generation_lease_expires_at: "2099-01-01T00:00:00.000Z",
+                    columns_config: [{ index: 0, name: "Col", prompt: "p" }],
+                },
+                error: null,
+            };
+
+            const res = await request(app)
+                .post("/tabular-review/r1/regenerate-cell")
+                .set(...AUTH)
+                .send({ row_id: "row-1", column_index: 0 });
+
+            expect(res.status).toBe(409);
+            expect(res.body).toEqual({
+                code: "review_running",
+                detail: "This tabular review is currently running.",
+            });
+            expect(supabaseState.operations).not.toContain(
+                "from:tabular_review_rows",
+            );
+        });
+
+        it("atomically rejects regeneration when a run starts after the review read", async () => {
+            supabaseState.tables.tabular_reviews = {
+                data: {
+                    id: "r1",
+                    user_id: "u1",
+                    project_id: null,
+                    updated_at: "2026-08-22T10:00:00.000Z",
+                    columns_config: [{ index: 0, name: "Col", prompt: "p" }],
+                },
+                error: null,
+            };
+            supabaseState.tables.tabular_review_rows = {
+                data: [
+                    {
+                        id: "row-1",
+                        review_id: "r1",
+                        label: "Document",
+                        row_type: "document",
+                        document_id: "d1",
+                        sort_index: 0,
+                    },
+                ],
+                error: null,
+            };
+            supabaseState.tables.tabular_review_row_sources = {
+                data: [{ row_id: "row-1", document_id: "d1" }],
+                error: null,
+            };
+            supabaseState.rpc = { data: "running", error: null };
+
+            const res = await request(app)
+                .post("/tabular-review/r1/regenerate-cell")
+                .set(...AUTH)
+                .send({ row_id: "row-1", column_index: 0 });
+
+            expect(res.status).toBe(409);
+            expect(res.body.code).toBe("review_running");
+            expect(supabaseState.rpcCalls[0]?.fn).toBe(
+                "begin_tabular_review_generation",
+            );
+            expect(supabaseState.operations).not.toContain("from:tabular_cells");
         });
 
         it("returns 400 when the column is not configured", async () => {
@@ -770,7 +1021,7 @@ describe("tabular.routes", () => {
             };
             getUserModelSettings.mockResolvedValue({
                 title_model: "claude-haiku-4-5",
-                tabular_model: "claude-sonnet-4-5",
+                tabular_model: "claude-sonnet-5",
                 legal_research_us: false,
                 api_keys: {},
             });
@@ -814,6 +1065,28 @@ describe("tabular.routes", () => {
             expect(res.body.detail).toBe("Review not found");
         });
 
+        it("blocks a run when the review has no selected model", async () => {
+            supabaseState.tables.tabular_reviews = {
+                data: {
+                    id: "r1",
+                    user_id: "u1",
+                    project_id: null,
+                    columns_config: [{ index: 0, name: "Col", prompt: "p" }],
+                    model: null,
+                },
+                error: null,
+            };
+
+            const res = await request(app)
+                .post("/tabular-review/r1/generate")
+                .set(...AUTH)
+                .send({ expected_updated_at: new Date().toISOString() });
+
+            expect(res.status).toBe(409);
+            expect(res.body.code).toBe("model_required");
+            expect(supabaseState.rpcCalls).toHaveLength(0);
+        });
+
         it("returns 400 when no columns are configured", async () => {
             supabaseState.tables.tabular_reviews = {
                 data: {
@@ -846,7 +1119,7 @@ describe("tabular.routes", () => {
             supabaseState.tables.tabular_cells = { data: [], error: null };
             getUserModelSettings.mockResolvedValue({
                 title_model: "claude-haiku-4-5",
-                tabular_model: "claude-sonnet-4-5",
+                tabular_model: "claude-sonnet-5",
                 legal_research_us: false,
                 api_keys: {},
             });
@@ -858,6 +1131,130 @@ describe("tabular.routes", () => {
             expect(res.status).toBe(422);
             expect(res.body.code).toBe("missing_api_key");
         });
+
+        it("requires the version currently loaded by the client", async () => {
+            supabaseState.tables.tabular_reviews = {
+                data: {
+                    id: "r1",
+                    user_id: "u1",
+                    project_id: null,
+                    updated_at: "2026-08-22T10:00:00.000Z",
+                    columns_config: [{ index: 0, name: "Col", prompt: "p" }],
+                },
+                error: null,
+            };
+            supabaseState.tables.tabular_cells = { data: [], error: null };
+
+            const res = await request(app)
+                .post("/tabular-review/r1/generate")
+                .set(...AUTH)
+                .send({});
+
+            expect(res.status).toBe(400);
+            expect(res.body.detail).toBe(
+                "expected_updated_at must be a valid timestamp",
+            );
+        });
+
+        it("claims the lease before loading rows and cells", async () => {
+            supabaseState.tables.tabular_reviews = {
+                data: {
+                    id: "r1",
+                    user_id: "u1",
+                    project_id: null,
+                    updated_at: "2026-08-22T10:00:00.000Z",
+                    columns_config: [{ index: 0, name: "Col", prompt: "p" }],
+                },
+                error: null,
+            };
+            supabaseState.tables.tabular_review_rows = {
+                data: [],
+                error: null,
+            };
+            supabaseState.tables.tabular_cells = {
+                data: null,
+                error: { message: "cell snapshot failed" },
+            };
+            supabaseState.rpc = { data: "started", error: null };
+
+            const res = await request(app)
+                .post("/tabular-review/r1/generate")
+                .set(...AUTH)
+                .send({
+                    expected_updated_at: "2026-08-22T10:00:00.000Z",
+                });
+
+            expect(res.status).toBe(500);
+            expect(res.body.detail).toBe(
+                "Something went wrong. Please try again.",
+            );
+            const beginIndex = supabaseState.operations.indexOf(
+                "rpc:begin_tabular_review_generation",
+            );
+            const rowsIndex = supabaseState.operations.indexOf(
+                "from:tabular_review_rows",
+            );
+            const cellsIndex = supabaseState.operations.indexOf(
+                "from:tabular_cells",
+            );
+            expect(beginIndex).toBeGreaterThanOrEqual(0);
+            expect(rowsIndex).toBeGreaterThan(beginIndex);
+            expect(cellsIndex).toBeGreaterThan(rowsIndex);
+            expect(supabaseState.rpcCalls.at(-1)?.fn).toBe(
+                "finish_tabular_review_generation",
+            );
+        });
+
+        it.each([
+            [
+                "running",
+                "review_running",
+                "This tabular review is already running elsewhere.",
+            ],
+            [
+                "stale",
+                "review_stale",
+                "A newer version of this tabular review is available.",
+            ],
+        ])(
+            "returns a distinct conflict when the atomic start result is %s",
+            async (startResult, code, detail) => {
+                supabaseState.tables.tabular_reviews = {
+                    data: {
+                        id: "r1",
+                        user_id: "u1",
+                        project_id: null,
+                        updated_at: "2026-08-22T10:00:00.000Z",
+                        columns_config: [
+                            { index: 0, name: "Col", prompt: "p" },
+                        ],
+                    },
+                    error: null,
+                };
+                supabaseState.tables.tabular_cells = {
+                    data: [],
+                    error: null,
+                };
+                supabaseState.rpc = { data: startResult, error: null };
+
+                const res = await request(app)
+                    .post("/tabular-review/r1/generate")
+                    .set(...AUTH)
+                    .send({
+                        expected_updated_at: "2026-08-22T10:00:00.000Z",
+                    });
+
+                expect(res.status).toBe(409);
+                expect(res.body).toEqual({ code, detail });
+                expect(supabaseState.rpcCalls[0]).toMatchObject({
+                    fn: "begin_tabular_review_generation",
+                    args: {
+                        target_review_id: "r1",
+                        expected_updated_at: "2026-08-22T10:00:00.000Z",
+                    },
+                });
+            },
+        );
     });
 
     // ── POST /tabular-review/:reviewId/chat (streaming GUARDS only) ───────
@@ -901,7 +1298,7 @@ describe("tabular.routes", () => {
             supabaseState.tables.tabular_cells = { data: [], error: null };
             getUserModelSettings.mockResolvedValue({
                 title_model: "claude-haiku-4-5",
-                tabular_model: "claude-sonnet-4-5",
+                tabular_model: "claude-sonnet-5",
                 legal_research_us: false,
                 api_keys: {},
             });
@@ -909,10 +1306,51 @@ describe("tabular.routes", () => {
             const res = await request(app)
                 .post("/tabular-review/r1/chat")
                 .set(...AUTH)
-                .send({ messages: [{ role: "user", content: "hello" }] });
+                .send({
+                    messages: [{ role: "user", content: "hello" }],
+                    model: "claude-sonnet-5",
+                });
 
             expect(res.status).toBe(422);
             expect(res.body.code).toBe("missing_api_key");
+        });
+    });
+
+    describe("PATCH /tabular-review/:reviewId/chats/:chatId", () => {
+        it("persists the chat model and reasoning independently", async () => {
+            supabaseState.tables.tabular_review_chats = {
+                data: {
+                    id: "chat-1",
+                    title: "Chat",
+                    model: "claude-sonnet-5",
+                    reasoning_level: "high",
+                    review_id: "r1",
+                    user_id: "u1",
+                },
+                error: null,
+            };
+            getUserModelSettings.mockResolvedValue({
+                title_model: "claude-haiku-4-5",
+                tabular_model: "claude-sonnet-5",
+                last_selected_chat_model: "claude-sonnet-5",
+                last_selected_reasoning_level: "high",
+                legal_research_us: false,
+                api_keys: { openai: "sk-test" },
+            });
+
+            const res = await request(app)
+                .patch("/tabular-review/r1/chats/chat-1")
+                .set(...AUTH)
+                .send({ model: "gpt-5.6-sol", reasoningLevel: "low" });
+
+            expect(res.status).toBe(200);
+            expect(supabaseState.updates).toContainEqual({
+                table: "tabular_review_chats",
+                payload: expect.objectContaining({
+                    model: "gpt-5.6-sol",
+                    reasoning_level: "low",
+                }),
+            });
         });
     });
 
@@ -948,9 +1386,7 @@ describe("tabular.routes", () => {
                 .set(...AUTH);
 
             expect(res.status).toBe(200);
-            expect(res.body).toEqual([
-                { id: "chat-1", title: "T", user_id: "u1" },
-            ]);
+      expect(res.body).toEqual([{ id: "chat-1", title: "T", user_id: "u1" }]);
         });
     });
 });

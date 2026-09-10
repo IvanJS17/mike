@@ -1,7 +1,8 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import type { DocumentCitation } from "../../shared/types";
-import { CitationQuotesHeader } from "../CitationQuotesHeader";
+import { CitationQuotesSection } from "../CitationQuotesSection";
 import {
   citationVerificationAriaLabel,
   citationVerificationPillClassName,
@@ -23,6 +24,7 @@ function documentCitation(verified?: boolean): DocumentCitation {
     ...(verified === undefined ? {} : { verified }),
   };
 }
+
 describe("citation verification presentation", () => {
   it("leaves verified document citations in their original gray style", () => {
     const citation = documentCitation(true);
@@ -31,15 +33,23 @@ describe("citation verification presentation", () => {
     expect(citationVerificationPillClassName(citation)).toBe("");
   });
 
-  it("shows unverified document citations in red without an outline", () => {
+  it("uses the red error style for unverified citations", () => {
     const citation = documentCitation(false);
     expect(citationVerificationState(citation)).toBe("unverified");
     expect(citationVerificationAriaLabel(citation)).toBe(
       "Citation 1. Could not verify quote",
     );
-    expect(citationVerificationPillClassName(citation)).toContain("!border-0");
     expect(citationVerificationPillClassName(citation)).toContain(
       "!bg-red-100/85",
+    );
+    expect(citationVerificationPillClassName(citation)).toContain(
+      "!text-red-800",
+    );
+    expect(citationVerificationPillClassName(citation)).toContain(
+      "dark:!bg-red-950",
+    );
+    expect(citationVerificationPillClassName(citation)).toContain(
+      "dark:!text-white",
     );
   });
 
@@ -50,14 +60,28 @@ describe("citation verification presentation", () => {
     expect(citationVerificationPillClassName(citation)).toBe("");
   });
 
-  it("renders an accessible per-quote warning badge", () => {
+  it("reveals an explanation from the white warning pill", async () => {
+    const user = userEvent.setup();
     render(<CitationVerificationBadge state="unverified" />);
-    const badge = screen.getByText("Could not verify quote");
-    expect(badge).toHaveAttribute(
-      "title",
-      "Quote could not be matched to the extracted document text.",
+    const trigger = screen.getByRole("button", {
+      name: "Could not verify quote",
+    });
+    expect(trigger).toHaveClass("liquid-glass-flat", "!text-red-600");
+    expect(trigger).not.toHaveClass("bg-red-600/90");
+    expect(
+      screen.queryByText("Quote not found in document"),
+    ).not.toBeInTheDocument();
+
+    await user.click(trigger);
+
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(screen.getByText("Quote not found in document")).toBeVisible();
+    expect(
+      screen.getByText(/Treat it as hallucinated/),
+    ).toHaveTextContent(
+      "double-check the related section of the assistant response",
     );
-    expect(badge).toHaveClass("backdrop-blur-xl");
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
   });
 
   it("does not render a badge for verified quotes", () => {
@@ -69,7 +93,8 @@ describe("citation verification presentation", () => {
 
   it("shows per-quote verification in the citation panel", () => {
     render(
-      <CitationQuotesHeader
+      <CitationQuotesSection
+        citationRef={7}
         quotes={[
           {
             id: "quote-1",
@@ -81,11 +106,39 @@ describe("citation verification presentation", () => {
       />,
     );
 
+    expect(screen.getByLabelText("Citation 7")).toHaveTextContent("7");
+    expect(screen.queryByText("Citation")).not.toBeInTheDocument();
     expect(screen.getByText("Could not verify quote")).toBeVisible();
-    const quoteButton = screen.getByRole("button", {
-      name: /Model supplied quote/,
-    });
-    expect(quoteButton).toBeDisabled();
-    expect(quoteButton).not.toHaveClass("bg-blue-100/70");
+    expect(screen.getByRole("button", { name: "View" })).toBeDisabled();
+    expect(screen.getByText(/Model supplied quote/)).not.toHaveClass(
+      "citation-quote-selected",
+    );
+  });
+
+  it("formats normalized document quotes inside the quote section", () => {
+    render(
+      <CitationQuotesSection
+        document={{
+          document_id: "spreadsheet-1",
+          title: "Damages.xlsx",
+          type: "spreadsheet",
+          metadata: [],
+          quotes: [
+            {
+              quote: "1,250,000",
+              target: { sheet: "Summary", cell: "B7" },
+              verification: { verified: true },
+            },
+          ],
+        }}
+        activeQuoteId="spreadsheet-1:quote:0"
+        citationRef={4}
+      />,
+    );
+
+    expect(screen.getByText(/1,250,000/)).toHaveTextContent(
+      "“1,250,000” (Summary, cell B7)",
+    );
+    expect(screen.getByLabelText("Citation 4")).toHaveTextContent("4");
   });
 });

@@ -19,13 +19,8 @@ import {
 } from "vitest";
 import type { Message } from "@/app/components/shared/types";
 
-const saveChatMock = vi.hoisted(() => vi.fn().mockResolvedValue("new-chat"));
-
-const { getSessionMock } = vi.hoisted(() => ({
-    getSessionMock: vi.fn(),
-}));
-vi.mock("@/app/lib/supabase", () => ({
-    supabase: { auth: { getSession: getSessionMock } },
+const { updateChatTitleMock } = vi.hoisted(() => ({
+    updateChatTitleMock: vi.fn(),
 }));
 vi.mock("next/navigation", () => ({
     useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
@@ -35,16 +30,11 @@ vi.mock("@/app/contexts/ChatHistoryContext", () => ({
         replaceChatId: vi.fn(),
         loadChats: vi.fn().mockResolvedValue(undefined),
         setCurrentChatId: vi.fn(),
-        saveChat: saveChatMock,
+        saveChat: vi.fn().mockResolvedValue("new-chat"),
         setNewChatMessages: vi.fn(),
+        updateChatTitle: updateChatTitleMock,
     }),
 }));
-vi.mock("./useGenerateChatTitle", () => ({
-    useGenerateChatTitle: () => ({
-        generate: vi.fn().mockResolvedValue(undefined),
-    }),
-}));
-
 import { useAssistantChat } from "./useAssistantChat";
 
 const fetchMock = vi.fn();
@@ -86,9 +76,6 @@ const sendAndGetAssistant = async (chunks: string[]) => {
 
 beforeEach(() => {
     vi.stubGlobal("fetch", fetchMock);
-    getSessionMock.mockResolvedValue({
-        data: { session: { access_token: "t" } },
-    });
 });
 
 afterEach(() => {
@@ -97,20 +84,6 @@ afterEach(() => {
 });
 
 describe("useAssistantChat SSE parsing", () => {
-    it("keeps the initial view unchanged when governed chat creation is cancelled", async () => {
-        saveChatMock.mockResolvedValueOnce(null);
-        const { result } = renderHook(() => useAssistantChat());
-
-        let returned: string | null = "sentinel";
-        await act(async () => {
-            returned = await result.current.handleNewChat(userMessage());
-        });
-
-        expect(returned).toBeNull();
-        expect(result.current.messages).toEqual([]);
-        expect(fetchMock).not.toHaveBeenCalled();
-    });
-
     it("reassembles an event split across chunk boundaries", async () => {
         const { assistant, result } = await sendAndGetAssistant([
             'data: {"type":"content_delta","te',
@@ -140,6 +113,37 @@ describe("useAssistantChat SSE parsing", () => {
         ]);
     });
 
+    it("updates chat history as soon as a streamed title event arrives", async () => {
+        await sendAndGetAssistant([
+            'data: {"type":"chat_id","chatId":"c-42"}\n\n',
+            'data: {"type":"chat_title","chatId":"c-42","title":"German Liquidity Review"}\n\n',
+            'data: {"type":"content_delta","text":"Still streaming"}\n\n',
+        ]);
+
+        expect(updateChatTitleMock).toHaveBeenCalledWith(
+            "c-42",
+            "German Liquidity Review",
+        );
+    });
+
+    it("preserves document identity across streamed search lifecycle events", async () => {
+        const { assistant } = await sendAndGetAssistant([
+            'data: {"type":"doc_find_start","filename":"agreement.pdf","document_id":"document-1","version_id":"version-2","version_number":2,"query":"termination"}\n\n',
+            'data: {"type":"doc_find","filename":"agreement.pdf","document_id":"document-1","version_id":"version-2","version_number":2,"query":"termination","total_matches":2}\n\n',
+        ]);
+
+        expect(assistant?.events).toContainEqual({
+            type: "doc_find",
+            filename: "agreement.pdf",
+            document_id: "document-1",
+            version_id: "version-2",
+            version_number: 2,
+            query: "termination",
+            total_matches: 2,
+            isStreaming: false,
+        });
+    });
+
     it("finalizes reasoning when content starts, keeping event order", async () => {
         const { assistant } = await sendAndGetAssistant([
             'data: {"type":"reasoning_delta","text":"Let me "}\n\n',
@@ -153,20 +157,33 @@ describe("useAssistantChat SSE parsing", () => {
         ]);
     });
 
-    it("surfaces an error event on the assistant message and stops loading", async () => {
+    it("sanitizes an unexpected error event and stops loading", async () => {
         const { assistant, result } = await sendAndGetAssistant([
             'data: {"type":"content_delta","text":"Part"}\n\n',
             'data: {"type":"error","message":"model unavailable"}\n\n',
         ]);
 
-        expect(assistant?.error).toBe("model unavailable");
+        expect(assistant?.error).toBe("Sorry, something went wrong.");
         // Streamed content is finalized before the error event is appended.
         expect(assistant?.events).toEqual([
             { type: "content", text: "Part" },
-            { type: "error", message: "model unavailable" },
+            { type: "error", message: "Sorry, something went wrong." },
         ]);
         expect(result.current.isResponseLoading).toBe(false);
         expect(result.current.isLoadingCitations).toBe(false);
+    });
+
+    it("preserves an explicitly safe, actionable error event", async () => {
+        const { assistant } = await sendAndGetAssistant([
+            'data: {"type":"error","message":"Select a saved model first.","safe_to_display":true}\n\n',
+        ]);
+
+        expect(assistant?.error).toBe("Select a saved model first.");
+        expect(assistant?.events).toContainEqual({
+            type: "error",
+            message: "Select a saved model first.",
+            safe_to_display: true,
+        });
     });
 
     it("falls back to a readable message for blank error events", async () => {
@@ -230,7 +247,7 @@ describe("useAssistantChat SSE parsing", () => {
         const assistant = result.current.messages.findLast(
             (m) => m.role === "assistant",
         );
-        expect(assistant?.error).toBe("HTTP 429: quota exceeded");
+        expect(assistant?.error).toBe("Sorry, something went wrong.");
         expect(result.current.isResponseLoading).toBe(false);
     });
 

@@ -20,11 +20,40 @@ describe("PillButton", () => {
         );
     });
 
+    it("has a visible keyboard focus ring", () => {
+        render(<PillButton tone="black">Save</PillButton>);
+        expect(screen.getByRole("button", { name: "Save" })).toHaveClass(
+            "focus-visible:ring-2",
+        );
+    });
+
+    it("keeps the focus ring when rendered via asChild", () => {
+        render(
+            <PillButton tone="blue" asChild>
+                <a href="/docs">Docs</a>
+            </PillButton>,
+        );
+        expect(screen.getByRole("link", { name: "Docs" })).toHaveClass(
+            "focus-visible:ring-2",
+        );
+    });
+
     it("applies the tone class", () => {
         render(<PillButton tone="danger">Delete</PillButton>);
         expect(screen.getByRole("button", { name: "Delete" })).toHaveClass(
             "bg-red-600/90",
         );
+    });
+
+    it("uses the flat liquid surface for the white tone", () => {
+        render(<PillButton tone="white">Cancel</PillButton>);
+
+        const button = screen.getByRole("button", { name: "Cancel" });
+        expect(button).toHaveClass(
+            "liquid-glass-flat",
+            "liquid-glass-hover",
+        );
+        expect(button).not.toHaveClass("bg-white", "shadow-sm");
     });
 
     it("applies the normal size class when requested", () => {

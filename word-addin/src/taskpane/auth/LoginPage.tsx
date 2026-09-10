@@ -1,15 +1,40 @@
 import React, { useState } from "react";
 import { useAuth } from "./useAuth";
-import { Button } from "@mike/shared/ui/button";
-import { Input } from "@mike/shared/ui/input";
-import { Label } from "@mike/shared/ui/label";
-import { Spinner } from "@mike/shared/ui/spinner";
-import { MikeIcon } from "@mike/shared/chat/mike-icon";
+import { Input } from "../../shared/ui/input";
+import { Label } from "../../shared/ui/label";
+import { WordAddinLogo } from "../components/shell/WordAddinLogo";
+import { PillButtonUI as PillButton } from "@mike/pill-button-ui";
+import { GoogleIconUI } from "@mike/google-icon-ui";
+import { AuthDividerUI as AuthDivider } from "@mike/auth-divider-ui";
+import {
+  authGlassCardUIClassName,
+  authInputUIClassName,
+} from "@mike/auth-styles-ui";
+import { Loader2 } from "lucide-react";
+
+const WEB_APP_URL = (
+  process.env.REACT_APP_WEB_APP_URL || "https://app.mikeoss.com"
+).replace(/\/+$/, "");
+
+function openWebAuthPage(
+  event: React.MouseEvent<HTMLAnchorElement>,
+  path: string
+): void {
+  event.preventDefault();
+  const url = `${WEB_APP_URL}${path}`;
+  const ui = typeof Office !== "undefined" ? Office.context?.ui : undefined;
+  if (ui && typeof ui.openBrowserWindow === "function") {
+    ui.openBrowserWindow(url);
+  } else {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
 
 export function LoginPage(): React.ReactElement {
-  const { login, loading, error } = useAuth();
+  const { login, loginWithGoogle, loading, error } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [googleLoading, setGoogleLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
@@ -17,72 +42,134 @@ export function LoginPage(): React.ReactElement {
     await login(email.trim(), password);
   };
 
+  const handleGoogleLogin = async (): Promise<void> => {
+    setGoogleLoading(true);
+    await loginWithGoogle();
+    setGoogleLoading(false);
+  };
+
   return (
-    <div className="flex h-full items-center justify-center overflow-y-auto bg-background px-5 py-8 @sm:px-6">
-      <form
-        className="flex w-full max-w-[320px] flex-col gap-5"
-        onSubmit={handleSubmit}
-        noValidate
-      >
-        <div className="flex flex-col items-center gap-2.5 text-center">
-          <MikeIcon size={44} />
-          <div className="space-y-1">
-            <h1 className="text-xl font-semibold tracking-tight text-foreground">
-              Welcome to Mike
-            </h1>
-            <p className="text-sm text-muted-foreground">
-              AI-powered legal assistant
-            </p>
-          </div>
+    <div className="h-full overflow-y-auto bg-gray-50/80">
+      <main className="relative flex min-h-full items-center justify-center px-6 py-10">
+        <div className="absolute top-5 left-1/2 -translate-x-1/2 @sm:top-6">
+          <WordAddinLogo size="lg" />
         </div>
 
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="email">Email address</Label>
-            <Input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@firm.com"
-              disabled={loading}
-              autoComplete="email"
-              required
-            />
-          </div>
-
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="password">Password</Label>
-            <Input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              disabled={loading}
-              autoComplete="current-password"
-              required
-            />
-          </div>
-
-          {error && (
-            <p
-              className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive"
-              role="alert"
-            >
-              {error}
-            </p>
-          )}
-
-          <Button
-            type="submit"
-            className="w-full"
-            disabled={loading || !email.trim() || !password}
+        <div data-testid="login-panel" className="w-full max-w-md">
+          <div
+            data-testid="login-card"
+            className={`${authGlassCardUIClassName} mb-4`}
           >
-            {loading ? <Spinner label="Signing in…" /> : "Sign in"}
-          </Button>
+            <h1 className="mb-6 text-left font-serif text-2xl font-medium text-gray-950">
+              Log In
+            </h1>
+
+            <form
+              data-testid="login-form"
+              onSubmit={handleSubmit}
+              className="space-y-4"
+            >
+              <div>
+                <Label
+                  htmlFor="email"
+                  className="mb-2 block text-sm font-medium text-gray-700"
+                >
+                  Email
+                </Label>
+                <Input
+                  id="email"
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  autoComplete="email"
+                  required
+                  className={`w-full ${authInputUIClassName}`}
+                />
+              </div>
+
+              <div>
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <Label
+                    htmlFor="password"
+                    className="block text-sm font-medium text-gray-700"
+                  >
+                    Password
+                  </Label>
+                  <a
+                    href={`${WEB_APP_URL}/forgot-password`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(event) =>
+                      openWebAuthPage(event, "/forgot-password")
+                    }
+                    className="text-xs font-medium text-gray-500 transition-colors hover:text-gray-950"
+                  >
+                    Forgot password?
+                  </a>
+                </div>
+                <Input
+                  id="password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="current-password"
+                  required
+                  className={`w-full ${authInputUIClassName}`}
+                />
+              </div>
+
+              {error && (
+                <div
+                  className="rounded bg-red-50 p-3 text-sm text-red-600"
+                  role="alert"
+                >
+                  {error}
+                </div>
+              )}
+
+              <div className="pt-2">
+                <PillButton
+                  type="submit"
+                  tone="black"
+                  size="normal"
+                  disabled={loading}
+                  className="w-full"
+                >
+                  {loading ? "Logging in..." : "Log in"}
+                </PillButton>
+              </div>
+              <AuthDivider />
+              <PillButton
+                type="button"
+                tone="white"
+                size="normal"
+                className="w-full"
+                disabled={loading || googleLoading}
+                onClick={() => void handleGoogleLogin()}
+              >
+                {googleLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <GoogleIconUI className="h-4 w-4" />
+                )}
+                {googleLoading ? "Continuing…" : "Continue with Google"}
+              </PillButton>
+            </form>
+          </div>
+          <div className="text-center text-sm text-gray-500">
+            Don&apos;t have an account?{" "}
+            <a
+              href={`${WEB_APP_URL}/signup`}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(event) => openWebAuthPage(event, "/signup")}
+              className="font-medium transition-colors hover:text-gray-950"
+            >
+              Sign up
+            </a>
+          </div>
         </div>
-      </form>
+      </main>
     </div>
   );
 }

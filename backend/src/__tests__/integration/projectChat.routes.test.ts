@@ -6,13 +6,11 @@ const {
     checkProjectAccess,
     buildMessages,
     buildProjectDocContext,
-    resolveModelRouteForUser,
 } = vi.hoisted(() => ({
     runLLMStream: vi.fn(),
     checkProjectAccess: vi.fn(),
     buildMessages: vi.fn(),
     buildProjectDocContext: vi.fn(),
-    resolveModelRouteForUser: vi.fn(),
 }));
 
 function makeQuery() {
@@ -81,15 +79,19 @@ vi.mock("../../lib/userSettings", () => ({
         legal_research_us: false,
         title_model: "test-model",
         tabular_model: "test-model",
-        api_keys: {},
+        last_selected_chat_model: null,
+        api_keys: { gemini: "test-key" },
+        personalisation: {
+            displayName: "Ada",
+            organisation: "Acme LLP",
+            jurisdiction: "Singapore",
+            practiceSetting: "private_practice",
+            professionalTitle: "Partner",
+            practiceAreas: ["Litigation"],
+        },
     })),
+    persistLastSelectedChatModel: vi.fn(async () => null),
     getUserApiKeys: vi.fn(async () => ({})),
-}));
-
-vi.mock("../../lib/llm/governedRoutes", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("../../lib/llm/governedRoutes")>()),
-    resolveModelRouteForUser: (...args: unknown[]) =>
-        resolveModelRouteForUser(...args),
 }));
 
 vi.mock("../../lib/access", () => ({
@@ -105,12 +107,8 @@ import { spotlight } from "../../lib/chat";
 import { createServerSupabase } from "../../lib/supabase";
 
 const VALID_BODY = {
-    route: {
-        provider: "deepseek",
-        model: "deepseek-chat",
-        credential_ref: "deepseek:v1",
-    },
     messages: [{ role: "user", content: "hello" }],
+    model: "gemini-3-flash-preview",
 };
 
 describe("POST /projects/:projectId/chat", () => {
@@ -130,15 +128,8 @@ describe("POST /projects/:projectId/chat", () => {
         checkProjectAccess.mockResolvedValue({
             ok: true,
             isOwner: true,
-            project: { id: "p1", user_id: "u1" },
+            project: { id: "p1", user_id: "u1", shared_with: null },
         });
-        resolveModelRouteForUser.mockImplementation(
-            async (_userId: string, route: unknown) => ({
-                ok: true,
-                route,
-                credentialSecret: "server-only-secret",
-            }),
-        );
     });
 
     it("returns 404 and never streams when project access is denied", async () => {
@@ -164,7 +155,35 @@ describe("POST /projects/:projectId/chat", () => {
         expect(res.status).toBe(200);
         expect(res.headers["content-type"]).toContain("text/event-stream");
         expect(res.text).toContain('"type":"chat_id"');
+        expect(res.text).toContain('"type":"chat_title"');
         expect(runLLMStream).toHaveBeenCalledTimes(1);
+        expect(runLLMStream).toHaveBeenCalledWith(
+            expect.objectContaining({ emitDone: false }),
+        );
+        const systemPromptExtra = buildMessages.mock.calls[0]?.[2] as string;
+        expect(systemPromptExtra).toContain("USER PERSONALISATION");
+        expect(systemPromptExtra).toContain('"organisation": "Acme LLP"');
+    });
+
+    it("uses the shared last-selected model when a new project chat omits model", async () => {
+        const userSettings = await import("../../lib/userSettings");
+        vi.mocked(userSettings.getUserModelSettings).mockResolvedValueOnce({
+            legal_research_us: false,
+            title_model: null,
+            tabular_model: null,
+            last_selected_chat_model: "gpt-5.6-luna",
+            api_keys: { openai: "test-key" },
+        });
+
+        const res = await request(app)
+            .post("/projects/p1/chat")
+            .set("Authorization", "Bearer test")
+            .send({ messages: VALID_BODY.messages });
+
+        expect(res.status).toBe(200);
+        expect(runLLMStream).toHaveBeenCalledWith(
+            expect.objectContaining({ model: "gpt-5.6-luna" }),
+        );
     });
 
     it("normalizes validated request fields before using them", async () => {
@@ -188,12 +207,7 @@ describe("POST /projects/:projectId/chat", () => {
                         },
                     },
                 ],
-                model: " custom-model ",
-                route: {
-                    provider: "openrouter",
-                    model: " custom-model ",
-                    credential_ref: "openrouter:v1",
-                },
+                model: " gemini-3-flash-preview ",
                 displayed_doc: {
                     filename: " displayed.pdf ",
                     document_id: " displayed-document ",
@@ -231,7 +245,7 @@ describe("POST /projects/:projectId/chat", () => {
         expect(messages[0].content).toContain("displayed-document");
         expect(systemPromptExtra).toContain("attached.pdf");
         expect(runLLMStream.mock.calls[0][0]).toMatchObject({
-            model: "custom-model",
+            model: "gemini-3-flash-preview",
         });
     });
 

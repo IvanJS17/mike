@@ -1,0 +1,347 @@
+{
+  "created_at": "2026-09-09T22:44:26.757038-06:00",
+  "base": "f4dc9846eaa5fba2a97288c645112a59eaadba36",
+  "gates": [
+    {
+      "id": 1,
+      "criterion": "Backend type/build/lint",
+      "status": "PASS",
+      "evidence": [
+        {
+          "file": "phase3-backend-unit.log",
+          "sha256": "ddeca8cf768a4f91db6bb2ec761dc591782c947ad1771fd3455b632cf31744f1"
+        },
+        {
+          "file": "final-backend-build.log",
+          "sha256": "9ff39ff9566295cb1a2480806cb7489790e692bb20cb3f30122b097bb39e6654"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "criterion": "Frontend type/build/lint",
+      "status": "PASS",
+      "evidence": [
+        {
+          "file": "final-frontend-online-build.log",
+          "sha256": "fbfddc1f91ee9ff764119ffe8734b3cb228ec7f732954f63ca52a7a90765fb7b"
+        },
+        {
+          "file": "courtlistener-frontend-final.log",
+          "sha256": "d45c71b00704afe19eb1ea6b68895af6b83ebf957737349de951823ab34a13bb"
+        },
+        {
+          "file": "courtlistener-eslint.json",
+          "sha256": "3ec8f24dd8fcf1c8cf8603e06b1eaf6e3fe9ad931e605eb70088c9f8fa1a6d75"
+        },
+        {
+          "file": "frontend-word-source-equivalence.json",
+          "sha256": "0582769a3b73af91c975fa552c8e2567f9b4f39d2f988f4d5e0f265970768a2c"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "criterion": "Word build and bounded E2E",
+      "status": "PASS",
+      "evidence": [
+        {
+          "file": "phase3-word-final-build.log",
+          "sha256": "d4081924b12a885c677ab36c22f2d49568f3c494edd411e2ee3e45d302791a74"
+        },
+        {
+          "file": "litt-word-3092102d9a6641bd95205b2ffd505783/command.json",
+          "sha256": "4b34dc08769991499402c0023686f781b334fa59269b6ff8e2d182b278a1ac9b"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "criterion": "Fresh bootstrap",
+      "status": "PASS",
+      "evidence": [
+        {
+          "file": "integrated-core-final.log",
+          "sha256": "1ea24c2387676d4dc4535dc1747ec77ae3eed7bb250bdce6ba848c977cf34b2e"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "criterion": "Populated supported ordered upgrade incl historical Drive",
+      "status": "PASS",
+      "evidence": [
+        {
+          "file": "phase3-drive-sql.log",
+          "sha256": "d361e449935548a0ad6f701c6f06e8fbc942c3f08c0a52ebb8ec3897ccbf582b"
+        },
+        {
+          "file": "ci-schema-command-green.log",
+          "sha256": "7fab423a5f2d7b0fedf6f7becc87f93397727dead3eb565e9ba0e496bc59f863"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "criterion": "Full fresh/upgrade security/schema fingerprint",
+      "status": "PASS",
+      "evidence": [
+        {
+          "file": "integrated-core-final.log",
+          "sha256": "1ea24c2387676d4dc4535dc1747ec77ae3eed7bb250bdce6ba848c977cf34b2e"
+        },
+        {
+          "file": "phase3-drive-sql.log",
+          "sha256": "d361e449935548a0ad6f701c6f06e8fbc942c3f08c0a52ebb8ec3897ccbf582b"
+        },
+        {
+          "file": "ci-schema-command-green.log",
+          "sha256": "7fab423a5f2d7b0fedf6f7becc87f93397727dead3eb565e9ba0e496bc59f863"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "criterion": "Auth/MFA/tenancy/private matter/revocation",
+      "status": "PASS",
+      "evidence": [
+        {
+          "file": "final-beta-runtime-569a3523b797/parent-verified.json",
+          "sha256": "a6f4ac7ba8ab1939a6e8cb214df5cf3784004b24a6f27c8ae659564fe62081e0"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "criterion": "Providers/router/BYOK/pins/zero real egress",
+      "status": "PASS",
+      "evidence": [
+        {
+          "file": "phase3-backend-unit.log",
+          "sha256": "ddeca8cf768a4f91db6bb2ec761dc591782c947ad1771fd3455b632cf31744f1"
+        }
+      ],
+      "scope": "Versioned credential/router/provider contracts in default tests, synthetic credentials and fake egress; no real-provider or DB-BYOK canary claim"
+    },
+    {
+      "id": 9,
+      "criterion": "Persisted mike_workflows MX R4/R6/R9 identity",
+      "status": "PASS",
+      "evidence": [
+        {
+          "file": "final-beta-runtime-569a3523b797/parent-verified.json",
+          "sha256": "a6f4ac7ba8ab1939a6e8cb214df5cf3784004b24a6f27c8ae659564fe62081e0"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "criterion": "Integrated Beta journey",
+      "status": "PASS",
+      "evidence": [
+        {
+          "file": "final-beta-runtime-569a3523b797/parent-verified.json",
+          "sha256": "a6f4ac7ba8ab1939a6e8cb214df5cf3784004b24a6f27c8ae659564fe62081e0"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "criterion": "Approved-redline host contracts",
+      "status": "PASS",
+      "evidence": [
+        {
+          "file": "litt-word-3092102d9a6641bd95205b2ffd505783/command.json",
+          "sha256": "4b34dc08769991499402c0023686f781b334fa59269b6ff8e2d182b278a1ac9b"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "criterion": "Fake Drive publication/retry/reconcile/rehydration",
+      "status": "PASS",
+      "evidence": [
+        {
+          "file": "phase3-drive-sql.log",
+          "sha256": "d361e449935548a0ad6f701c6f06e8fbc942c3f08c0a52ebb8ec3897ccbf582b"
+        },
+        {
+          "file": "final-beta-runtime-569a3523b797/parent-verified.json",
+          "sha256": "a6f4ac7ba8ab1939a6e8cb214df5cf3784004b24a6f27c8ae659564fe62081e0"
+        }
+      ],
+      "scope": "Real SQL/rehydration plus full fake-Drive Beta/restore"
+    },
+    {
+      "id": 13,
+      "criterion": "Staging smoke and owned cleanup",
+      "status": "PASS",
+      "evidence": [
+        {
+          "file": "final-beta-runtime-569a3523b797/parent-verified.json",
+          "sha256": "a6f4ac7ba8ab1939a6e8cb214df5cf3784004b24a6f27c8ae659564fe62081e0"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "criterion": "Functional isolated evidence backup/restore",
+      "status": "PASS",
+      "evidence": [
+        {
+          "file": "final-beta-runtime-569a3523b797/parent-verified.json",
+          "sha256": "a6f4ac7ba8ab1939a6e8cb214df5cf3784004b24a6f27c8ae659564fe62081e0"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "criterion": "Secrets/history/diff/generated scope",
+      "status": "PASS",
+      "evidence": [
+        {
+          "file": "final-history-scan.log",
+          "sha256": "06ace7b1bd4da9748a1deb55260756b77dc6e5bb49d0d1cb4e57ef919df19367"
+        },
+        {
+          "file": "final-delta-scan.log",
+          "sha256": "aeb948a5dd4a17ebb8913d12fe18984bc5de64ee13880f6c4abb8629fc0c795b"
+        },
+        {
+          "file": "ci-schema-command-green.log",
+          "sha256": "7fab423a5f2d7b0fedf6f7becc87f93397727dead3eb565e9ba0e496bc59f863"
+        }
+      ],
+      "scope": "Final staged scan and diff required before dispatch; recorded in external freeze receipt"
+    },
+    {
+      "id": 16,
+      "criterion": "One governing exact-snapshot Reviewer",
+      "status": "BLOCKED",
+      "evidence": [],
+      "scope": "At source freeze, awaiting exact-tree governing Reviewer; terminal status belongs to external review receipt"
+    }
+  ],
+  "notes": [
+    "Default backend skips are not passes",
+    "Backend and Word have no lint script",
+    "Office/API mocks do not certify real Word",
+    "Only exact final review authorizes commit; recovery-only push is separately authorized; no PR/merge/deploy"
+  ],
+  "beta": {
+    "status": "PASS",
+    "command": "/home/ijs/projects/mike/forensics/slice-g-preflight/resume-20260909/final-beta-runtime-569a3523b797/command.json",
+    "log": "/home/ijs/projects/mike/forensics/slice-g-preflight/resume-20260909/final-beta-runtime-569a3523b797/runtime.log",
+    "counts": {
+      "source": 147,
+      "target": 89
+    },
+    "cleanup": {
+      "source_containers": true,
+      "source_volumes": true,
+      "source_networks": true,
+      "source_port_private": true,
+      "target_containers": true,
+      "target_volumes": true,
+      "target_networks": true,
+      "target_port_private": true
+    },
+    "paired_evidence": {
+      "database_content_sha256": "667124a14f6f765a68ff75892669930c378a64deeb38352e3f17f349eee23bec",
+      "security_sha256": "ea0324c51d3d449ab2913733e561a35381554dfd21b79e5328624b68b3345fb5",
+      "schema_sha256": "ea6f71422a75088ec640c2c842947b9d5d65baeeb674dfc9f2fb10a8a7adfebe",
+      "storage_sha256": "c25f842a15de3d96c291213ce86cb870e3d3116b897775b0a05d78e239473406",
+      "docx_sha256": "3f614fc71afb7166c8d59d958589a5a1d65ccefe10f7ab968580e4e0cfe54097",
+      "post_http_database_content_sha256": "667124a14f6f765a68ff75892669930c378a64deeb38352e3f17f349eee23bec",
+      "persistent_storage_sha256": "0116a8ec88befeade92aa88fb69319048250439ece44ec349694fc86ba038bba",
+      "logical_storage": {
+        "sha256": "0f39fb90e03d180697313e6bfa8342a75e00bfd95aa5b8d75218bd6f1d341225",
+        "counts": {
+          "buckets": 1,
+          "versions": 3,
+          "deleteMarkers": 0,
+          "currentObjects": 3,
+          "bytes": 13581
+        }
+      },
+      "content_equality_phase": "post_http",
+      "final_security_and_storage_phase": "post_http"
+    },
+    "beta_evidence": {
+      "provider_calls": 1,
+      "document_sha256": "3f614fc71afb7166c8d59d958589a5a1d65ccefe10f7ab968580e4e0cfe54097",
+      "page_sha256": "9b3f0864faeaf599724864df92396dbcfa54e5d68f575ba3aac2fa4a499c2497",
+      "output_sha256": "456db885086ad9cd5e7e710d79259ef26b99daf0823d078af8fca029e1eb8995",
+      "receipt_sha256": "712ad268e81638bcb0240cafa6f1b030dbdfe92b522050cb69395ba2713ef4da",
+      "workflow_content_hash": "c1016ea6ee30e04eb3ad20214d440d3418e84b5072e83c74346a971b905d6861"
+    },
+    "beta": {
+      "fake_drive_uploads": 1,
+      "approved_docx_sha256": "9aaca9e2df67ec7b2b3f5ab41bdbc6b9616e2b4a7949fd8927d6874592ad30e0"
+    },
+    "source_catalog": [
+      {
+        "name": "beta_catalog_definition",
+        "ok": true
+      },
+      {
+        "name": "beta_catalog_persisted",
+        "ok": true,
+        "workflow_key": "civil-commercial-mx-triage",
+        "workflow_content_hash": "c1016ea6ee30e04eb3ad20214d440d3418e84b5072e83c74346a971b905d6861",
+        "workflow_source_commit": "d9fa8380e63837b6441cef169cf5ef80dfb55e54"
+      }
+    ],
+    "target_catalog": []
+  },
+  "images": {
+    "backend": {
+      "image": "sha256:a826e5a3a25ef492b14b5d076724960b6e6e07dc44f34c56ace3233e25f1d495",
+      "tag": "litt-recovery-backend:phase3-final",
+      "base": "sha256:c6745032d9a59e7e3df731da08bffeae8e9c68f737117cece34e4b9a87f7ab85",
+      "base_layers_verified": true
+    },
+    "frontend": {
+      "image": "sha256:bd11a9b21fdd1f8e07fba49f957e0fe69278f163a24694c3ae78ee59004e691a",
+      "tag": "litt-recovery-frontend:phase3-final",
+      "base": "sha256:bf20e6f83f107db44ff02d0db601d49ca3226f2813445c247c27c3e75a7f8ab7",
+      "base_layers_verified": true
+    }
+  },
+  "post_beta_code_equivalence": {
+    "application_unchanged": true,
+    "changed_non_document_paths": [
+      ".github/workflows/e2e.yml",
+      ".github/workflows/schema-drift.yml",
+      "backend/src/__tests__/integration/recoveryDriveUpgrade.runtime.test.ts"
+    ],
+    "affected_gate": "CI wiring and one TCP-readiness test line only; canonical CI command rerun 14/14, application image and Beta runtime unchanged"
+  },
+  "default_backend": {
+    "passed": 1564,
+    "skipped": 72
+  },
+  "frontend": {
+    "passed": 756,
+    "eslint_errors": 0,
+    "eslint_warnings": 33,
+    "baseline_warnings": 33
+  },
+  "word": {
+    "passed": 64,
+    "skipped": 0,
+    "flaky": 0,
+    "server_checks": 3,
+    "build_warnings": 2,
+    "host_scope": "Office/API mocks in Chromium and WebKit; real Word unverified"
+  },
+  "ci_remote": "NOT RUN; no PR created; config and local canonical commands verified separately",
+  "ci_local": {
+    "status": "PASS",
+    "tests": 14,
+    "files": 2,
+    "log": "ci-schema-command-green.log",
+    "sha256": "7fab423a5f2d7b0fedf6f7becc87f93397727dead3eb565e9ba0e496bc59f863",
+    "scope": "Exact workflow test command locally, not GitHub execution"
+  }
+}

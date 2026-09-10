@@ -146,7 +146,7 @@ Required:
 Production is never inferred from CI, local staging, a reviewer PASS, a historical
 deploy receipt or an owner statement approving a different snapshot.
 
-## Current Beta placement
+## Historical Beta placement (before this recovery candidate)
 
 The integrated Beta baseline has:
 
@@ -161,7 +161,7 @@ The integrated Beta baseline has:
   bounded integrated Beta journey 2/2 PASS and attributed cleanup complete;
 - G5–G7: not started and not authorized.
 
-## Current recovery-control placement
+## Historical recovery-control placement (2026-08-30)
 
 The compatibility-ledger transition has:
 
@@ -176,6 +176,20 @@ The compatibility-ledger transition has:
   equals the exact PR head tree and product bytes are unchanged from the already
   verified Beta G4 baseline;
 - Phase 2 product implementation and G5–G7: not started and not authorized.
+
+## Recovery candidate closeout
+
+The current candidate is governed by the 16-row Phase 3 matrix in
+[`PHASE3_RECOVERY_DECISION.md`](PHASE3_RECOVERY_DECISION.md). Local candidate
+staging/restore is specifically authorized as pre-merge verification; it is not
+formal G5 on an integrated commit. No new G3/G4/G6/G7 permission is inferred.
+
+For pre-commit G2, identity is the recorded HEAD plus staged tree, exact path set,
+zero unstaged/untracked changes and a clean staged diff check. The Reviewer is the
+Hermes `reviewer` profile via Kanban. Its terminal exact-tree receipt is external
+to the frozen source; timeout, `done` alone and another tree's PASS do not govern.
+The existing owner instruction separately permits a recovery-only push after that
+PASS. Commit tree equality, remote readback and CLOSEOUT remain mandatory.
 
 ## Reporting template
 
