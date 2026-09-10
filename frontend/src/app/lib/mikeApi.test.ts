@@ -41,7 +41,6 @@ import {
     getApiKeyStatus,
     getChat,
     getAuditHistory,
-    getPanelDocument,
     getDocumentUrl,
     getLibrary,
     getLibraryLevels,
@@ -199,6 +198,16 @@ afterEach(() => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
 });
+
+function readBlobText(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => typeof reader.result === "string"
+            ? resolve(reader.result) : reject(new Error("Expected text from Blob"));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsText(blob);
+    });
+}
 
 describe("MikeApiError / isMfaRequiredError", () => {
     it("carries status and code, defaulting code to null", () => {
@@ -409,7 +418,7 @@ describe("blob requests (exportAccountData)", () => {
         const { blob, filename } = await exportAccountData();
 
         expect(filename).toBe("export.zip");
-        expect(await blob.text()).toBe("zip-bytes");
+        expect(await readBlobText(blob)).toBe("zip-bytes");
     });
 
     it("parses unquoted filenames and returns null when absent", async () => {
@@ -493,7 +502,7 @@ describe("audit history", () => {
             "/api/audit/export?q=agreement&action=document.edited&status=failed&surface=assistant&from=2026-07-01&to=2026-07-31&sort_by=created_at&sort_dir=desc",
         );
         expect(result.filename).toBe("history.csv");
-        expect(await result.blob.text()).toBe("history");
+        expect(await readBlobText(result.blob)).toBe("history");
     });
 
     it("omits every optional audit parameter when no filters are active", async () => {
@@ -519,7 +528,7 @@ describe("downloadDocumentsZip", () => {
 
         const blob = await downloadDocumentsZip(["d1", "d2"]);
 
-        expect(await blob.text()).toBe("zip");
+        expect(await readBlobText(blob)).toBe("zip");
         const { url, init } = lastFetchCall();
         expect(url).toBe("/api/single-documents/download-zip");
         expect(JSON.parse(init.body as string)).toEqual({
@@ -2524,73 +2533,6 @@ describe("unwrapping and blob wrappers", () => {
         expect(lastFetchCall().url).toBe(`/api${path}`);
     });
 
-    it("getPanelDocument fetches a normalized document by opaque ID", async () => {
-        const document = {
-            document_id: "case:123",
-            title: "Example v Example, 123 U.S. 456",
-            type: "case",
-            metadata: [],
-            quotes: [],
-        };
-        fetchMock.mockResolvedValue(jsonResponse(document));
-
-        await expect(getPanelDocument("case:123")).resolves.toEqual(document);
-        const { url, init } = lastFetchCall();
-        expect(url).toBe("/api/documents/case%3A123");
-        expect(init.method).toBeUndefined();
-    });
-
-    it("coalesces concurrent panel-document hydration requests", async () => {
-        const document = {
-            document_id: "case:456",
-            title: "Concurrent case",
-            type: "case",
-            metadata: [],
-            quotes: [],
-        };
-        let resolveResponse: ((response: Response) => void) | undefined;
-        fetchMock.mockImplementation(
-            () =>
-                new Promise<Response>((resolve) => {
-                    resolveResponse = resolve;
-                }),
-        );
-
-        const first = getPanelDocument("case:456");
-        const second = getPanelDocument("case:456");
-        await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-
-        resolveResponse?.(jsonResponse(document));
-        await expect(Promise.all([first, second])).resolves.toEqual([
-            document,
-            document,
-        ]);
-    });
-
-    it("rejects invalid panel documents and permits a later retry", async () => {
-        fetchMock
-            .mockResolvedValueOnce(
-                jsonResponse({ document_id: "case:invalid", title: "Broken" }),
-            )
-            .mockResolvedValueOnce(
-                jsonResponse({
-                    document_id: "case:invalid",
-                    title: "Recovered",
-                    type: "case",
-                    metadata: [],
-                    quotes: [],
-                }),
-            );
-
-        await expect(getPanelDocument("case:invalid")).rejects.toThrow(
-            "Invalid source document response",
-        );
-        await expect(getPanelDocument("case:invalid")).resolves.toMatchObject({
-            title: "Recovered",
-        });
-        expect(fetchMock).toHaveBeenCalledTimes(2);
-    });
-
     it("exportChatData and exportTabularReviewsData hit their export routes", async () => {
         fetchMock.mockImplementation(() =>
             Promise.resolve(
@@ -2606,7 +2548,7 @@ describe("unwrapping and blob wrappers", () => {
         const chats = await exportChatData();
         expect(lastFetchCall().url).toBe("/api/user/chats/export");
         expect(chats.filename).toBe("x.zip");
-        expect(await chats.blob.text()).toBe("bytes");
+        expect(await readBlobText(chats.blob)).toBe("bytes");
 
         await exportTabularReviewsData();
         expect(lastFetchCall().url).toBe("/api/user/tabular-reviews/export");

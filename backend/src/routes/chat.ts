@@ -18,7 +18,7 @@ import {
     generateSpotlightNonce,
     isAbortError,
     runLLMStream,
-    stripTransientAssistantEvents,
+
     parseChatMessages,
     parseOptionalAskInputsResponse,
     parseOptionalChatId,
@@ -664,7 +664,6 @@ chatRouter.post("/", requireAuth, async (req, res) => {
     );
     const {
         api_keys: apiKeys,
-        legal_research_us: legalResearchUs,
         title_model: titleModel,
         personalisation,
     } = modelSettings;
@@ -677,7 +676,6 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         docAvailability,
         personalisationPrompt || undefined,
         undefined,
-        legalResearchUs,
         nonce,
     );
 
@@ -781,7 +779,6 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             db,
             write,
             workflowStore,
-            includeResearchTools: legalResearchUs,
             model: selectedModel,
             reasoning: selectedReasoningLevel,
             apiKeys,
@@ -818,7 +815,7 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             return;
         }
 
-        const persistedEvents = stripTransientAssistantEvents(events);
+        const persistedEvents = events;
         if (askInputsResponse) {
             await appendAssistantEventsToLastAssistantMessage(
                 db,
@@ -923,7 +920,7 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         const message = ASSISTANT_ERROR_MESSAGE;
         const errorEvents =
             err instanceof AssistantStreamError
-                ? stripTransientAssistantEvents(err.events)
+                ? err.events
                 : [{ type: "error" as const, message }];
         const errorFullText =
             err instanceof AssistantStreamError ? err.fullText : "";

@@ -3,7 +3,6 @@
  * Authentication is carried only by the backend-managed HttpOnly cookie.
  */
 
-import { isPanelDocument } from "@/app/components/shared/types";
 import { authenticatedFetch } from "@/app/lib/authEvents";
 import type {
     AskInputResponseItem,
@@ -16,7 +15,6 @@ import type {
     LibraryFolder,
     Message,
     MessageFile,
-    PanelDocument,
     OpenSourceWorkflowContributorMode,
     OpenSourceWorkflowResponse,
     Project,
@@ -484,7 +482,6 @@ export interface UserProfile {
     lastSelectedChatModel: string | null;
     lastSelectedReasoningLevel: NonNullable<Message["reasoning"]>;
     mfaOnLogin: boolean;
-    legalResearchUs: boolean;
     quickActionsVisible: boolean;
     darkMode: boolean;
     openRouterModels: string[];
@@ -597,7 +594,6 @@ export async function updateUserProfile(payload: {
     tabularModel?: string | null;
     lastSelectedChatModel?: string | null;
     lastSelectedReasoningLevel?: NonNullable<Message["reasoning"]>;
-    legalResearchUs?: boolean;
     quickActionsVisible?: boolean;
     darkMode?: boolean;
     openRouterModels?: string[];
@@ -643,8 +639,7 @@ export type ApiKeyProvider =
     | "openai"
     | "openrouter"
     | "vercel"
-    | "opencode-go"
-    | "courtlistener";
+    | "opencode-go";
 export type ApiKeySource = "user" | "env" | null;
 export type ApiKeyState = Record<
     ApiKeyProvider,
@@ -1671,27 +1666,7 @@ export async function generateChatTitle(
     });
 }
 
-const panelDocumentRequests = new Map<string, Promise<PanelDocument>>();
 
-export async function getPanelDocument(
-    documentId: string,
-): Promise<PanelDocument> {
-    let request = panelDocumentRequests.get(documentId);
-    if (!request) {
-        request = apiRequest<unknown>(
-            `/documents/${encodeURIComponent(documentId)}`,
-        )
-            .then((value) => {
-                if (!isPanelDocument(value)) {
-                    throw new Error("Invalid source document response");
-                }
-                return value;
-            })
-            .finally(() => panelDocumentRequests.delete(documentId));
-        panelDocumentRequests.set(documentId, request);
-    }
-    return request;
-}
 
 export async function streamChat(payload: {
     messages: {

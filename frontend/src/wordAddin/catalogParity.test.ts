@@ -165,11 +165,10 @@ describe("word add-in catalog parity", () => {
                 openrouter: false,
                 vercel: false,
                 "opencode-go": false,
-                courtlistener: false,
                 [configured]: true,
             } as unknown as ApiKeyStatus;
             const webState = Object.fromEntries(
-                [...providers, "courtlistener"].map((provider) => [
+                providers.map((provider) => [
                     provider,
                     {
                         configured: provider === configured,

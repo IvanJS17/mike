@@ -43,6 +43,9 @@ export const SUPPORTED_RECOVERY_MIGRATION_ORDER = [
   "20260905_04_recovery_drive_publication.sql",
   "20260905_05_recovery_drive_publication_rpc.sql",
   "20260905_06_recovery_matter_drive_folder.sql",
+  "20260909_01_recovery_native_evidence_hashes.sql",
+  "20260909_02_recovery_workflow_provenance.sql",
+  "20260909_03_recovery_remove_us_research_preference.sql",
 ] as const;
 
 const RECOVERY_NAME_PATTERN = /^(\d{8})_(\d{2})_recovery_([a-z0-9_]+)\.sql$/;

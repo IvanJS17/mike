@@ -26,6 +26,10 @@ describe("normalizeApiKeyProvider", () => {
         expect(normalizeApiKeyProvider("opencode-go")).toBe("opencode-go");
     });
 
+    it("rejects the excluded CourtListener credential domain", () => {
+        expect(normalizeApiKeyProvider("courtlistener")).toBeNull();
+    });
+
     it("returns null for unknown provider strings", () => {
         expect(normalizeApiKeyProvider("unknown")).toBeNull();
         expect(normalizeApiKeyProvider("")).toBeNull();

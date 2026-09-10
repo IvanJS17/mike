@@ -311,7 +311,6 @@ describe("user.routes", () => {
                 passwordSet: false,
                 messageCreditsUsed: 3,
                 tier: "Pro",
-                legalResearchUs: true,
                 quickActionsVisible: true,
                 mfaOnLogin: false,
                 openRouterModels: [
@@ -377,7 +376,6 @@ describe("user.routes", () => {
 
             expect(res.status).toBe(200);
             expect(res.body).toMatchObject({
-                legalResearchUs: false,
                 quickActionsVisible: false,
                 onboardingComplete: true,
                 onboardingVersion: 0,
@@ -581,6 +579,17 @@ describe("user.routes", () => {
     });
 
     describe("PATCH /user/profile", () => {
+        it("rejects the removed US research preference without persisting it", async () => {
+            supabaseState.tables.user_profiles = { data: profileRow(), error: null };
+            const res = await request(app).patch("/user/profile").set(...AUTH)
+                .send({ legalResearchUs: true });
+            expect(res.status).toBe(400);
+            expect(supabaseState.updates.user_profiles ?? []).toHaveLength(0);
+            const profile = await request(app).get("/user/profile").set(...AUTH);
+            expect(profile.status).toBe(200);
+            expect(profile.body).not.toHaveProperty("legalResearchUs");
+        });
+
         it("persists the last-selected model from the initial chat view", async () => {
             supabaseState.tables.user_profiles = {
                 data: profileRow({

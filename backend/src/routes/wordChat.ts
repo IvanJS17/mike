@@ -26,7 +26,7 @@ import {
   openAssistantSse,
   reserveAssistantMessage,
   runLLMStream,
-  stripTransientAssistantEvents,
+
   submitClientToolResult,
   withoutEmptyAssistantReservations,
 } from "../lib/chat";
@@ -1025,7 +1025,6 @@ wordChatRouter.post("/", requireAuth, async (req, res) => {
   );
   const { api_keys: configuredApiKeys, personalisation } = modelSettings;
   const apiKeys = { ...configuredApiKeys };
-  delete apiKeys.courtlistener;
   const personalisationPrompt = buildUserPersonalisationPrompt(
     personalisation,
     nonce,
@@ -1041,7 +1040,6 @@ wordChatRouter.post("/", requireAuth, async (req, res) => {
     docAvailability,
     wordSystemPrompt,
     docIndex,
-    false,
     nonce,
     "replace",
   );
@@ -1119,9 +1117,6 @@ wordChatRouter.post("/", requireAuth, async (req, res) => {
       db,
       write,
       workflowStore,
-      // CourtListener is intentionally unavailable in document-scoped Word
-      // chats. Legal research remains a web-assistant capability.
-      includeResearchTools: false,
       includeAskInputs: false,
       ...(clientToolsEnabled
         ? {
@@ -1146,7 +1141,7 @@ wordChatRouter.post("/", requireAuth, async (req, res) => {
       emitDone: false,
     });
     const persistedEvents = await normalizeAssistantEvents(
-      stripTransientAssistantEvents(events),
+      events,
     );
     const saveError = await updateAssistantMessage(
       persistedEvents.length ? persistedEvents : null,
@@ -1191,7 +1186,7 @@ wordChatRouter.post("/", requireAuth, async (req, res) => {
     const message = ASSISTANT_ERROR_MESSAGE;
     const errorEvents =
       error instanceof AssistantStreamError
-        ? stripTransientAssistantEvents(error.events)
+        ? error.events
         : [{ type: "error" as const, message }];
     const errorFullText =
       error instanceof AssistantStreamError ? error.fullText : "";

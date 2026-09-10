@@ -10,7 +10,6 @@ storage instead of the infrastructure bundled with Docker Compose.
 - A Supabase project
 - A Cloudflare R2, MinIO, or other S3-compatible bucket
 - At least one supported model-provider API key, or an accessible Ollama server
-- Optional: a CourtListener API token for case-law tools
 - LibreOffice when DOC/DOCX-to-PDF conversion is required
 
 ## Database setup
@@ -96,7 +95,7 @@ the web app deletes legacy Supabase local/session-storage entries and the Word
 add-in deletes legacy OfficeRuntime access/refresh tokens. Users authenticate
 once to establish the new cookie; tokens are not copied through JavaScript.
 
-Model-provider keys and the CourtListener token can be configured globally in
+Model-provider keys can be configured globally in
 `backend/.env` or per user under **Settings > API Keys**. When a key is
 configured globally, its matching field is read-only.
 

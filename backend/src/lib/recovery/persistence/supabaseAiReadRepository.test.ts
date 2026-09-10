@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
+import { parseBoundEvidenceReceipt } from "../review/humanReview";
 
 import {
   createBoundEvidenceResourceScopePort,
@@ -39,7 +40,22 @@ function query(result: unknown) {
 
 function db(results: Record<string, unknown>) {
   return {
-    from: vi.fn((table: string) => query(results[table])),
+    from: vi.fn((table: string) => {
+      const q = query(results[table]);
+      if (table === "document_versions") {
+        q.select.mockImplementation((columns: string) => {
+          // Real PostgREST PGRST201: documents.current_version_id supplies a
+          // second relation. Historical versions must follow document_id.
+          if (columns.includes("documents!inner(")) {
+            q.then.mockImplementation((resolve: (value: unknown) => unknown) =>
+              Promise.resolve({ data: null, error: { code: "PGRST201" } }).then(resolve),
+            );
+          }
+          return q;
+        });
+      }
+      return q;
+    }),
   };
 }
 
@@ -198,6 +214,21 @@ describe("Supabase AI read repository", () => {
         chat_id: "chat-1",
       }),
     ).rejects.toThrow("AI read failed");
+  });
+
+  it("returns a canonical receipt accepted by the review service boundary", async () => {
+    const evidence = await createSupabaseAiReadRepository(
+      await validEvidenceDatabase(),
+    ).loadExecutionEvidence({ project_id: projectId, execution_id: executionId });
+    expect(evidence).not.toBeNull();
+    if (!evidence) throw new Error("Missing synthetic evidence");
+    const bound = parseBoundEvidenceReceipt(evidence.evidence_receipt, evidence.execution);
+    expect(bound).not.toBeNull();
+    expect(bound?.receipt_sha256).toBe(evidence.execution.evidence_receipt_sha256);
+    expect(Object.keys(evidence.evidence_receipt).sort()).toEqual([
+      "canonical_json", "receipt_sha256", "receipt_version",
+    ]);
+    expect(Object.isFrozen(evidence.evidence_receipt)).toBe(true);
   });
 
   it("loads current execution evidence with exact read shapes", async () => {
@@ -606,7 +637,7 @@ describe("Supabase AI read repository", () => {
       });
       const documentQuery = database.from.mock.results[0].value;
       expect(documentQuery.select).toHaveBeenCalledWith(
-        "id,document_id,content_sha256,documents!inner(id,project_id)",
+        "id,document_id,content_sha256,documents!document_id!inner(id,project_id)",
       );
       expect(documentQuery.eq).toHaveBeenCalledWith("id", versionId);
       expect(documentQuery.maybeSingle).toHaveBeenCalled();

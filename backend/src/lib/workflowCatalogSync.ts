@@ -1,5 +1,6 @@
 import { readFile } from "fs/promises";
 import { contentTypeForDocumentType } from "./documentTypes";
+import { MX_CIVIL_COMMERCIAL_SYNC_ENTRY } from "./recovery/workflows/mxCivilCommercialPlaybook";
 import { storageEnabled, uploadFile } from "./storage";
 import type { createServerSupabase } from "./supabase";
 import {
@@ -15,6 +16,7 @@ type Db = ReturnType<typeof createServerSupabase>;
 export type WorkflowCatalogSyncResult = {
   workflows: number;
   references: number;
+  /** Upstream import commit; owned entries retain their own source commits. */
   sourceCommit: string;
 };
 
@@ -41,8 +43,24 @@ export async function syncWorkflowCatalog(
     const document = validateWorkflowCatalogDocument(
       JSON.parse(await readFile(prepared.catalogPath, "utf8")) as unknown,
     );
+    if (
+      document.workflows.some(
+        (workflow) =>
+          workflow.workflow_key === MX_CIVIL_COMMERCIAL_SYNC_ENTRY.workflow_key,
+      )
+    ) {
+      throw new Error(
+        `Upstream catalog collides with reserved workflow key '${MX_CIVIL_COMMERCIAL_SYNC_ENTRY.workflow_key}'`,
+      );
+    }
     let references = 0;
-    const databaseWorkflows = [];
+    const databaseWorkflows: Array<
+      | (ReturnType<typeof metadataWithoutTemporaryReferences> & {
+          source: string;
+          approval_provenance: string;
+        })
+      | typeof MX_CIVIL_COMMERCIAL_SYNC_ENTRY
+    > = [];
     const hasReferences = document.workflows.some(
       (workflow) => workflow.reference_files.length > 0,
     );
@@ -78,10 +96,14 @@ export async function syncWorkflowCatalog(
           references += 1;
         }
       }
-      databaseWorkflows.push(
-        metadataWithoutTemporaryReferences(workflow, databaseReferences),
-      );
+      databaseWorkflows.push({
+        ...metadataWithoutTemporaryReferences(workflow, databaseReferences),
+        source: `https://github.com/${document.source_repository}/tree/${document.source_commit}`,
+        approval_provenance:
+          "Upstream catalog import; LiTT legal validation pending",
+      });
     }
+    databaseWorkflows.push(MX_CIVIL_COMMERCIAL_SYNC_ENTRY);
 
     const { error } = await db.rpc("replace_mike_workflows", {
       p_source_commit: document.source_commit,

@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
-import type { Citation, DocumentCitation } from "../../shared/types";
+import type { DocumentCitation } from "../../shared/types";
 import { CitationQuotesSection } from "../CitationQuotesSection";
 import {
   citationVerificationAriaLabel,
@@ -24,15 +24,6 @@ function documentCitation(verified?: boolean): DocumentCitation {
     ...(verified === undefined ? {} : { verified }),
   };
 }
-
-const caseCitation: Citation = {
-  type: "citation_data",
-  kind: "case",
-  ref: 2,
-  cluster_id: 123,
-  case_name: "Example v Example",
-  quotes: [],
-};
 
 describe("citation verification presentation", () => {
   it("leaves verified document citations in their original gray style", () => {
@@ -67,18 +58,6 @@ describe("citation verification presentation", () => {
     expect(citationVerificationState(citation)).toBe("verified");
     expect(citationVerificationAriaLabel(citation)).toBe("Citation 1");
     expect(citationVerificationPillClassName(citation)).toBe("");
-  });
-
-  it("applies source verification semantics to case citations", () => {
-    expect(citationVerificationState(caseCitation)).toBe("verified");
-    expect(citationVerificationAriaLabel(caseCitation)).toBe("Citation 2");
-    expect(citationVerificationPillClassName(caseCitation)).toBe("");
-
-    const unverifiedCase = { ...caseCitation, verified: false };
-    expect(citationVerificationState(unverifiedCase)).toBe("unverified");
-    expect(citationVerificationAriaLabel(unverifiedCase)).toBe(
-      "Citation 2. Could not verify quote",
-    );
   });
 
   it("reveals an explanation from the white warning pill", async () => {

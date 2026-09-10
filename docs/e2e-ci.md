@@ -1,8 +1,8 @@
 # End-to-end tests in CI
 
 The Playwright suite (`e2e/`) runs on every pull request through
-`.github/workflows/e2e.yml`. This document covers the one repository secret it
-needs and the **branch-protection step that turns a red run into a blocked
+`.github/workflows/e2e.yml`. Default LiTT CI is keyless. This document covers
+its evidence boundary and the **branch-protection step that turns a red run into a blocked
 merge** — the workflow reports pass/fail on its own, but only branch protection
 makes that check *required*.
 
@@ -62,81 +62,23 @@ the failed run's page in the Actions tab, download it, then
 `npx playwright show-report playwright-report` locally to see per-spec results,
 screenshots, and step-by-step traces of what the browser did.
 
-## Optional secret (fuller coverage)
+## Real-provider specs are a separate G6 gate
 
-| Secret | What it unlocks | Without it |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | The 4 LLM-dependent specs (chat rename/delete/submit, critical-path "ask a question") send a message and assert a **streamed** answer. With the key set they run and are enforced. | Those 4 specs **skip** (see `e2e/llm.ts`) instead of hanging, so the run is still green on the other 27 specs. |
+LiTT intentionally supplies an empty provider-key variable to both Playwright and
+the backend in default CI, even when a repository secret exists. Do not activate
+real calls by adding a secret to this workflow. A real provider canary requires
+separate owner authorization, scoped credentials, synthetic data, bounded cost,
+provenance and cleanup under `docs/RELEASE_GATES.md`.
 
-The suite is green **without** any secret — the LLM specs skip themselves via
-`test.skip(!process.env.ANTHROPIC_API_KEY, …)`, which keeps keyless runs (local,
-and fork PRs with no secret access) green and fast. Mike supports keyless local
-models through Ollama, but this CI job does not provision an Ollama server or
-pull a model. Without the Anthropic secret, the four live-response tests
-therefore have no model available in the CI environment and must skip. The
-auto title-generation call is not the reason for the gate; failures there are
-already treated as best-effort.
+The upstream LLM-dependent specs skip when no model is available. Read the actual
+per-run report: skips are not PASS and the historical 31-spec count is not a
+current census. The recovered Beta proves its declared path with a fake sender
+and fake Drive; it does not turn skipped generic browser specs into coverage.
 
-## Enable the LLM specs
-
-### 1. Add the repository secret
-
-UI path:
-
-1. Open the repository on GitHub → **Settings**.
-2. In the left sidebar: **Secrets and variables → Actions**.
-3. On the **Secrets** tab, click **New repository secret**.
-4. **Name:** `ANTHROPIC_API_KEY` — exactly this name; both the workflow env and
-   `e2e/llm.ts` read it. **Secret:** an Anthropic API key (`sk-ant-…`) from
-   <https://console.anthropic.com/settings/keys>.
-5. Click **Add secret**.
-
-CLI equivalent (repo admin):
-
-```bash
-gh secret set ANTHROPIC_API_KEY --repo Open-Legal-Products/mike
-# paste the key at the prompt (or pipe it: --body "$ANTHROPIC_API_KEY")
-```
-
-### 2. The fork-PR caveat
-
-On `pull_request` events from **forks**, GitHub withholds repository secrets, so
-fork PRs — most external contributions — still run keyless and skip the 4 specs.
-That is by design and keeps those runs green. Runs that actually receive the
-secret and exercise the specs are:
-
-- PRs from branches pushed to this repository (maintainer branches), and
-- manual runs: **Actions → e2e → Run workflow** (`workflow_dispatch`) on any
-  branch.
-
-So after adding the secret, the quickest way to see the specs run is a
-`workflow_dispatch` run from the Actions tab.
-
-### 3. Expected cost per run
-
-A handful of short completions: one streamed chat answer per LLM spec plus a few
-small title generations (`claude-haiku-4-5`, 64-token cap). On the order of a
-few cents per run — negligible next to the CI minutes.
-
-### 4. Confirm the specs ran (not skipped)
-
-Open the **Run Playwright** step in the Actions log:
-
-- **Keyless run:** the summary ends with `4 skipped` / `27 passed`, and each
-  skipped spec carries the reason
-  `requires a model key — set the ANTHROPIC_API_KEY secret to run LLM-dependent specs`.
-- **With the secret:** the summary shows `31 passed` and **no `skipped` line**;
-  searching the log for `requires a model key` finds nothing.
-
-The uploaded `playwright-report` artifact shows the same per-spec statuses.
-
-### Model selection
-
-When the secret is present, the shared `selectClaudeModel` helper selects a
-supported Anthropic model before each gated test submits. The response checks
-assert a nonempty streamed assistant answer rather than provider-specific text.
-Keep that helper synchronized with the current model catalog when model ids or
-display names change.
+The schema-drift job uses the supported LiTT baseline/ordered manifest through
+the same isolated PostgreSQL runtime tests used for candidate verification. It
+must not concatenate arbitrary historical migration directories. Remote exact-head
+CI remains a future PR gate, distinct from local execution of those commands.
 
 ## Make it merge-blocking
 

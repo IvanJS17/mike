@@ -51,11 +51,6 @@ For local Ollama models, confirm `ollama list` shows an installed model and the
 backend can reach the URL configured by `OLLAMA_BASE_URL`. Refresh Mike after
 installing a model.
 
-## CourtListener tools are unavailable
-
-See [CourtListener integration](courtlistener.md#troubleshooting) for API-token
-and optional bulk-data checks.
-
 ## DOC or DOCX conversion fails
 
 Install LibreOffice and restart the backend so its conversion command is

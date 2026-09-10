@@ -49,7 +49,6 @@ create table if not exists public.user_profiles (
   last_selected_reasoning_level text check (last_selected_reasoning_level in ('none', 'low', 'medium', 'high', 'xhigh', 'max')),
   quote_model text,
   mfa_on_login boolean not null default true,
-  legal_research_us boolean not null default true,
   quick_actions_visible boolean not null default true,
   dark_mode boolean not null default false,
   created_at timestamptz not null default now(),
@@ -721,6 +720,8 @@ create table if not exists public.mike_workflows (
   active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
+  source text,
+  approval_provenance text,
   constraint mike_workflows_key_hash_unique
     unique(workflow_key, content_hash),
   constraint mike_workflows_distribution_check
@@ -841,8 +842,9 @@ declare
   reference_item jsonb;
   jurisdiction_values text[];
   workflow_uuid uuid;
+  entry_source_commit text;
 begin
-  if p_source_commit !~ '^[0-9a-f]{40}$' then
+  if p_source_commit is null or p_source_commit !~ '^[0-9a-f]{40}$' then
     raise exception 'invalid workflow catalog source commit';
   end if;
   if jsonb_typeof(p_workflows) <> 'array' then
@@ -854,6 +856,13 @@ begin
 
   for item in select value from jsonb_array_elements(p_workflows)
   loop
+    -- Owned catalog content can declare a different immutable source from the
+    -- imported batch. A malformed explicit declaration never inherits the batch.
+    entry_source_commit := case when item ? 'source_commit'
+      then item->>'source_commit' else p_source_commit end;
+    if entry_source_commit is null or entry_source_commit !~ '^[0-9a-f]{40}$' then
+      raise exception 'invalid workflow entry source commit';
+    end if;
     jurisdiction_values := null;
     if jsonb_typeof(item->'jurisdictions') = 'array' then
       select array_agg(value)
@@ -867,7 +876,7 @@ begin
       jurisdictions, pack_key, pack_title, pack_description, pack_version,
       default_sort_order, quick_action_name, quick_action_prompt,
       document_upload, word_quick_action, word_quick_action_prompt,
-      source_commit, content_hash, active, updated_at
+      source_commit, source, approval_provenance, content_hash, active, updated_at
     ) values (
       item->>'workflow_key',
       item->>'distribution',
@@ -893,7 +902,9 @@ begin
       coalesce((item->>'document_upload')::boolean, false),
       coalesce((item->>'word_quick_action')::boolean, false),
       nullif(item->>'word_quick_action_prompt', ''),
-      p_source_commit,
+      entry_source_commit,
+      item->>'source',
+      item->>'approval_provenance',
       item->>'content_hash',
       true,
       now()
@@ -921,6 +932,8 @@ begin
       word_quick_action = excluded.word_quick_action,
       word_quick_action_prompt = excluded.word_quick_action_prompt,
       source_commit = excluded.source_commit,
+      source = excluded.source,
+      approval_provenance = excluded.approval_provenance,
       active = true,
       updated_at = now()
     returning id into workflow_uuid;
@@ -3810,7 +3823,7 @@ create table if not exists public.ai_document_version_pages (
   constraint ai_document_version_pages_page_check check (page >= 1),
   constraint ai_document_version_pages_content_integrity_check check (
     content_sha256 ~ '^[0-9a-f]{64}$'
-    and content_sha256 = encode(digest(content, 'sha256'), 'hex')
+    and content_sha256 = encode(pg_catalog.sha256(pg_catalog.convert_to(content, 'UTF8')), 'hex')
   ),
   constraint ai_document_version_pages_version_page_key
     unique (document_version_id, page)
@@ -3946,7 +3959,7 @@ create table if not exists public.ai_receipts (
   ),
   constraint ai_receipts_current_integrity_check check (
     receipt_version = 'legacy-beta-0.1'
-    or receipt_sha256 = encode(digest(canonical_json, 'sha256'), 'hex')
+    or receipt_sha256 = encode(pg_catalog.sha256(pg_catalog.convert_to(canonical_json, 'UTF8')), 'hex')
   )
 );
 
@@ -4307,7 +4320,7 @@ create table if not exists public.ai_redline_bundles (
     bundle_version = 'legacy-beta-0.1'
     or (
       evidence_receipt_version = 'evidence-v1'
-      and bundle_sha256 = encode(digest(canonical_json, 'sha256'), 'hex')
+      and bundle_sha256 = encode(pg_catalog.sha256(pg_catalog.convert_to(canonical_json, 'UTF8')), 'hex')
     )
   )
 );
@@ -5075,7 +5088,7 @@ begin
   if v_organization_id is distinct from p_organization_id
      or (v_output->>'execution_id')::uuid is distinct from v_execution_id
      or not public.ai_valid_sha256(v_output_hash)
-     or encode(digest(v_output->>'output_text', 'sha256'), 'hex') is distinct from v_output_hash
+     or encode(pg_catalog.sha256(pg_catalog.convert_to(v_output->>'output_text', 'UTF8')), 'hex') is distinct from v_output_hash
      or not public.ai_valid_sha256(v_workflow->>'content_hash')
      or (v_workflow->>'source_commit') !~ '^[0-9a-f]{40}$'
      or v_workflow->>'distribution' not in ('default', 'addon')
@@ -5133,7 +5146,7 @@ begin
         'page', (citation->>'page')::integer,
         'span', citation->'span',
         'quote_sha256', citation->>'quote_sha256',
-        'finding_sha256', encode(digest(citation->>'finding_text', 'sha256'), 'hex')
+        'finding_sha256', encode(pg_catalog.sha256(pg_catalog.convert_to(citation->>'finding_text', 'UTF8')), 'hex')
       ) order by citation->>'citation_id'
     ),
     '[]'::jsonb
@@ -5172,7 +5185,7 @@ begin
   );
   if v_receipt->>'receipt_version' <> 'evidence-v1'
      or not public.ai_valid_sha256(v_receipt_hash)
-     or encode(digest(v_receipt->>'canonical_json', 'sha256'), 'hex') is distinct from v_receipt_hash
+     or encode(pg_catalog.sha256(pg_catalog.convert_to(v_receipt->>'canonical_json', 'UTF8')), 'hex') is distinct from v_receipt_hash
      or v_receipt_body is distinct from v_expected_receipt
   then
     raise exception 'AI evidence receipt integrity failed';
@@ -5243,7 +5256,7 @@ begin
        or (v_page->>'document_version_id')::uuid is distinct from v_document_version_id
        or (v_page->>'page')::integer < 1
        or not public.ai_valid_sha256(v_page->>'text_sha256')
-       or encode(digest(v_page->>'text', 'sha256'), 'hex') is distinct from v_page->>'text_sha256'
+       or encode(pg_catalog.sha256(pg_catalog.convert_to(v_page->>'text', 'UTF8')), 'hex') is distinct from v_page->>'text_sha256'
     then
       raise exception 'AI evidence page integrity failed';
     end if;
@@ -6082,7 +6095,7 @@ begin
      or p_bundle->>'bundle_version' <> 'approved-redline-v1'
      or p_bundle->>'evidence_receipt_version' <> 'evidence-v1'
      or not public.ai_valid_sha256(p_bundle->>'bundle_sha256')
-     or encode(digest(p_bundle->>'canonical_json','sha256'),'hex')
+     or encode(pg_catalog.sha256(pg_catalog.convert_to(p_bundle->>'canonical_json', 'UTF8')),'hex')
           is distinct from p_bundle->>'bundle_sha256'
      or jsonb_typeof(p_bundle->'actions') <> 'array'
      or jsonb_array_length(p_bundle->'actions') < 1
@@ -6144,7 +6157,7 @@ begin
        or not public.ai_valid_sha256(v_action->>'page_content_sha256')
        or not public.ai_valid_sha256(v_action->>'before_text_sha256')
        or not public.ai_valid_sha256(v_action->>'replacement_text_sha256')
-       or encode(digest(v_action->>'replacement_text','sha256'),'hex')
+       or encode(pg_catalog.sha256(pg_catalog.convert_to(v_action->>'replacement_text', 'UTF8')),'hex')
             is distinct from v_action->>'replacement_text_sha256'
        or not exists (
          select 1

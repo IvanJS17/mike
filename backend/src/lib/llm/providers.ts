@@ -243,7 +243,6 @@ async function createProviderAdapter(
       label: "OpenAI",
       model: openai.responses(model),
       modelId: model,
-      courtlistenerCitationReminder: true,
     };
   }
 

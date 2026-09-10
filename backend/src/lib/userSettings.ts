@@ -19,7 +19,6 @@ export type UserModelSettings = {
     last_selected_chat_model: string | null;
     /** Cross-surface fallback used only when a chat has no saved level. */
     last_selected_reasoning_level: ReasoningLevel | null;
-    legal_research_us: boolean;
     api_keys: UserApiKeys;
     personalisation?: {
         displayName: string | null;
@@ -40,7 +39,7 @@ export async function getUserModelSettings(
         client
             .from("user_profiles")
             .select(
-                "title_model, tabular_model, last_selected_chat_model, last_selected_reasoning_level, legal_research_us, display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas",
+                "title_model, tabular_model, last_selected_chat_model, last_selected_reasoning_level, display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas",
             )
             .eq("user_id", userId)
             .single(),
@@ -58,7 +57,7 @@ export async function getUserModelSettings(
         const withoutLastSelected = await client
             .from("user_profiles")
             .select(
-                "title_model, tabular_model, last_selected_chat_model, legal_research_us, display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas",
+                "title_model, tabular_model, last_selected_chat_model, display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas",
             )
             .eq("user_id", userId)
             .single();
@@ -70,7 +69,7 @@ export async function getUserModelSettings(
         } else if (withoutLastSelected.error.code === "42703") {
             const legacy = await client
                 .from("user_profiles")
-                .select("title_model, tabular_model, legal_research_us")
+                .select("title_model, tabular_model")
                 .eq("user_id", userId)
                 .single();
             // A second failure (a database even older than the pre-migration
@@ -103,9 +102,6 @@ export async function getUserModelSettings(
         last_selected_reasoning_level: normalizeReasoningLevel(
             data?.last_selected_reasoning_level,
         ),
-        legal_research_us:
-            (data as { legal_research_us?: boolean | null } | null)
-                ?.legal_research_us !== false,
         personalisation: {
             displayName:
                 typeof data?.display_name === "string"

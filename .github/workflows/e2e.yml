@@ -7,15 +7,10 @@
 # this job "e2e / playwright" as a required status check in branch protection —
 # see docs/e2e-ci.md ("Make it merge-blocking").
 #
-# The suite is green with NO secret: of the 31 specs, the 4 LLM-dependent ones
-# (chat + critical path) skip themselves when ANTHROPIC_API_KEY is absent (see
-# e2e/llm.ts), so a keyless run passes the other 27 specs. Mike supports local
-# Ollama models without a provider key, but this job does not provision Ollama;
-# the gate is not caused by the best-effort title-generation call. To run and
-# enforce those 4, set the ANTHROPIC_API_KEY repository secret; exact steps, the
-# fork-PR caveat (fork `pull_request` runs never receive secrets, so they
-# always take the skip path), cost, and how to verify the specs ran are in
-# docs/e2e-ci.md ("Enable the LLM specs").
+# LiTT default CI never injects real provider credentials. LLM-dependent
+# upstream specs remain explicitly skipped without an authorized G6 canary.
+# Their skip is not acceptance coverage; the isolated recovery Beta uses fakes.
+# See docs/e2e-ci.md and docs/RELEASE_GATES.md.
 #
 # The e2e user (e2e@mike.local) is bootstrapped in-job by e2e/auth.setup.ts against
 # the local Supabase admin API, so no E2E_PASSWORD secret is needed — the defaults
@@ -28,14 +23,7 @@ on:
     # `main` is the destination upstream; `upstream-main` is the fork's mirror of
     # it, so the suite is exercised on the fork PR and stays correct once merged.
     branches: [main, upstream-main]
-  # Nightly run against the default branch, so drift that lands BETWEEN pull
-  # requests (a dependency bump, a Supabase CLI change, an upstream UI tweak
-  # breaking a selector) is caught within a day instead of surfacing on the next
-  # unrelated PR. 03:47 UTC is a quiet hour for GitHub's cron pool (on-the-hour
-  # slots are congested and can be delayed or dropped). Scheduled runs exercise
-  # the 4 LLM-gated specs only when the ANTHROPIC_API_KEY repository secret is
-  # configured — without it they self-skip (e2e/llm.ts) and the run still
-  # covers the other specs.
+  # Existing nightly keyless regression checks; not Phase 4 intake automation.
   schedule:
     - cron: "47 3 * * *"
 
@@ -52,12 +40,8 @@ jobs:
       # Defaults match e2e/auth.setup.ts; overriding the password here would break
       # the valid-login specs, so only the base URL is pinned.
       PLAYWRIGHT_BASE_URL: http://localhost:3000
-      # Exposed to the Playwright process (not just backend/.env) so the LLM-gated
-      # specs can skip themselves when no key is present — see e2e/llm.ts. When the
-      # secret is set they run and are enforced; when absent they skip, so a keyless
-      # run (e.g. a fork PR, which never receives this secret) is still green on
-      # the other 27 of the 31 specs. Setup: docs/e2e-ci.md, "Enable the LLM specs".
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # Explicitly keyless even if a repository secret exists.
+      ANTHROPIC_API_KEY: ""
     steps:
       - uses: actions/checkout@v4
 
@@ -187,7 +171,7 @@ jobs:
             # Keep the release-job fixture reproducible even when the source
             # repository's main branch changes independently of this PR.
             echo "MIKE_WORKFLOWS_REF=ce62e6a2d3f47e1d3567a4f2edc61898cfe9e78a"
-            echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"
+            echo "ANTHROPIC_API_KEY="
           } >> backend/.env
           # The web client talks to its own /api gateway. Only the Next server
           # needs the upstream backend origin.

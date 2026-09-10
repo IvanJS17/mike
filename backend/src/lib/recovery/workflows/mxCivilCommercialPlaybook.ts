@@ -111,3 +111,28 @@ export const MX_CIVIL_COMMERCIAL_CATALOG_ROW = Object.freeze({
   approval_provenance:
     "Beta read-only specification; later legal validation remains pending",
 } satisfies GovernedWorkflowCatalogRow);
+
+/** Full metadata for the existing atomic catalog replacement. */
+export const MX_CIVIL_COMMERCIAL_SYNC_ENTRY = Object.freeze({
+  ...MX_CIVIL_COMMERCIAL_CATALOG_ROW,
+  title: "Triaje acotado Civil/Mercantil MX",
+  description:
+    "Triaje documental acotado Civil/Mercantil de México para R4, R6 y R9; validación legal pendiente.",
+  prompt_md: JSON.stringify(MX_CIVIL_COMMERCIAL_PLAYBOOK),
+  columns_config: null,
+  contributors: Object.freeze([]),
+  language: "es-MX",
+  practice: null,
+  jurisdictions: Object.freeze(["MX"]),
+  pack_key: null,
+  pack_title: null,
+  pack_description: null,
+  pack_version: null,
+  default_sort_order: null,
+  quick_action_name: null,
+  quick_action_prompt: null,
+  document_upload: true,
+  word_quick_action: false,
+  word_quick_action_prompt: null,
+  reference_files: Object.freeze([]),
+});

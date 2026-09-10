@@ -180,7 +180,7 @@ interface UserProfile {
   lastSelectedChatModel: string | null;
   lastSelectedReasoningLevel: ReasoningLevel;
   mfaOnLogin: boolean;
-  legalResearchUs: boolean;
+
   openRouterModels: string[];
   vercelModels: string[];
   openCodeGoModels: string[];
@@ -220,7 +220,6 @@ export interface ApiKeyStatus {
   openrouter: boolean;
   vercel: boolean;
   "opencode-go": boolean;
-  courtlistener: boolean;
   sources?: Partial<
     Record<
       | "claude"
@@ -228,8 +227,7 @@ export interface ApiKeyStatus {
       | "openai"
       | "openrouter"
       | "vercel"
-      | "opencode-go"
-      | "courtlistener",
+      | "opencode-go",
       "user" | "env" | null
     >
   >;

@@ -8,7 +8,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { buildCanonicalEvidenceReceipt } from "../../lib/recovery/evidence/appendOnlyEvidence";
+import { IDS, SEED } from "./fixtures/recoveryLegacyEvidence";
 
 const BACKEND = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -75,14 +77,16 @@ function file(name: string): string {
 function fingerprint(db: string): string {
   return psql(db, file("scripts/schema-fingerprint.sql"));
 }
-function applyRecovery(db: string, before?: string): void {
+function applyRecovery(db: string, before?: string): string {
   const names = fs
     .readdirSync(MIGRATIONS)
     .filter((name) => /^\d{8}_\d{2}_recovery_.*\.sql$/.test(name))
     .filter((name) => !before || name < before)
     .sort();
+  if (names.length === 0) throw new Error("No supported recovery migrations");
   for (const name of names)
     psql(db, fs.readFileSync(path.join(MIGRATIONS, name), "utf8"));
+  return names[names.length - 1];
 }
 function preservedData(db: string): unknown {
   return JSON.parse(
@@ -149,7 +153,6 @@ beforeAll(() => {
     [
       "run",
       "--pull=never",
-      "--rm",
       "-d",
       "--network=none",
       "--name",
@@ -165,7 +168,7 @@ beforeAll(() => {
       "POSTGRES_PASSWORD=recovery_local_only",
       IMAGE,
     ],
-    { encoding: "utf8", timeout: 20_000 },
+    { encoding: "utf8", timeout: 90_000 },
   ).trim();
   const deadline = Date.now() + 60_000;
   let stable = 0;
@@ -186,9 +189,9 @@ beforeAll(() => {
     }
   }
   throw new Error("recovery postgres readiness timeout");
-});
+}, 180_000);
 
-afterAll(() => {
+afterAll(async () => {
   if (!RUN) return;
   try {
     const inspected = JSON.parse(
@@ -204,19 +207,109 @@ afterAll(() => {
       throw new Error("refusing foreign container cleanup");
     execFileSync("docker", ["rm", "-f", CONTAINER], {
       encoding: "utf8",
-      timeout: 10_000,
+      timeout: 90_000,
     });
   } finally {
-    const leftovers = execFileSync(
-      "docker",
-      ["ps", "-aq", "--filter", `label=recovery.core.owner=${OWNER}`],
-      { encoding: "utf8", timeout: 10_000 },
-    ).trim();
-    expect(leftovers).toBe("");
+    await vi.waitFor(() => {
+      const leftovers = execFileSync(
+        "docker",
+        ["ps", "-aq", "--filter", `label=recovery.core.owner=${OWNER}`],
+        { encoding: "utf8", timeout: 10_000 },
+      ).trim();
+      expect(leftovers).toBe("");
+    }, { timeout: 60_000, interval: 1_000 });
   }
-});
+}, 180_000);
 
 maybe("recovery core convergence runtime", () => {
+  it("persists each catalog entry's source identity without rewriting it", () => {
+    const db = "recovery_catalog_provenance";
+    docker(["createdb", "-U", "postgres", db]);
+    psql(db, BOOTSTRAP + file("schema.sql"));
+    const sourceCommit = "a".repeat(40);
+    const batchCommit = "b".repeat(40);
+    const entry = { workflow_key: "synthetic-mx-catalog", distribution: "addon",
+      version: "0.1.0", title: "Synthetic MX catalog", type: "assistant",
+      prompt_md: "Synthetic fixture", content_hash: "c".repeat(64),
+      source_commit: sourceCommit, source: "synthetic-source.md",
+      approval_provenance: "Synthetic fixture; legal validation pending", reference_files: [] };
+    const sync = (value: unknown) => psql(db, `set role service_role;
+      select public.replace_mike_workflows('${batchCommit}',
+      '${JSON.stringify([value]).replaceAll("'", "''")}'::jsonb);`);
+    const read = () => JSON.parse(psql(db, `select to_jsonb(m) from mike_workflows m
+      where workflow_key='synthetic-mx-catalog' and active;`));
+    sync(entry);
+    expect(read()).toMatchObject({ source_commit: sourceCommit, source: entry.source,
+      approval_provenance: entry.approval_provenance, content_hash: entry.content_hash });
+    const original = read();
+    sync(entry);
+    expect(read().id).toBe(original.id);
+    expect(psql(db, "select count(*) from mike_workflows")).toBe("1");
+    for (const invalid of [null, "", "NOT-A-COMMIT"]) {
+      const before = read();
+      expect(() => sync({ ...entry, source_commit: invalid })).toThrow(/source commit/);
+      expect(read()).toEqual(before);
+    }
+    // Entries that belong to the imported batch retain its declared identity.
+    const { source_commit: _ownedCommit, ...upstream } = entry;
+    sync(upstream);
+    expect(read().source_commit).toBe(batchCommit);
+  });
+
+  it("appends exact UTF-8 evidence when pgcrypto is outside public", () => {
+    const db = "recovery_crypto_extensions";
+    docker(["createdb", "-U", "postgres", db]);
+    psql(db, BOOTSTRAP + `
+      create schema extensions;
+      create extension pgcrypto with schema extensions;
+      set search_path = public, extensions;
+    ` + file("schema.sql") + SEED);
+    const sha = (text: string) => crypto.createHash("sha256").update(text).digest("hex");
+    const text = "Árbol jurídico y contrato. 😀";
+    const output = { execution_id: IDS.execution, output_text: "Hallazgo sintético",
+      output_sha256: sha("Hallazgo sintético") };
+    const provenance = {
+      tenant_scope: { organization_id: IDS.org, matter_id: IDS.matter,
+        project_id: IDS.project, document_version_id: IDS.version },
+      input_hashes: ["a".repeat(64)], output_hashes: [output.output_sha256],
+      citation_hashes: [sha("Árbol")],
+      route: { provider: "openai", model: "synthetic-model", credential_ref: "synthetic-key-ref" },
+      workflow: { workflow_key: "synthetic-hash-test", version: "1.0.0",
+        content_hash: "b".repeat(64), source_commit: "c".repeat(40), distribution: "addon",
+        type: "assistant", source: "synthetic-fixture", approval_provenance: "test-only" },
+      status: "completed",
+    };
+    const pages = [{ document_id: IDS.document, document_version_id: IDS.version,
+      page: 1, text, text_sha256: sha(text) }];
+    const citations = [{ citation_id: "R4", document_id: IDS.document,
+      document_version_id: IDS.version, page: 1, span: { start_char: 0, end_char: 5 },
+      quote_sha256: sha("Árbol"), finding_text: output.output_text, verified: true }];
+    const idempotency_key = "crypto-extension-regression";
+    const built = buildCanonicalEvidenceReceipt({ execution_id: IDS.execution,
+      idempotency_key, provenance, pages, output, citations });
+    expect(built.ok).toBe(true);
+    if (!built.ok) throw new Error("Invalid synthetic evidence fixture");
+    const batch = { idempotency_key, execution: { execution_id: IDS.execution, provenance },
+      pages, output, citations, receipt: built.receipt };
+    const epoch = psql(db, `select authorization_epoch from organizations where id='${IDS.org}'`);
+    const append = (value: unknown) => psql(db, `set role service_role;
+      select public.append_ai_evidence_batch('${IDS.owner}','${IDS.org}',${epoch},
+      '${JSON.stringify(value).replaceAll("'", "''")}'::jsonb);`);
+    expect(JSON.parse(append(batch))).toMatchObject({ disposition: "applied",
+      receipt_sha256: built.receipt.receipt_sha256, counts: { pages: 1, outputs: 1, citations: 1 } });
+    expect(JSON.parse(append(batch)).disposition).toBe("replayed");
+    expect(() => append({ ...batch, output: { ...output, output_text: "tampered" } }))
+      .toThrow(/Invalid AI evidence hashes or provenance/);
+    expect(psql(db, "select count(*) from ai_executions")).toBe("1");
+    expect(psql(db, "select content_sha256 from ai_document_version_pages")).toBe(sha(text));
+    expect(psql(db, "select receipt_sha256 from ai_receipts")).toBe(built.receipt.receipt_sha256);
+    expect(psql(db, `select n.nspname from pg_extension e join pg_namespace n on n.oid=e.extnamespace
+      where e.extname='pgcrypto'`)).toBe("extensions");
+    expect(psql(db, `select count(*) from pg_proc where pronamespace='public'::regnamespace
+      and proname in ('append_ai_evidence_batch','append_ai_redline_bundle')
+      and proconfig is distinct from array['search_path=public']`)).toBe("0");
+  });
+
   it("proves a populated supported upgrade equals fresh and preserves guards", () => {
     docker(["createdb", "-U", "postgres", "recovery_upgrade"]);
     docker(["createdb", "-U", "postgres", "recovery_fresh"]);
@@ -232,8 +325,10 @@ maybe("recovery core convergence runtime", () => {
     );
     seed("recovery_upgrade");
     const beforeData = preservedData("recovery_upgrade");
-    applyRecovery("recovery_upgrade");
-    const migration = file(`migrations/${CORE}`);
+    const terminalMigration = applyRecovery("recovery_upgrade");
+    // Replay the current terminal migration, not historical DDL that would
+    // overwrite newer function definitions after the ordered upgrade.
+    const migration = file(`migrations/${terminalMigration}`);
     expect(preservedData("recovery_upgrade")).toEqual(beforeData);
     const upgradeFingerprint = fingerprint("recovery_upgrade");
     const freshFingerprint = fingerprint("recovery_fresh");
@@ -245,6 +340,9 @@ maybe("recovery core convergence runtime", () => {
         .digest("hex"),
     });
     expect(upgradeFingerprint).toBe(freshFingerprint);
+    for (const database of ["recovery_fresh", "recovery_upgrade"]) {
+      expect(psql(database, "select count(*) from information_schema.columns where table_schema='public' and table_name='user_profiles' and column_name='legal_research_us';")).toBe("0");
+    }
     psql("recovery_upgrade", migration);
     expect(fingerprint("recovery_upgrade")).toBe(upgradeFingerprint);
     expect(preservedData("recovery_upgrade")).toEqual(beforeData);

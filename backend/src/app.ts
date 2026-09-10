@@ -17,7 +17,6 @@ import { workflowAddonsRouter } from "./routes/workflowAddons";
 import { userRouter } from "./routes/user";
 import { modelsRouter } from "./routes/models";
 import { downloadsRouter } from "./routes/downloads";
-import { sourceDocumentsRouter } from "./routes/sourceDocuments";
 import { auditRouter } from "./routes/audit";
 import { aiRecoveryRouter } from "./routes/aiRecovery";
 import { matterSettingsRouter } from "./routes/matterSettings";
@@ -284,7 +283,6 @@ app.use("/workflow-addons", workflowAddonsRouter);
 app.use("/user", userRouter);
 app.use("/users", userRouter);
 app.use("/download", downloadsRouter);
-app.use("/documents", sourceDocumentsRouter);
 app.use("/audit", auditRouter);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));

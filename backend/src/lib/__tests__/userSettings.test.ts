@@ -56,7 +56,6 @@ describe("getUserModelSettings router-model allowlist", () => {
             profileDb({
                 title_model: "claude-haiku-4-5",
                 tabular_model: "claude-sonnet-5",
-                legal_research_us: true,
                 display_name: "Ada",
                 organisation: "Acme LLP",
                 jurisdiction: "Singapore",
@@ -82,7 +81,6 @@ describe("getUserModelSettings router-model allowlist", () => {
             profileDb({
                 title_model: "openrouter/allowed/model",
                 tabular_model: "openrouter/allowed/model",
-                legal_research_us: true,
             }),
         );
 
@@ -96,7 +94,6 @@ describe("getUserModelSettings router-model allowlist", () => {
             profileDb({
                 title_model: "openrouter/pricy/frontier-model",
                 tabular_model: "vercel/pricy/frontier-model",
-                legal_research_us: true,
             }),
         );
 
@@ -110,7 +107,6 @@ describe("getUserModelSettings router-model allowlist", () => {
             profileDb({
                 title_model: "claude-haiku-4-5",
                 tabular_model: "claude-sonnet-5",
-                legal_research_us: true,
             }),
         );
 
@@ -153,7 +149,6 @@ describe("getUserModelSettings on an un-migrated database", () => {
                     data: {
                         title_model: "claude-haiku-4-5",
                         tabular_model: "claude-sonnet-5",
-                        legal_research_us: false,
                     },
                     error: null,
                 },
@@ -162,7 +157,6 @@ describe("getUserModelSettings on an un-migrated database", () => {
 
         expect(settings.title_model).toBe("claude-haiku-4-5");
         expect(settings.tabular_model).toBe("claude-sonnet-5");
-        expect(settings.legal_research_us).toBe(false);
         expect(settings.personalisation).toMatchObject({
             displayName: null,
             practiceAreas: [],
@@ -188,7 +182,6 @@ describe("getUserModelSettings on an un-migrated database", () => {
             ),
         );
 
-        expect(settings.legal_research_us).toBe(true);
         expect(settings.title_model).toBeNull();
         expect(settings.tabular_model).toBeNull();
     });

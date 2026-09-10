@@ -101,6 +101,18 @@ export const KNOWN_SUPPORTED_MIGRATIONS: Readonly<
         "begin;\n",
     ),
   },
+  "20260909_01_recovery_native_evidence_hashes.sql": {
+    sha256: "af8bede510792f2fae17fd41e6674a06cbb9d6a9a003d46477bca91aadeaf89d",
+    envelope: { kind: "wrapped", prefix: "-- Migration date: 2026-09-09\n-- Use PostgreSQL's native SHA-256 over exact UTF-8 bytes. Supabase installs\n-- pgcrypto in extensions; privileged evidence RPCs deliberately search only\n-- public. Do not relocate pgcrypto or widen security-definer search paths.\n-- Existing hashes/rows and RPC grants are unchanged; replacement CHECKs validate\n-- all existing rows. Historical migrations remain immutable.\nbegin;\n", suffix: "commit;\n" },
+  },
+  "20260909_02_recovery_workflow_provenance.sql": {
+    sha256: "a8c28a8e940ad95ed7c9dae12429aa501c36fce3de3b4aa345e68405a6a10df0",
+    envelope: { kind: "wrapped", prefix: "-- Migration date: 2026-09-09\n-- Preserve per-entry origin and approval provenance in the sole runtime catalog.\n-- Historical rows retain NULL provenance until a source-backed catalog sync;\n-- do not invent validation or provenance for existing content.\nbegin;\n", suffix: "commit;\n" },
+  },
+  "20260909_03_recovery_remove_us_research_preference.sql": {
+    sha256: "c00e534f17d19e5e0e03c1826b562e0b0936effece15f9639af8ffba6f6cca70",
+    envelope: { kind: "wrapped", prefix: "-- CourtListener/US research is excluded from the recovered product.\nBEGIN;\n", suffix: "COMMIT;\n" },
+  },
 };
 
 function sha256(source: string): string {

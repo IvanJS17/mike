@@ -176,86 +176,6 @@ describe("parseCitations (document citations)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// parseCitations — case citations
-// ---------------------------------------------------------------------------
-
-describe("parseCitations (case citations)", () => {
-    it("parses a case citation from a numeric cluster_id", () => {
-        const [citation] = parseCitations(
-            citationsBlock('[{"ref": 1, "cluster_id": 12345, "quote": "held that"}]'),
-        );
-        expect(citation).toMatchObject({ kind: "case", ref: 1, cluster_id: 12345 });
-        expect((citation as { quotes: unknown[] }).quotes).toEqual([
-            { opinionId: null, type: null, author: null, quote: "held that" },
-        ]);
-    });
-
-    it("accepts clusterId camelCase and string cluster ids", () => {
-        const citations = parseCitations(
-            citationsBlock(
-                '[{"ref": 1, "clusterId": 7, "quote": "a"},' +
-                    '{"ref": 2, "cluster_id": "42", "quote": "b"}]',
-            ),
-        );
-        expect(citations.map((c) => (c as { cluster_id: number }).cluster_id)).toEqual([
-            7, 42,
-        ]);
-    });
-
-    it("floors fractional cluster ids", () => {
-        const [citation] = parseCitations(
-            citationsBlock('[{"ref": 1, "cluster_id": 12.9, "quote": "q"}]'),
-        );
-        expect((citation as { cluster_id: number }).cluster_id).toBe(12);
-    });
-
-    it("treats non-positive cluster ids as document citations", () => {
-        // cluster_id 0 fails the > 0 check, so the entry needs a doc_id.
-        expect(
-            parseCitations(citationsBlock('[{"ref": 1, "cluster_id": 0, "quote": "q"}]')),
-        ).toEqual([]);
-    });
-
-    it("normalizes structured case quotes with opinion metadata", () => {
-        const [citation] = parseCitations(
-            citationsBlock(
-                JSON.stringify([
-                    {
-                        ref: 3,
-                        cluster_id: 99,
-                        quotes: [
-                            {
-                                quote: "majority text",
-                                opinion_id: 11.7,
-                                type: "majority",
-                                author: "Judge A",
-                            },
-                            { text: "concurrence text", opinionId: 12 },
-                            { type: "no quote text, dropped" },
-                        ],
-                    },
-                ]),
-            ),
-        );
-        expect((citation as { quotes: unknown[] }).quotes).toEqual([
-            {
-                opinionId: 11,
-                type: "majority",
-                author: "Judge A",
-                quote: "majority text",
-            },
-            { opinionId: 12, type: null, author: null, quote: "concurrence text" },
-        ]);
-    });
-
-    it("drops case citations with no quotes at all", () => {
-        expect(
-            parseCitations(citationsBlock('[{"ref": 1, "cluster_id": 5}]')),
-        ).toEqual([]);
-    });
-});
-
-// ---------------------------------------------------------------------------
 // parsePartialCitationObjects
 // ---------------------------------------------------------------------------
 
@@ -376,63 +296,9 @@ describe("createCitation", () => {
             ],
         ]);
 
-        expect(createCitation(parsed, docIndex, undefined, docStore)).toMatchObject({
+        expect(createCitation(parsed, docIndex, docStore)).toMatchObject({
             filename: "Contract.docx",
             document: { title: "Contract.docx" },
-        });
-    });
-
-    it("enriches a case citation from the cluster map", () => {
-        const [parsed] = parseCitations(
-            citationsBlock('[{"ref": 2, "cluster_id": 55, "quote": "held"}]'),
-        );
-        const cases = new Map([
-            [
-                55,
-                {
-                    caseName: "Smith v. Jones",
-                    citations: ["123 U.S. 456", "alt cite"],
-                    url: "https://example.test/case",
-                    pdfUrl: null,
-                    dateFiled: "1990-01-02",
-                },
-            ],
-        ]);
-        expect(createCitation(parsed, docIndex, cases)).toMatchObject({
-            type: "citation_data",
-            kind: "case",
-            ref: 2,
-            cluster_id: 55,
-            case_name: "Smith v. Jones",
-            citation: "123 U.S. 456",
-            url: "https://example.test/case",
-            pdfUrl: null,
-            dateFiled: "1990-01-02",
-            document: {
-                document_id: "case:55",
-                title: "Smith v. Jones, 123 U.S. 456",
-                type: "case",
-                metadata: [
-                    {
-                        label: "Date",
-                        value: "1990-01-02",
-                        format: "date",
-                    },
-                ],
-            },
-        });
-    });
-
-    it("nulls case metadata when the cluster map has no entry", () => {
-        const [parsed] = parseCitations(
-            citationsBlock('[{"ref": 2, "cluster_id": 55, "quote": "held"}]'),
-        );
-        expect(createCitation(parsed, docIndex)).toMatchObject({
-            case_name: null,
-            citation: null,
-            url: null,
-            pdfUrl: null,
-            dateFiled: null,
         });
     });
 });

@@ -8,6 +8,9 @@ drafting, and legal research.
 It combines a Next.js frontend, an Express backend, Supabase Auth/Postgres,
 and Cloudflare R2-compatible object storage.
 
+CourtListener is not supported in LiTT. Any jurisdictional research source
+requires a new reviewed design and owner decision.
+
 Website: [mikeoss.com](https://mikeoss.com)
 
 ![Mike assistant home screen](docs/assets/mike-home.png)
@@ -18,7 +21,6 @@ Website: [mikeoss.com](https://mikeoss.com)
 - Review documents and apply suggested edits
 - Run reusable assistant and tabular-review workflows
 - Organize projects, folders, and a document library
-- Verify citations and research US case law with CourtListener
 - Work from Microsoft Word with the beta task-pane add-in
 - Run supported language models locally through Ollama
 
@@ -74,7 +76,6 @@ authentication behavior, Ollama setup, and first-run guidance.
 - [Local development](docs/local-development.md)
 - [Manual and production deployment](docs/deployment.md)
 - [Troubleshooting](docs/troubleshooting.md)
-- [CourtListener integration](docs/courtlistener.md)
 - [Microsoft Word add-in](word-addin/README.md)
 - [Tamper-evident exports](docs/tamper-evident-exports.md)
 - [Safe local testing](docs/safe-local-testing.md)

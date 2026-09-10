@@ -8,6 +8,7 @@ import {
   MX_CIVIL_COMMERCIAL_CATALOG_ROW,
   MX_CIVIL_COMMERCIAL_CONTENT_HASH,
   MX_CIVIL_COMMERCIAL_PLAYBOOK,
+  MX_CIVIL_COMMERCIAL_SYNC_ENTRY,
 } from "./mxCivilCommercialPlaybook";
 
 const SOURCE_COMMIT = "d9fa8380e63837b6441cef169cf5ef80dfb55e54";
@@ -162,6 +163,36 @@ describe("Civil/Mercantile MX governed content", () => {
     expect(serialized).toContain('"label":"law"');
   });
 
+  it("materializes the frozen identity and exact prompt as bounded addon metadata", () => {
+    expect(MX_CIVIL_COMMERCIAL_SYNC_ENTRY).toEqual({
+      ...MX_CIVIL_COMMERCIAL_CATALOG_ROW,
+      title: "Triaje acotado Civil/Mercantil MX",
+      description:
+        "Triaje documental acotado Civil/Mercantil de México para R4, R6 y R9; validación legal pendiente.",
+      prompt_md: JSON.stringify(EXPECTED_PLAYBOOK),
+      columns_config: null,
+      contributors: [],
+      language: "es-MX",
+      practice: null,
+      jurisdictions: ["MX"],
+      pack_key: null,
+      pack_title: null,
+      pack_description: null,
+      pack_version: null,
+      default_sort_order: null,
+      quick_action_name: null,
+      quick_action_prompt: null,
+      document_upload: true,
+      word_quick_action: false,
+      word_quick_action_prompt: null,
+      reference_files: [],
+    });
+    expect(createHash("sha256")
+      .update(MX_CIVIL_COMMERCIAL_SYNC_ENTRY.prompt_md, "utf8")
+      .digest("hex")).toBe(MX_CIVIL_COMMERCIAL_CONTENT_HASH);
+    expect(Object.isFrozen(MX_CIVIL_COMMERCIAL_SYNC_ENTRY)).toBe(true);
+  });
+
   it("does not invent approval or forbidden general authority claims", () => {
     const serialized = JSON.stringify({
       playbook: MX_CIVIL_COMMERCIAL_PLAYBOOK,
@@ -188,6 +219,7 @@ describe("runtime export and import lock", () => {
         "MX_CIVIL_COMMERCIAL_CATALOG_ROW",
         "MX_CIVIL_COMMERCIAL_CONTENT_HASH",
         "MX_CIVIL_COMMERCIAL_PLAYBOOK",
+        "MX_CIVIL_COMMERCIAL_SYNC_ENTRY",
       ].sort(),
     );
   });

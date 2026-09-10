@@ -114,19 +114,6 @@ export async function aiSdkFetch(
   });
 }
 
-const COURTLISTENER_CITATION_REMINDER_TOOL_NAMES = new Set([
-  "courtlistener_find_in_case",
-  "courtlistener_read_case",
-]);
-
-const COURTLISTENER_CITATION_REMINDER = `COURTLISTENER CITATION REMINDER:
-If your final answer relies on any CourtListener case, every such case reference must have BOTH a clickable markdown case link and an inline [N] marker.
-Include the clickable case link only the first time you cite that case; later references to the same case should reuse the existing inline [N] marker without repeating the link unless clarity requires it.
-Assign new refs in first-use order as much as possible: [1], then [2], then [3]. Reuse an existing ref when citing the same case/passage again, even if that means a later sentence cites [3] and then [1] again.
-End the response with a <CITATIONS> block containing one matching case entry per [N] marker:
-{"ref": N, "cluster_id": 123, "quotes": [{"opinion_id": 456, "quote": "exact verbatim opinion text"}]}.
-Do not use doc_id, page, top-level quote, case_name, or citation fields for CourtListener case entries.`;
-
 export type AiSdkAdapterConfig = {
   provider: Provider;
   label: string;
@@ -134,8 +121,6 @@ export type AiSdkAdapterConfig = {
   modelId: string;
   /** Some protocol-compatible gateways reject reasoning request fields. */
   supportsReasoning?: boolean;
-  /** OpenAI's CourtListener tools require an extra instruction after use. */
-  courtlistenerCitationReminder?: boolean;
 };
 
 type PendingToolExecution = {
@@ -245,16 +230,6 @@ function errorMessage(error: unknown, label: string): string {
   return `${label} stream failed.`;
 }
 
-function usesCourtlistenerTool(
-  steps: Array<{ toolCalls: Array<{ toolName: string }> }>,
-) {
-  return steps.some((step) =>
-    step.toolCalls.some((call) =>
-      COURTLISTENER_CITATION_REMINDER_TOOL_NAMES.has(call.toolName),
-    ),
-  );
-}
-
 export async function streamAiSdk(
   params: StreamChatParams,
   config: AiSdkAdapterConfig,
@@ -289,20 +264,6 @@ export async function streamAiSdk(
               | Exclude<NonNullable<StreamChatParams["reasoning"]>, "max">
               | undefined),
       include: { rawChunks: true },
-      ...(config.courtlistenerCitationReminder
-        ? {
-            prepareStep: ({
-              steps,
-            }: {
-              steps: Array<{ toolCalls: Array<{ toolName: string }> }>;
-            }) =>
-              usesCourtlistenerTool(steps)
-                ? {
-                    system: `${params.systemPrompt}\n\n${COURTLISTENER_CITATION_REMINDER}`,
-                  }
-                : undefined,
-          }
-        : {}),
     });
 
     for await (const part of result.stream) {

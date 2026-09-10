@@ -70,7 +70,6 @@ function emptyApiKeys() {
         openai: { configured: false, source: null },
         openrouter: { configured: false, source: null },
         vercel: { configured: false, source: null },
-        courtlistener: { configured: false, source: null },
     };
 }
 

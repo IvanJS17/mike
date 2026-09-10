@@ -90,7 +90,12 @@ def failure_signatures(stderr):
         (b'no space left on device', 'disk_full'),
         (b'permission denied', 'permission_denied'),
         (b'container is unhealthy', 'dependency_unhealthy'),
-    ) if needle in sample)
+    ) if needle in sample) + tuple(
+        'beta_evidence_' + phase + '_calls_' + str(calls)
+        for phase in ('input', 'auth', 'source', 'provider', 'append', 'readback')
+        for calls in (0, 1)
+        if ('beta_evidence_failed:' + phase + ':' + str(calls) + '\n').encode() in sample
+    )
 
 
 def run_process(argv, env, timeout):
@@ -424,7 +429,7 @@ class Runner:
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
 
-    def application(self):
+    def application(self, keep_session=False):
         self.http('proxy_http', 'GET', '/healthz', binary=True)
         self.http('frontend_http', 'GET', '/login', binary=True)
         health = self.http('backend_http', 'GET', '/api/health')
@@ -468,8 +473,9 @@ class Runner:
         self.check('document_listed', any(row.get('id') == document_id for row in listing))
         downloaded = self.http('document_download', 'GET', f'/api/single-documents/{document_id}/docx', binary=True)
         self.check('docx_round_trip', downloaded == document, sha256=hashlib.sha256(document).hexdigest())
-        self.http('logout', 'POST', '/api/auth/logout', expected=204, body={})
-        self.http('logged_out_session', 'GET', '/api/auth/session', expected=401)
+        if not keep_session:
+            self.http('logout', 'POST', '/api/auth/logout', expected=204, body={})
+            self.http('logged_out_session', 'GET', '/api/auth/session', expected=401)
 
     def cleanup(self):
         self.deadline = time.monotonic() + 1200

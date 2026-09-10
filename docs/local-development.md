@@ -139,9 +139,7 @@ review where the model may run across many cells.
 1. Sign up in the app.
 2. If no provider key is configured in `backend/.env`, open
    **Settings > API Keys** and add one.
-3. To use live US case-law tools, add a CourtListener token in `backend/.env`
-   or under **Settings > API Keys**.
-4. Create or open a project and start chatting with documents.
+3. Create or open a project and start chatting with documents.
 
 Use synthetic or public documents until you have reviewed the deployment and
 data flows. See [Safe local testing](safe-local-testing.md) for guidance.

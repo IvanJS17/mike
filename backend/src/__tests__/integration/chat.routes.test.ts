@@ -1028,17 +1028,16 @@ describe("POST /chat — streaming endpoint", () => {
         ).toBe("GOVERNED BY DELAWARE LAW");
     });
 
-    it("keeps CourtListener disabled for Word chats even when legal research is enabled", async () => {
+    it("uses document-only Word tools and preserves the prompt nonce", async () => {
         const chatLib = await import("../../lib/chat");
         const userSettings = await import("../../lib/userSettings");
         vi.mocked(userSettings.getUserModelSettings).mockResolvedValueOnce({
             title_model: "test-model",
             tabular_model: "test-model",
             last_selected_chat_model: null,
-            legal_research_us: true,
+            last_selected_reasoning_level: null,
             api_keys: {
                 gemini: "test-key",
-                courtlistener: "configured-but-unused",
             },
         });
 
@@ -1054,11 +1053,9 @@ describe("POST /chat — streaming endpoint", () => {
         expect(res.status).toBe(200);
         const buildMessagesCall = vi.mocked(chatLib.buildMessages).mock
             .calls[0];
-        expect(buildMessagesCall[4]).toBe(false);
-        expect(buildMessagesCall[6]).toBe("replace");
-        expect(runLLMStream).toHaveBeenCalledWith(
-            expect.objectContaining({ includeResearchTools: false }),
-        );
+        expect(buildMessagesCall[4]).toEqual(expect.any(String));
+        expect(buildMessagesCall[5]).toBe("replace");
+        expect(runLLMStream.mock.calls[0]?.[0]).not.toHaveProperty("includeResearchTools");
         const streamArgs = runLLMStream.mock.calls[0]?.[0] as {
             apiKeys?: { courtlistener?: string };
         };

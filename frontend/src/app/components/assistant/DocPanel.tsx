@@ -18,8 +18,6 @@ import { expandDocumentQuoteEntry } from "../shared/types";
 import type { Citation, EditAnnotation, PanelDocument } from "../shared/types";
 import { quoteVerificationState } from "./message/citationVerification";
 import { FileTypeIcon } from "../shared/FileTypeIcon";
-import { CaseView } from "./CaseView";
-import { useResolvedPanelDocument } from "./useResolvedPanelDocument";
 
 /**
  * Discriminated-union describing what the panel is showing above the viewer.
@@ -82,21 +80,13 @@ export function DocPanel({
     initialScrollTop,
     onScrollChange,
 }: Props) {
-    const {
-        document: resolvedDocument,
-        isLoading: isDocumentLoading,
-        error: documentError,
-        retry: retryDocument,
-    } = useResolvedPanelDocument(document);
-
-    const documentId = resolvedDocument.document_id;
-    const versionId = resolvedDocument.version_id ?? null;
-    const isCase = resolvedDocument.type === "case";
-    const isDocx = resolvedDocument.type === "docx";
-    const isSpreadsheet = resolvedDocument.type === "spreadsheet";
+    const documentId = document.document_id;
+    const versionId = document.version_id ?? null;
+    const isDocx = document.type === "docx";
+    const isSpreadsheet = document.type === "spreadsheet";
     const firstSelectableQuoteIndex =
         mode.kind === "citation"
-            ? resolvedDocument.quotes.findIndex(
+            ? document.quotes.findIndex(
                   (quote) => quoteVerificationState(quote) !== "unverified",
               )
             : -1;
@@ -114,11 +104,11 @@ export function DocPanel({
         ? Number(activeCitationQuoteId.split(":quote:").at(-1))
         : Number.NaN;
     const activeDocumentQuote = Number.isFinite(activeQuoteIndex)
-        ? resolvedDocument.quotes[activeQuoteIndex]
+        ? document.quotes[activeQuoteIndex]
         : undefined;
 
     const { activeViewerQuotes, activeHighlightCells } = useMemo(() => {
-        if (mode.kind !== "citation" || isCase) {
+        if (mode.kind !== "citation") {
             return {
                 activeViewerQuotes: undefined,
                 activeHighlightCells: undefined,
@@ -147,7 +137,7 @@ export function DocPanel({
                       ]
                     : [],
         };
-    }, [activeDocumentQuote, isCase, mode.kind]);
+    }, [activeDocumentQuote, mode.kind]);
 
     useEffect(() => {
         setActiveCitationQuoteId(citationQuoteId);
@@ -176,14 +166,14 @@ export function DocPanel({
     return (
         <div className="flex h-full flex-col">
             <DocumentTitleRow
-                document={resolvedDocument}
+                document={document}
                 isReloading={isReloading}
                 compactActions={compactActions}
             />
 
             {mode.kind === "citation" && (
                 <CitationQuotesSection
-                    document={resolvedDocument}
+                    document={document}
                     activeQuoteId={activeCitationQuoteId}
                     citationRef={mode.citation.ref}
                     onSelect={(quote) => {
@@ -199,7 +189,7 @@ export function DocPanel({
                 />
             )}
 
-            {mode.kind === "edit" && !isCase && (
+            {mode.kind === "edit" && (
                 <div className="px-2 pb-2">
                     <EditCard
                         annotation={mode.edit}
@@ -216,17 +206,7 @@ export function DocPanel({
             )}
 
             <div className="flex flex-1 min-h-0 flex-col">
-                {isCase ? (
-                    <CaseView
-                        document={resolvedDocument}
-                        activeQuote={activeDocumentQuote}
-                        quoteFocusKey={quoteFocusKey}
-                        isLoading={isDocumentLoading}
-                        error={documentError}
-                        onRetry={retryDocument}
-                        onClearQuote={() => setActiveCitationQuoteId(null)}
-                    />
-                ) : isDocx ? (
+                {isDocx ? (
                     <DocxView
                         documentId={documentId}
                         versionId={versionId ?? undefined}
@@ -288,14 +268,9 @@ export function DocumentTitleRow({
             <div className="flex items-start gap-3">
                 <div className="flex min-w-0 flex-1 items-start gap-2">
                     <span className="mt-0.5 shrink-0">
-                        {document.type === "case" ||
-                        document.type === "legislation" ? (
+                        {document.type === "legislation" ? (
                             <Image
-                                src={
-                                    document.type === "case"
-                                        ? "/icons/legal-sources/case-law.svg"
-                                        : "/icons/legal-sources/legislation.svg"
-                                }
+                                src="/icons/legal-sources/legislation.svg"
                                 alt=""
                                 aria-hidden="true"
                                 width={16}

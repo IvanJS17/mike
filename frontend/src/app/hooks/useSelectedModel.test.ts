@@ -11,7 +11,6 @@ const keys: ApiKeyState = {
     openrouter: { configured: true, source: "user" },
     vercel: { configured: false, source: null },
     "opencode-go": { configured: false, source: null },
-    courtlistener: { configured: false, source: null },
 };
 
 const routerSelections = {

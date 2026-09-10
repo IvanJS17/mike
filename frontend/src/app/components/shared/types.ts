@@ -95,7 +95,7 @@ export function isPanelDocument(value: unknown): value is PanelDocument {
     return (
         typeof document.document_id === "string" &&
         typeof document.title === "string" &&
-        ["docx", "pdf", "spreadsheet", "case", "legislation"].includes(
+        ["docx", "pdf", "spreadsheet", "legislation"].includes(
             String(document.type),
         ) &&
         Array.isArray(document.metadata) &&
@@ -232,86 +232,7 @@ export type AssistantEvent =
           error?: string;
           isStreaming?: boolean;
       }
-    | {
-          type: "courtlistener_search_case_law";
-          query: string;
-          result_count?: number;
-          error?: string;
-          isStreaming?: boolean;
-      }
-    | {
-          type: "courtlistener_get_cases";
-          cluster_ids: number[];
-          case_count?: number;
-          opinion_count?: number;
-          cases?: {
-              cluster_id: number;
-              case_name: string | null;
-              citation: string | null;
-              dateFiled?: string | null;
-              url?: string | null;
-          }[];
-          error?: string;
-          isStreaming?: boolean;
-      }
-    | {
-          type: "courtlistener_find_in_case";
-          cluster_id: number | null;
-          query: string;
-          total_matches?: number;
-          case_name?: string | null;
-          citation?: string | null;
-          searches?: {
-              cluster_id: number | null;
-              query: string;
-              total_matches?: number;
-              case_name?: string | null;
-              citation?: string | null;
-              error?: string;
-          }[];
-          error?: string;
-          isStreaming?: boolean;
-      }
-    | {
-          type: "courtlistener_read_case";
-          cluster_id: number | null;
-          case_name?: string | null;
-          citation?: string | null;
-          opinion_count?: number;
-          error?: string;
-          isStreaming?: boolean;
-      }
-    | {
-          type: "courtlistener_verify_citations";
-          citation_count?: number;
-          match_count?: number;
-          error?: string;
-          isStreaming?: boolean;
-      }
-    | {
-          type: "case_citation";
-          cluster_id: number | null;
-          case_name: string | null;
-          citation: string | null;
-          url: string;
-          pdfUrl?: string | null;
-          dateFiled?: string | null;
-          document?: PanelDocument;
-      }
-    | {
-          type: "case_opinions";
-          cluster_id: number;
-          document?: PanelDocument;
-      }
     | { type: "content"; text: string; isStreaming?: boolean };
-
-export type CaseCitationQuote = {
-    opinionId: number | null;
-    type: string | null;
-    author: string | null;
-    quote: string;
-    verification?: QuoteVerification;
-};
 
 export interface Message {
     id?: string;
@@ -379,28 +300,8 @@ export type DocumentCitation = {
     document?: PanelDocument;
 };
 
-export type CaseCitation = {
-    type: "citation_data";
-    kind: "case";
-    ref: number;
-    cluster_id: number;
-    case_name?: string | null;
-    citation?: string | null;
-    url?: string | null;
-    pdfUrl?: string | null;
-    dateFiled?: string | null;
-    quotes: CaseCitationQuote[];
-    /** True only when every quote was matched against the opinion text. */
-    verified?: boolean;
-    document?: PanelDocument;
-};
-
-/**
- * A citation emitted by the assistant. Document citations have doc/page
- * anchors. Case citations anchor to a CourtListener cluster and include a
- * quoted opinion passage.
- */
-export type Citation = DocumentCitation | CaseCitation;
+/** A citation emitted by the assistant with document/page anchors. */
+export type Citation = DocumentCitation;
 
 export function panelDocumentType(filename: string): PanelDocumentType {
     const extension = filename.split(".").pop()?.toLowerCase();
@@ -411,20 +312,13 @@ export function panelDocumentType(filename: string): PanelDocumentType {
     return "pdf";
 }
 
-function legacyCaseSubdocumentId(clusterId: number, opinionId: number): string {
-    return `case:${clusterId}:opinion:${opinionId}`;
-}
-
 export function panelDocumentFromCitation(
     citation: Citation,
     includeQuotes = true,
 ): PanelDocument {
     if (citation.document) {
         if (!includeQuotes) return { ...citation.document, quotes: [] };
-        const citationQuotes =
-            citation.kind === "case"
-                ? citation.quotes
-                : getDocumentCitationQuotes(citation);
+        const citationQuotes = getDocumentCitationQuotes(citation);
         return {
             ...citation.document,
             quotes: citation.document.quotes.map((quote, index) => {
@@ -439,58 +333,6 @@ export function panelDocumentFromCitation(
                       }
                     : quote;
             }),
-        };
-    }
-    if (citation.kind === "case") {
-        const title = [citation.case_name, citation.citation]
-            .filter(Boolean)
-            .join(", ");
-        return {
-            document_id: `case:${citation.cluster_id}`,
-            title: title || "Case",
-            type: "case",
-            metadata: citation.dateFiled
-                ? [{ label: "Date", value: citation.dateFiled, format: "date" }]
-                : [],
-            actions: [
-                ...(citation.pdfUrl
-                    ? [
-                          {
-                              type: "download" as const,
-                              url: citation.pdfUrl,
-                              label: "Download",
-                          },
-                      ]
-                    : []),
-                ...(citation.url
-                    ? [
-                          {
-                              type: "link" as const,
-                              url: citation.url,
-                              label: "Link",
-                              title: "Link",
-                          },
-                      ]
-                    : []),
-            ],
-            quotes: includeQuotes
-                ? citation.quotes.map((quote) => ({
-                      quote: quote.quote,
-                      ...(quote.verification
-                          ? { verification: quote.verification }
-                          : {}),
-                      target: {
-                          ...(typeof quote.opinionId === "number"
-                              ? {
-                                    subdocument_id: legacyCaseSubdocumentId(
-                                        citation.cluster_id,
-                                        quote.opinionId,
-                                    ),
-                                }
-                              : {}),
-                      },
-                  }))
-                : [],
         };
     }
     const quotes = getDocumentCitationQuotes(citation);
@@ -515,25 +357,6 @@ export function panelDocumentFromCitation(
         version_id: citation.version_id ?? null,
         version_number: citation.version_number ?? null,
     };
-}
-
-export function panelDocumentFromCaseEvent(
-    event: Extract<AssistantEvent, { type: "case_citation" }>,
-): PanelDocument | null {
-    if (event.document) return event.document;
-    if (!event.cluster_id) return null;
-    return panelDocumentFromCitation({
-        type: "citation_data",
-        kind: "case",
-        ref: 0,
-        cluster_id: event.cluster_id,
-        case_name: event.case_name,
-        citation: event.citation,
-        url: event.url,
-        pdfUrl: event.pdfUrl,
-        dateFiled: event.dateFiled,
-        quotes: [],
-    });
 }
 
 const PAGE_BREAK_SENTINEL = "[[PAGE_BREAK]]";
@@ -574,7 +397,6 @@ function formatCellLocatorReadable(sheet?: string, cell?: string): string {
 export function getCitationCells(
     a: Citation,
 ): { sheet?: string; cell?: string }[] {
-    if (a.kind === "case") return [];
     return getDocumentCitationQuotes(a)
         .filter((q) => q.cell || q.sheet)
         .map((q) => ({ sheet: q.sheet, cell: q.cell }));
@@ -608,7 +430,6 @@ export function expandDocumentQuoteEntry(entry: {
 export function getDocumentCitationQuotes(
     a: Citation,
 ): DocumentCitationQuote[] {
-    if (a.kind === "case") return [];
     if (Array.isArray(a.quotes) && a.quotes.length) {
         return a.quotes.filter((entry) => entry.quote.trim().length > 0);
     }
@@ -621,7 +442,6 @@ export function getDocumentCitationQuotes(
  * cross-page citation with page "N-M" and a `[[PAGE_BREAK]]` split yields two.
  */
 export function expandCitationToEntries(a: Citation): CitationQuote[] {
-    if (a.kind === "case") return [];
     return getDocumentCitationQuotes(a).flatMap(expandDocumentQuoteEntry);
 }
 
@@ -631,9 +451,6 @@ export function expandCitationToEntries(a: Citation): CitationQuote[] {
  * callers join with `.filter(Boolean)` so the locator is simply omitted.
  */
 export function formatCitationPage(a: Citation): string {
-    if (a.kind === "case") {
-        return a.citation || a.case_name || `Case ${a.cluster_id}`;
-    }
     const quotes = getDocumentCitationQuotes(a);
     // Spreadsheets are located by cell, e.g. "Sheet1!B7" (or several).
     if (isSpreadsheetFilename(a.filename)) {
@@ -660,7 +477,7 @@ export function formatCitationQuotePage(
     page: number | string,
     quote?: DocumentCitationQuote,
 ): string {
-    if (a.kind !== "case" && isSpreadsheetFilename(a.filename)) {
+    if (isSpreadsheetFilename(a.filename)) {
         return formatCellLocatorReadable(quote?.sheet, quote?.cell);
     }
     return `Page ${page}`;
@@ -676,11 +493,6 @@ export function cleanCitationQuoteText(_a: Citation, rawQuote: string): string {
 
 /** Produce a reader-friendly version of the quote (replaces [[PAGE_BREAK]] with "..."). */
 export function displayCitationQuote(a: Citation): string {
-    if (a.kind === "case") {
-        return a.quotes
-            .map((q) => q.quote.replaceAll(PAGE_BREAK_SENTINEL, "..."))
-            .join(" / ");
-    }
     return getDocumentCitationQuotes(a)
         .map((q) => cleanCitationQuoteText(a, q.quote))
         .filter(Boolean)

@@ -53,7 +53,6 @@ interface UserProfile {
     lastSelectedChatModel: string | null;
     lastSelectedReasoningLevel: NonNullable<Message["reasoning"]>;
     mfaOnLogin: boolean;
-    legalResearchUs: boolean;
     quickActionsVisible: boolean;
     openRouterModels: string[];
     vercelModels: string[];
@@ -95,7 +94,6 @@ interface UserProfileContextType {
         chatId?: string | null,
     ) => Promise<boolean>;
     updateMfaOnLogin: (enabled: boolean) => Promise<boolean>;
-    updateLegalResearchUs: (enabled: boolean) => Promise<boolean>;
     updateQuickActionsVisible: (visible: boolean) => Promise<boolean>;
     updateOpenRouterModels: (models: string[]) => Promise<boolean>;
     updateVercelModels: (models: string[]) => Promise<boolean>;
@@ -120,7 +118,6 @@ const API_KEY_PROVIDERS: ApiKeyProvider[] = [
     "openrouter",
     "vercel",
     "opencode-go",
-    "courtlistener",
 ];
 
 function emptyApiKeys(): ApiKeyState {
@@ -131,7 +128,6 @@ function emptyApiKeys(): ApiKeyState {
         openrouter: { configured: false, source: null },
         vercel: { configured: false, source: null },
         "opencode-go": { configured: false, source: null },
-        courtlistener: { configured: false, source: null },
     };
 }
 
@@ -225,7 +221,6 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
                 lastSelectedChatModel: null,
                 lastSelectedReasoningLevel: "high",
                 mfaOnLogin: false,
-                legalResearchUs: true,
                 quickActionsVisible: true,
                 openRouterModels: [],
                 vercelModels: [],
@@ -447,23 +442,6 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
         [user],
     );
 
-    const updateLegalResearchUs = useCallback(
-        async (enabled: boolean): Promise<boolean> => {
-            if (!user) return false;
-            try {
-                const updated = await updateUserProfile({
-                    legalResearchUs: enabled,
-                });
-                setProfile((prev) =>
-                    prev ? { ...prev, ...toProfile(updated) } : null,
-                );
-                return true;
-            } catch {
-                return false;
-            }
-        },
-        [user],
-    );
 
     const updateQuickActionsVisible = useCallback(
         async (visible: boolean): Promise<boolean> => {
@@ -617,7 +595,6 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
                 persistChatModelSelection,
                 persistChatReasoningSelection,
                 updateMfaOnLogin,
-                updateLegalResearchUs,
                 updateQuickActionsVisible,
                 updateOpenRouterModels,
                 updateVercelModels,

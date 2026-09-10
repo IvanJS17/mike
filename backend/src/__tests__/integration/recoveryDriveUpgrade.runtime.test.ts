@@ -214,7 +214,7 @@ beforeAll(() => {
     try {
       execFileSync(
         "docker",
-        ["exec", CONTAINER, "pg_isready", "-U", "postgres"],
+        ["exec", CONTAINER, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
         {
           encoding: "utf8",
           timeout: 5_000,

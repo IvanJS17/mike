@@ -411,14 +411,9 @@ export function AssistantSidePanel({
                                         />
                                     )}
                                 <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
-                                    {tab.document.type === "case" ||
-                                    tab.document.type === "legislation" ? (
+                                    {tab.document.type === "legislation" ? (
                                         <Image
-                                            src={
-                                                tab.document.type === "case"
-                                                    ? "/icons/legal-sources/case-law.svg"
-                                                    : "/icons/legal-sources/legislation.svg"
-                                            }
+                                            src="/icons/legal-sources/legislation.svg"
                                             alt=""
                                             aria-hidden="true"
                                             width={14}

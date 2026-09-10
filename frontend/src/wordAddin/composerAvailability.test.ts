@@ -14,7 +14,6 @@ const NO_KEYS: ApiKeyStatus = {
     openrouter: false,
     vercel: false,
     "opencode-go": false,
-    courtlistener: false,
 } as ApiKeyStatus;
 
 describe("isModelAvailable fail-open", () => {

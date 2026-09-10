@@ -85,8 +85,6 @@ Size is a rough guess: S ≈ an hour, M ≈ an afternoon.
 - [x] `lib/docxTrackedChanges.ts` — tracked-changes XML round-trip on a minimal
       docx fixture: insert/delete runs, accept/reject. High value: document
       integrity. (M)
-- [ ] `lib/courtlistener.ts` — API client with mocked fetch: query building,
-      pagination, and error paths. Legal-research correctness. (M)
 - [x] `lib/workflowCatalogSource.ts`, `lib/workflowCatalogSync.ts` — validate
       downloaded workflow definitions, temporary-file cleanup, asset uploads,
       and the transactional import payload. (M)

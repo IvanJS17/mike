@@ -77,7 +77,6 @@ type UserProfileRow = {
     last_selected_chat_model?: string | null;
     last_selected_reasoning_level?: string | null;
     mfa_on_login: boolean | null;
-    legal_research_us: boolean | null;
     quick_actions_visible: boolean | null;
     dark_mode: boolean | null;
 };
@@ -191,25 +190,25 @@ function mcpOAuthPopupCsp(nonce: string) {
 }
 
 const PROFILE_SELECT_WITH_CHAT_SELECTIONS =
-    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, last_selected_chat_model, last_selected_reasoning_level, mfa_on_login, legal_research_us, quick_actions_visible, dark_mode";
+    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, last_selected_chat_model, last_selected_reasoning_level, mfa_on_login, quick_actions_visible, dark_mode";
 const PROFILE_SELECT_WITH_LAST_SELECTED_CHAT_MODEL =
-    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, last_selected_chat_model, mfa_on_login, legal_research_us, quick_actions_visible, dark_mode";
+    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, last_selected_chat_model, mfa_on_login, quick_actions_visible, dark_mode";
 const PROFILE_SELECT =
-    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login, legal_research_us, quick_actions_visible, dark_mode";
+    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login, quick_actions_visible, dark_mode";
 // Deploy-before-migrate tolerance is per column: a database that already has
 // the 20260821 onboarding/password columns but not yet dark_mode must keep
 // them rather than fall all the way back to a lower tier. This is exactly
 // PROFILE_SELECT minus dark_mode.
 const PROFILE_SELECT_NO_DARK_MODE =
-    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login, legal_research_us, quick_actions_visible";
+    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login, quick_actions_visible";
 // PROFILE_SELECT minus the 20260821 onboarding / password-capability columns,
 // for databases that have not applied those migrations yet. Migration 02
 // (password_set_at) gets its own tier so a database that applied 01 but not
 // 02 keeps its live onboarding/personalisation columns.
 const PROFILE_SELECT_NO_PASSWORD =
-    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login, legal_research_us, quick_actions_visible";
+    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login, quick_actions_visible";
 const PROFILE_SELECT_NO_ONBOARDING =
-    "display_name, organisation, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login, legal_research_us, quick_actions_visible";
+    "display_name, organisation, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login, quick_actions_visible";
 const ONBOARDING_PROFILE_COLUMNS = [
     "jurisdiction",
     "practice_setting",
@@ -218,8 +217,6 @@ const ONBOARDING_PROFILE_COLUMNS = [
     "onboarding_version",
 ];
 const PROFILE_SELECT_NO_QUICK_ACTIONS =
-    "display_name, organisation, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login, legal_research_us";
-const PROFILE_SELECT_NO_LEGAL =
     "display_name, organisation, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login";
 const LEGACY_PROFILE_SELECT =
     "display_name, organisation, message_credits_used, credits_reset_date, tier, tabular_model";
@@ -383,9 +380,6 @@ async function selectProfile(
     const legacy = await selectProfileLegacy(db, userId, mode);
     if (legacy.data && typeof legacy.data === "object") {
         const row = legacy.data as Record<string, unknown>;
-        if (!("legal_research_us" in row)) {
-            Object.assign(row, { legal_research_us: true });
-        }
         Object.assign(row, { quick_actions_visible: true });
         if (!("dark_mode" in row)) {
             Object.assign(row, { dark_mode: false });
@@ -401,7 +395,7 @@ async function selectProfileLegacy(
 ) {
     const query = db
         .from("user_profiles")
-        .select(PROFILE_SELECT_NO_LEGAL)
+        .select(PROFILE_SELECT_NO_QUICK_ACTIONS)
         .eq("user_id", userId);
     const result =
         mode === "single" ? await query.single() : await query.maybeSingle();
@@ -566,7 +560,6 @@ function serializeProfile(
             normalizeReasoningLevel(row.last_selected_reasoning_level) ??
             "high",
         mfaOnLogin: row.mfa_on_login === true,
-        legalResearchUs: row.legal_research_us !== false,
         quickActionsVisible: row.quick_actions_visible !== false,
         darkMode: row.dark_mode === true,
         ...Object.fromEntries(
@@ -726,8 +719,7 @@ function validateProfilePayload(body: unknown):
               tabular_model?: string | null;
               last_selected_chat_model?: string | null;
               last_selected_reasoning_level?: string | null;
-              legal_research_us?: boolean;
-              quick_actions_visible?: boolean;
+                    quick_actions_visible?: boolean;
               updated_at: string;
           };
           routerModels?: Partial<Record<RouterSlug, string[]>>;
@@ -749,7 +741,6 @@ function validateProfilePayload(body: unknown):
         "tabularModel",
         "lastSelectedChatModel",
         "lastSelectedReasoningLevel",
-        "legalResearchUs",
         "quickActionsVisible",
         "darkMode",
         ...ROUTER_SLUGS.map((slug) => ROUTER_PROFILE_FIELDS[slug]),
@@ -775,7 +766,6 @@ function validateProfilePayload(body: unknown):
         tabular_model?: string | null;
         last_selected_chat_model?: string | null;
         last_selected_reasoning_level?: string | null;
-        legal_research_us?: boolean;
         quick_actions_visible?: boolean;
         dark_mode?: boolean;
         updated_at: string;
@@ -919,16 +909,6 @@ function validateProfilePayload(body: unknown):
             };
         }
         routerModels[slug] = models;
-    }
-
-    if ("legalResearchUs" in raw) {
-        if (typeof raw.legalResearchUs !== "boolean") {
-            return {
-                ok: false,
-                detail: "legalResearchUs must be a boolean",
-            };
-        }
-        update.legal_research_us = raw.legalResearchUs;
     }
 
     if ("quickActionsVisible" in raw) {

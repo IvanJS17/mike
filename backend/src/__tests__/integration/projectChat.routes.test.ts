@@ -344,12 +344,11 @@ describe("POST /projects/:projectId/chat", () => {
                 ],
             });
 
-        const [messages, , systemPromptExtra, , , nonce] =
+        const [messages, , systemPromptExtra, , nonce] =
             buildMessages.mock.calls[0] as unknown as [
                 { content: string }[],
                 unknown,
                 string,
-                unknown,
                 unknown,
                 string,
             ];

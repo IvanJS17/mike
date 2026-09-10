@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import type { Citation, DocumentCitation } from "../../shared/types";
+import type { DocumentCitation } from "../../shared/types";
 import { citationTooltip, CitationsBlock } from "./CitationSources";
 
 function documentCitation(ref: number, verified?: boolean): DocumentCitation {
@@ -47,21 +47,6 @@ describe("CitationsBlock verification states", () => {
       "Quote could not be matched to the source text.",
     );
     expect(citationTooltip(documentCitation(3, true))).not.toContain("matched");
-  });
-
-  it("leaves case citations outside document verification styling", () => {
-    const citation: Citation = {
-      type: "citation_data",
-      kind: "case",
-      ref: 4,
-      cluster_id: 99,
-      case_name: "Example v Example",
-      quotes: [],
-    };
-    render(<CitationsBlock citations={[citation]} />);
-
-    const button = screen.getByRole("button", { name: "Citation 4" });
-    expect(button).toHaveClass("bg-gray-200/80", "text-gray-800");
   });
 
   it("adds the selected quote background only to the active citation", () => {

@@ -358,7 +358,7 @@ class ObservedRunner(smoke.Runner):
         if inbound and service == 'db':
             if remote not in ('/tmp/paired/query.sql', '/tmp/paired/database.dump'):
                 raise Failure('invalid_database_copy_path')
-            # docker cp creates root-owned files. Retain 0600 and transfer only
+            # docker cp may retain the host UID. Retain 0600 and transfer only
             # these two fixed private files to the container's postgres OS user.
             self.db_exec(['sh', '-ec', 'chown postgres:postgres ' + remote + '; chmod 600 ' + remote], user='root')
 
@@ -457,7 +457,7 @@ def lifecycle(source, target):
     source.verify_http(source.fixture)
     source.capture_restore_sessions()
     source.quiesce()
-    source.db_exec(['sh', '-ec', 'umask 077; mkdir -m 700 /tmp/paired'])
+    source.db_exec(['sh', '-ec', 'umask 077; mkdir -p -m 700 /tmp/paired'])
     source.audit(source.fixture)
     before = source.snapshot()
     source.stage('paired_backup')
@@ -557,7 +557,7 @@ def lifecycle(source, target):
         content_equality_phase='post_http', final_security_and_storage_phase='post_http')
 
 
-def main(argv=None):
+def main(argv=None, runner_type=ObservedRunner):
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument('--runtime', action='store_true')
@@ -575,9 +575,10 @@ def main(argv=None):
         parser.error('timeout must be between 3000 and 7200 seconds')
     if not args.docker_socket.startswith('/') or '\x00' in args.docker_socket:
         parser.error('Docker socket must be an absolute local path')
-    source, target = ObservedRunner(args), ObservedRunner(args)
+    source, target = runner_type(args), runner_type(args)
+    source.role, target.role = 'source', 'target'
     source.deadline = target.deadline = time.monotonic() + args.timeout_seconds - 2410
-    receipt = dict(status='FAIL', runtime_exercised=False, limitations=LIMITATIONS,
+    receipt: dict = dict(status='FAIL', runtime_exercised=False, limitations=source.receipt['limitations'],
                    source=source.receipt, target=target.receipt)
     old = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGALRM)}
     previous_umask = os.umask(0o077)

@@ -5,7 +5,24 @@
 > ownership together with the five canonical control documents. It does not by
 > itself authorize a product writer, staging, external-provider contact or production.
 
-## 1. Current gate
+## Current execution reconciliation — 2026-09-09
+
+The 25-row decisions and pinned upstream input below remain authoritative. The
+coordinator scaffold, A–F ports and G implementation now exist on the recovery
+branch. Final assembly also removes the previously residual CourtListener surface
+and materializes the frozen MX playbook in `mike_workflows` through the existing
+sync/RPC, preserving its own source commit and pending legal-validation status.
+Execution reads the persisted active definition and exact prompt hash; no legacy
+runtime registry or missing-row fallback is used.
+
+The current verification/review/publication boundary is the 16-gate
+[Phase 3 decision package](PHASE3_RECOVERY_DECISION.md). The former blocker text
+and receipts below describe the historical control transition, not a command to
+restart A–F or advance the upstream pin. Later lane prompts preserve ownership
+contracts; they do not authorize duplicate implementation. Retention, real hosts,
+external canaries, performance and release operations remain deferred as specified.
+
+## 1. Historical control gate (2026-08-30)
 
 The Phase 0 control package, reviewed Beta baseline and this compatibility ledger
 are integrated in `origin/main`. PR #18 merged the final reviewed Beta head
@@ -16,7 +33,7 @@ head `33ea753368c70bf6b6edbe34d2a0f0f8e0c93b60` into the ledger-acceptance basel
 `0cafb80c85e8a0e75f7f78df744eb4806b7057d6` with tree
 `e2d87cd2e9712233c3fe409949986e0feee8f083`.
 
-G4 evidence is current:
+G4 evidence at that historical transition:
 
 - PR exact-head CI: 8/8 checks succeeded, including Playwright;
 - post-merge push workflows on `cc497bb`: CI, Stack tests, CodeQL, Secret scan,
@@ -34,10 +51,10 @@ G4 evidence is current:
 - ledger review `t_15f7252d`: PASS with zero P1/P2 on exact tree `e2d87cd2`;
 - PR #19 exact-head CI: 8/8 PASS; post-merge push workflows on `0cafb80`: 5/5 PASS.
 
-The ledger review/integration gate is complete. No implementation writer may start
-until the coordinator creates a compiling recovery scaffold, migration baseline and
-shared interfaces from the pinned upstream core. This ledger and its closeout change
-no product code.
+At the historical ledger transition, implementation awaited the coordinator
+scaffold and migration baseline. That prerequisite was subsequently completed;
+see the current execution reconciliation above. The historical control-only
+closeout itself changed no product code.
 
 ## 2. Immutable evidence set
 

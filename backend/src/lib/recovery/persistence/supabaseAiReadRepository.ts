@@ -33,7 +33,7 @@ const ITEM_COLUMNS =
 const PAGE_COLUMNS =
   "document_id,document_version_id,page,content,content_sha256";
 const SCOPE_DOCUMENT_COLUMNS =
-  "id,document_id,content_sha256,documents!inner(id,project_id)";
+  "id,document_id,content_sha256,documents!document_id!inner(id,project_id)";
 const SCOPE_MATTER_COLUMNS =
   "id,project_id,workspace_id,workspaces!inner(organization_id)";
 const SHA256_RE = /^[0-9a-f]{64}$/;
@@ -188,7 +188,16 @@ export function createSupabaseAiReadRepository(client: unknown) {
         execution,
       );
       if (!evidence_receipt) throw new Error(AI_READ_FAILURE);
-      return { execution, evidence_receipt };
+      // Consumers bind the canonical envelope to their current execution. Keep
+      // derived page_hashes inside the validator, not in the transport contract.
+      return {
+        execution,
+        evidence_receipt: Object.freeze({
+          receipt_version: evidence_receipt.receipt_version,
+          canonical_json: evidence_receipt.canonical_json,
+          receipt_sha256: evidence_receipt.receipt_sha256,
+        }),
+      };
     } catch (error) {
       if (error instanceof Error && error.message === AI_READ_FAILURE)
         throw error;

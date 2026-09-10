@@ -74,40 +74,5 @@ describe("CitationQuotesSection", () => {
         );
     });
 
-    it("does not add a label to case quotes", () => {
-        render(
-            <CitationQuotesSection
-                document={{
-                    document_id: "case:123",
-                    title: "Example v Example, 123 U.S. 456",
-                    type: "case",
-                    metadata: [],
-                    quotes: [
-                        {
-                            quote: "The court therefore concludes",
-                            target: {
-                                subdocument_id: "case:123:opinion:7",
-                            },
-                        },
-                    ],
-                    subdocuments: [
-                        {
-                            document_id: "case:123:opinion:7",
-                            title: "Lead Opinion",
-                            type: "html",
-                            html: "<p>Opinion</p>",
-                        },
-                    ],
-                }}
-            />,
-        );
 
-        expect(
-            screen.getByText(/The court therefore concludes/),
-        ).toHaveTextContent("“The court therefore concludes”");
-        expect(screen.queryByText(/Lead Opinion/)).not.toBeInTheDocument();
-        expect(
-            screen.queryByText(/Example v Example/),
-        ).not.toBeInTheDocument();
-    });
 });

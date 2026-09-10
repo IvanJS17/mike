@@ -1,6 +1,10 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DocPanel, DocumentTitleRow } from "./DocPanel";
+
+vi.mock("../shared/views/PdfView", () => ({
+    PdfView: () => <div>PDF preview fixture</div>,
+}));
 
 describe("DocumentTitleRow", () => {
     it("uses the shared compact title row with a file-type icon", () => {
@@ -34,15 +38,15 @@ describe("DocumentTitleRow", () => {
         render(
             <DocumentTitleRow
                 document={{
-                    document_id: "case:123",
-                    title: "Example v Example",
-                    type: "case",
+                    document_id: "document-123",
+                    title: "agreement.pdf",
+                    type: "pdf",
                     metadata: [],
                     quotes: [],
                     actions: [
                         {
                             type: "download",
-                            url: "https://example.com/opinion.pdf",
+                            url: "https://example.invalid/agreement.pdf",
                             label: "Download",
                         },
                         {
@@ -68,16 +72,16 @@ describe("DocumentTitleRow", () => {
     });
 });
 
-describe("case document", () => {
+describe("uploaded document metadata", () => {
     it("uses the same title row for normalized metadata and actions", () => {
         const { container } = render(
             <DocPanel
                 compactActions={false}
                 mode={{ kind: "document" }}
                 document={{
-                    document_id: "case:123",
-                    title: "Example v Example, [2024] UKSC 1",
-                    type: "case",
+                    document_id: "document-123",
+                    title: "agreement.pdf",
+                    type: "pdf",
                     metadata: [
                         {
                             label: "Date",
@@ -88,7 +92,7 @@ describe("case document", () => {
                     actions: [
                         {
                             type: "download",
-                            url: "https://example.com/opinion.pdf",
+                            url: "https://example.invalid/agreement.pdf",
                             label: "Download",
                         },
                         {
@@ -98,21 +102,12 @@ describe("case document", () => {
                         },
                     ],
                     quotes: [],
-                    subdocuments: [
-                        {
-                            document_id: "case:123:opinion:456",
-                            title: "Lead Opinion by Justice Example",
-                            type: "html",
-                            html: "<p>Opinion text.</p>",
-                            text: null,
-                        },
-                    ],
                 }}
             />,
         );
 
         const title = screen.getByRole("heading", {
-            name: "Example v Example, [2024] UKSC 1",
+            name: "agreement.pdf",
         });
         expect(title).toHaveClass("text-sm", "font-medium");
         expect(title).not.toHaveClass("font-serif");
@@ -123,7 +118,7 @@ describe("case document", () => {
 
         expect(screen.getByRole("link", { name: "Download" })).toHaveAttribute(
             "href",
-            "https://example.com/opinion.pdf",
+            "https://example.invalid/agreement.pdf",
         );
         expect(screen.getByRole("link", { name: "Link" })).toHaveAttribute(
             "href",
@@ -131,9 +126,9 @@ describe("case document", () => {
         );
         expect(
             container.querySelector(
-                'img[src*="/icons/legal-sources/case-law.svg"]',
+                'img[src*="/icons/file-types/pdf.svg"]',
             ),
         ).toHaveClass("h-4", "w-4");
-        expect(screen.getByText("Opinion text.")).toBeInTheDocument();
+        expect(screen.getByText("PDF preview fixture")).toBeInTheDocument();
     });
 });

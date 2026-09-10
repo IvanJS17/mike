@@ -8,12 +8,6 @@ import { resolveRequestedModel } from "../routerModels";
 import { UserFacingError } from "../userFacingError";
 import { createServerSupabase } from "../supabase";
 import { buildUserMcpTools, type McpToolEvent } from "../mcpConnectors";
-import type { SourceDocument } from "../sourceDocuments";
-import {
-  COURTLISTENER_TOOLS,
-  type CaseCitationEvent,
-  type CourtlistenerToolEvent,
-} from "./tools/courtlistenerTools";
 import {
   type DocStore,
   type DocIndex,
@@ -34,10 +28,6 @@ import {
   CITATIONS_OPEN_TAG,
 } from "./citations";
 import { runToolCalls } from "./tools/toolDispatcher";
-import {
-  getCachedCaseOpinionTexts,
-  type CourtlistenerTurnState,
-} from "./tools/courtlistenerTurnState";
 import {
   readDocumentContent,
   type TurnEditState,
@@ -99,14 +89,7 @@ export type AssistantEvent =
       download_url: string;
       annotations: EditAnnotation[];
     }
-  | CaseCitationEvent
-  | CourtlistenerToolEvent
   | McpToolEvent
-  | {
-      type: "case_opinions";
-      cluster_id: number;
-      document: SourceDocument;
-    }
   | { type: "content"; text: string }
   | {
       /**
@@ -220,7 +203,6 @@ export async function runLLMStream(params: {
   db: ReturnType<typeof createServerSupabase>;
   write: (s: string) => void;
   extraTools?: unknown[];
-  includeResearchTools?: boolean;
   /** Expose ask_inputs only to clients that can render and answer it. */
   includeAskInputs?: boolean;
   workflowStore?: WorkflowStore;
@@ -264,7 +246,6 @@ export async function runLLMStream(params: {
     db,
     write: unsafeWrite,
     extraTools,
-    includeResearchTools = true,
     includeAskInputs = true,
     workflowStore,
     tabularStore,
@@ -278,12 +259,11 @@ export async function runLLMStream(params: {
   } = params;
   const write = (chunk: string) =>
     unsafeWrite(sanitizeAssistantSseChunk(chunk));
-  const researchTools = includeResearchTools ? COURTLISTENER_TOOLS : [];
   const mcpTools = await buildUserMcpTools(userId, db);
   const conversationTools = includeAskInputs
     ? TOOLS
     : TOOLS.filter((tool) => tool.function.name !== "ask_inputs");
-  const baseTools = [...conversationTools, ...researchTools, ...WORKFLOW_TOOLS];
+  const baseTools = [...conversationTools, ...WORKFLOW_TOOLS];
   const activeTools = [
     ...baseTools,
     ...mcpTools,
@@ -314,9 +294,6 @@ export async function runLLMStream(params: {
   // one assistant response. The guard is invalidated when edit_document
   // changes that document so a post-edit verification read can still happen.
   const turnReadState: TurnReadState = new Map();
-  const courtlistenerTurnState: CourtlistenerTurnState = {
-    casesByClusterId: new Map(),
-  };
   let fullText = "";
   let iterText = "";
   let iterVisibleText = "";
@@ -346,7 +323,6 @@ export async function runLLMStream(params: {
       createCitation(
         c,
         docIndex,
-        courtlistenerTurnState.casesByClusterId,
         docStore,
       ),
     );
@@ -543,8 +519,6 @@ export async function runLLMStream(params: {
           workflowsApplied,
           docsEdited,
           askInputsEvents,
-          courtlistenerEvents,
-          caseCitationEvents,
           mcpEvents,
         } = await runToolCalls(
           toolCalls,
@@ -558,8 +532,6 @@ export async function runLLMStream(params: {
           turnEditState,
           turnReadState,
           projectId,
-          courtlistenerTurnState,
-          apiKeys,
           nonce,
         );
         throwIfAborted(signal);
@@ -623,13 +595,7 @@ export async function runLLMStream(params: {
           write(`data: ${JSON.stringify(askInputsEvent)}\n\n`);
           events.push(askInputsEvent);
         }
-        for (const event of courtlistenerEvents) {
-          events.push(event);
-        }
         for (const event of mcpEvents) {
-          events.push(event);
-        }
-        for (const event of caseCitationEvents) {
           events.push(event);
         }
 
@@ -706,14 +672,12 @@ export async function runLLMStream(params: {
       createCitation(
         c,
         docIndex,
-        courtlistenerTurnState.casesByClusterId,
         docStore,
       ),
     );
     // Server-side quote verification. Fetch each document's extracted source
     // text at most once per turn (memoized by doc_id), reading only bytes
-    // already in storage with emitEvents:false. Case citations are matched
-    // against the opinion text cached during this turn.
+    // already in storage with emitEvents:false.
     const sourceTextByDocId = new Map<string, Promise<string>>();
     const getSourceText = (docId: string): Promise<string> => {
       let pending = sourceTextByDocId.get(docId);
@@ -731,8 +695,6 @@ export async function runLLMStream(params: {
     citations = await verifyCitations(
       rawCitations,
       getSourceText,
-      async (clusterId) =>
-        getCachedCaseOpinionTexts(courtlistenerTurnState, clusterId),
     );
   }
   devLog("[chat/stream] final citations", {

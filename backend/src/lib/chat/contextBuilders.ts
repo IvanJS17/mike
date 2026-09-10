@@ -315,7 +315,6 @@ export function buildMessages(
   }[],
   systemPromptExtra?: string,
   docIndex?: DocIndex,
-  includeResearchTools = true,
   nonce?: string,
   systemPromptMode: "append" | "replace" = "append",
 ) {
@@ -323,7 +322,7 @@ export function buildMessages(
   let systemContent =
     systemPromptMode === "replace"
       ? (systemPromptExtra?.trim() ?? "")
-      : buildSystemPrompt(includeResearchTools);
+      : buildSystemPrompt();
 
   if (systemPromptMode === "append" && systemPromptExtra) {
     systemContent += `\n\n${systemPromptExtra.trim()}`;
@@ -386,12 +385,8 @@ export function extractCitations(
   docStore?: DocStore,
 ): unknown[] {
   return parseCitations(fullText).map((c) =>
-    createCitation(c, docIndex, undefined, docStore),
+    createCitation(c, docIndex, docStore),
   );
-}
-
-export function stripTransientAssistantEvents(events: AssistantEvent[]) {
-  return events.filter((event) => event.type !== "case_opinions");
 }
 
 function cleanAskInputResponseId(value: unknown) {
@@ -546,7 +541,7 @@ export function buildCancelledAssistantMessage(args: {
   buildCitations: (fullText: string, events: AssistantEvent[]) => unknown[];
 }) {
   const events = appendCancelledAssistantEvent(
-    stripTransientAssistantEvents(args.events),
+    args.events,
   );
   return {
     events,

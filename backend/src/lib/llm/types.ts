@@ -61,7 +61,6 @@ export type UserApiKeys = {
     openrouter?: string | null;
     vercel?: string | null;
     "opencode-go"?: string | null;
-    courtlistener?: string | null;
 };
 
 export type StreamChatParams = {

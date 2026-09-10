@@ -75,8 +75,6 @@ async function dispatchDocumentTool(
         undefined,
         turnReadState,
         undefined,
-        undefined,
-        undefined,
         NONCE,
     );
 }

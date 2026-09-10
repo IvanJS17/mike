@@ -1,4 +1,3 @@
-import Image from "next/image";
 import { Loader2 } from "lucide-react";
 import { FileTypeIcon } from "../../shared/FileTypeIcon";
 import { displayCitationQuote, formatCitationPage } from "../../shared/types";
@@ -19,19 +18,10 @@ type CitationSourceRow = {
 };
 
 function citationSourceKey(annotation: Citation): string {
-    if (annotation.kind === "case") {
-        return `case:${annotation.cluster_id}`;
-    }
     return `document:${annotation.document_id}`;
 }
 
 function citationSourceLabel(annotation: Citation): string {
-    if (annotation.kind === "case") {
-        const caseName = annotation.case_name?.trim();
-        const citation = annotation.citation?.trim();
-        if (caseName && citation) return `${caseName}, ${citation}`;
-        return caseName || citation || `Case ${annotation.cluster_id}`;
-    }
     return annotation.filename;
 }
 
@@ -44,18 +34,6 @@ export function citationTooltip(annotation: Citation): string {
 }
 
 function CitationSourceIcon({ annotation }: { annotation: Citation }) {
-    if (annotation.kind === "case") {
-        return (
-            <Image
-                src="/icons/legal-sources/case-law.svg"
-                alt=""
-                aria-hidden="true"
-                width={14}
-                height={14}
-                className="h-3.5 w-3.5 shrink-0"
-            />
-        );
-    }
     return (
         <FileTypeIcon fileType={annotation.filename} className="h-3.5 w-3.5" />
     );

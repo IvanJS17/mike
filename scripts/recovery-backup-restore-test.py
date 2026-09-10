@@ -337,7 +337,7 @@ class Tests(unittest.TestCase):
         cls.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.module)
 
-    def exercise(self, failure=None, runtime=True):
+    def exercise(self, failure=None, runtime=True, runner_type=None):
         b = Boundary(failure)
         b.module = self.module
         with tempfile.TemporaryDirectory() as output, contextlib.ExitStack() as stack:
@@ -357,7 +357,8 @@ class Tests(unittest.TestCase):
                     return remove(path, *args, **kwargs)
                 stack.enter_context(patch('shutil.rmtree', failing_remove))
             out = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-            rc = self.module.main(cli(output, runtime))
+            options = {'runner_type': runner_type} if runner_type else {}
+            rc = self.module.main(cli(output, runtime), **options)
             receipt = json.loads(out.getvalue())
             evidence = out.getvalue() + ''.join(p.read_text() for p in Path(output).rglob('*.json'))
             for secret in b.secrets:
@@ -378,6 +379,27 @@ class Tests(unittest.TestCase):
         self.assertEqual(receipt['status'], 'CONTRACT_ONLY')
         self.assertFalse(b.requests)
         self.assertTrue(all(c[0] == 'git' for c in b.commands))
+
+    def test_specialized_runner_uses_real_lifecycle_and_can_keep_session(self):
+        prepared, names = [], []
+        class Specialized(self.module.ObservedRunner):
+            def prepare(self):
+                prepared.append(getattr(self, 'role', None))
+                super().prepare()
+            def http(self, name, *args, **kwargs):
+                names.append(name)
+                return super().http(name, *args, **kwargs)
+            def application(self):
+                super().application(keep_session=True)
+        rc, receipt, boundary = self.exercise(runner_type=Specialized)
+        self.assertEqual(rc, 0, receipt)
+        self.assertEqual(prepared, ['source', 'target'])
+        self.assertIn('document_download', names)
+        self.assertIn('logout_before_login', names)
+        self.assertNotIn('logout', names)
+        self.assertNotIn('logged_out_session', names)
+        self.assertEqual(boundary.uploads, 1)
+        self.assertTrue(all(s['down'] for s in boundary.stacks.values()))
 
     def test_runtime_orchestration(self):
         rc, receipt, b = self.exercise()

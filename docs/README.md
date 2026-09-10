@@ -12,8 +12,6 @@
 
 ## Features and clients
 
-- [CourtListener integration](courtlistener.md) — live US case-law tools and
-  optional bulk data
 - [Microsoft Word add-in](../word-addin/README.md) — concise setup and command
   reference
 - [Word add-in development and deployment](word-addin-development.md) — manual
