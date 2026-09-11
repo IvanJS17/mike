@@ -51,13 +51,18 @@ function ProfileDetailsForm({
     const handleSubmit = async (event: React.FormEvent) => {
         event.preventDefault();
         const displayName = name.trim();
+        const organisationName = organisation.trim();
+        if (!organisationName) {
+            setError("Enter your organisation name before continuing.");
+            return;
+        }
 
         setSubmitting(true);
         setError(null);
         try {
             await updateUserProfile({
                 displayName: displayName || null,
-                organisation: organisation.trim() || null,
+                organisation: organisationName,
             });
             await reloadProfile();
             router.push("/onboarding/practice");
@@ -99,6 +104,7 @@ function ProfileDetailsForm({
                     </FieldLabel>
                     <Input
                         id="organisation"
+                        required
                         value={organisation}
                         onChange={(event) =>
                             setOrganisation(event.target.value)

@@ -507,7 +507,8 @@ documentsRouter.post(
         pdfStoragePath = pdfKey;
       } catch (err) {
         console.error(
-          `[versions/copy] Office→PDF conversion failed for ${filename}:`,
+          "[versions/copy] Office→PDF conversion failed:",
+          { filename },
           err,
         );
       }
@@ -660,7 +661,8 @@ documentsRouter.post(
         pdfStoragePath = pdfKey;
       } catch (err) {
         console.error(
-          `[versions/upload] Office→PDF conversion failed for ${file.originalname}:`,
+          "[versions/upload] Office→PDF conversion failed:",
+          { filename: file.originalname },
           err,
         );
       }
@@ -874,7 +876,8 @@ documentsRouter.put(
         pdfStoragePath = pdfKey;
       } catch (err) {
         console.error(
-          `[versions/replace] Office→PDF conversion failed for ${file.originalname}:`,
+          "[versions/replace] Office→PDF conversion failed:",
+          { filename: file.originalname },
           err,
         );
       }
@@ -1400,7 +1403,8 @@ export async function handleDocumentUpload(
         pdfStoragePath = pdfKey;
       } catch (err) {
         console.error(
-          `[upload] Office→PDF conversion failed for ${filename}:`,
+          "[upload] Office→PDF conversion failed:",
+          { filename },
           err,
         );
       }

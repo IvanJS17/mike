@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { execFileSync } from "node:child_process";
 import {
     parseCitations,
     parseCitationsWithDiagnostics,
@@ -41,6 +42,22 @@ describe("parseCitationsWithDiagnostics", () => {
         );
         expect(citations).toEqual([]);
         expect(diagnostics.error).toBe("CITATIONS block JSON was not an array.");
+    });
+
+    it("does not spend unbounded time on a missing close tag", () => {
+        const source = [
+            "const { parseCitationsWithDiagnostics } = require(process.argv[1]);",
+            "process.stdout.write(JSON.stringify(parseCitationsWithDiagnostics('<CITATIONS>' + '\\t'.repeat(100000))));",
+        ].join("\n");
+        const output = execFileSync(process.execPath, ["--import", "tsx", "-e", source, require.resolve("../chat/citations.ts")], {
+            timeout: 5000,
+            encoding: "utf8",
+            stdio: "pipe",
+        });
+        expect(JSON.parse(output)).toEqual({
+            citations: [],
+            diagnostics: { hasBlock: false, rawLength: 0, error: null },
+        });
     });
 });
 

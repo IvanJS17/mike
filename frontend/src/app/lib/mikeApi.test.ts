@@ -200,6 +200,9 @@ afterEach(() => {
 });
 
 function readBlobText(blob: Blob): Promise<string> {
+    // Response.blob() can produce Node's native Blob even inside jsdom.
+    // Read its real bytes with its own API; FileReader accepts jsdom Blobs only.
+    if (typeof blob.text === "function") return blob.text();
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => typeof reader.result === "string"

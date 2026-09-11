@@ -461,9 +461,9 @@ describe("atomic append boundary", () => {
 
   it("MFA and dependency failures cause zero append", async () => {
     const append = vi.fn();
-    const mfa = input({ append });
-    mfa.identity = { ...identity, mfa_satisfied: false };
-    expect((await appendEvidenceAtomically(mfa)).ok).toBe(false);
+    const unverifiedActorInput = input({ append });
+    unverifiedActorInput.identity = { ...identity, mfa_satisfied: false };
+    expect((await appendEvidenceAtomically(unverifiedActorInput)).ok).toBe(false);
     const reads = tenancy();
     vi.mocked(reads.getOrganizationMembership).mockRejectedValueOnce(
       new Error("SECRET db"),

@@ -18,6 +18,10 @@ export async function completeOnboardingIfRequired(page: Page): Promise<void> {
             timeout: 15_000,
         });
         if (await continueButton.isVisible()) {
+            const organisation = page.getByRole("textbox", { name: "Organisation" });
+            if (!(await organisation.inputValue()).trim()) {
+                await organisation.fill("E2E Legal Practice");
+            }
             await continueButton.click();
             await page.waitForURL(/\/onboarding\/practice/, {
                 timeout: 15_000,

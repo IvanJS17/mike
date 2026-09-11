@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { randomUUID } from "node:crypto";
+import { convert, type FormatCallback } from "html-to-text";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
 import { recordAudit } from "../lib/audit";
@@ -65,6 +66,7 @@ import {
 import { parsePaginationQuery } from "../lib/pagination";
 import { normalizeSearchTerm } from "../lib/search";
 import { parseTabularReviewSort } from "../lib/sort";
+import { extractDelimitedBlock } from "../lib/textBlocks";
 
 function formatPromptSuffix(format?: string, tags?: string[]): string {
     switch (format) {
@@ -2017,13 +2019,11 @@ type TabularParsedCitation = {
     quote: string;
 };
 
-const TABULAR_CITATIONS_BLOCK_RE = /<CITATIONS>\s*([\s\S]*?)\s*<\/CITATIONS>/;
-
 function parseTabularCitations(text: string): TabularParsedCitation[] {
-    const match = text.match(TABULAR_CITATIONS_BLOCK_RE);
-    if (!match) return [];
+    const raw = extractDelimitedBlock(text, "<CITATIONS>", "</CITATIONS>");
+    if (raw === null) return [];
     try {
-        return JSON.parse(match[1]) as TabularParsedCitation[];
+        return JSON.parse(raw) as TabularParsedCitation[];
     } catch {
         return [];
     }
@@ -2753,6 +2753,39 @@ async function extractPdfMarkdown(buf: ArrayBuffer): Promise<string> {
     }
 }
 
+export function convertDocxHtmlToMarkdown(html: string): string {
+    const markdownHeading: FormatCallback = (elem, walk, builder) => {
+        const level = Number(elem.name?.slice(1));
+        builder.openBlock({ leadingLineBreaks: 2 });
+        builder.addInline(`${"#".repeat(level)} `);
+        walk(elem.children, builder);
+        builder.closeBlock({ trailingLineBreaks: 2 });
+    };
+    return convert(html, {
+        // The upload boundary limits document size; never silently truncate text.
+        limits: { maxInputLength: undefined },
+        decodeEntities: true,
+        wordwrap: false,
+        selectors: [
+            { selector: "h1", format: "markdownHeading" },
+            { selector: "h2", format: "markdownHeading" },
+            { selector: "h3", format: "markdownHeading" },
+            { selector: "h4", format: "markdownHeading" },
+            { selector: "h5", format: "markdownHeading" },
+            { selector: "h6", format: "markdownHeading" },
+            {
+                selector: "strong",
+                format: "inlineSurround",
+                options: { prefix: "**", suffix: "**" },
+            },
+            { selector: "ul", options: { itemPrefix: "- " } },
+        ],
+        formatters: { markdownHeading },
+    })
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+}
+
 async function extractDocxMarkdown(buf: ArrayBuffer): Promise<string> {
     try {
         const mammoth = await import("mammoth");
@@ -2760,21 +2793,7 @@ async function extractDocxMarkdown(buf: ArrayBuffer): Promise<string> {
         const { value: html } = await mammoth.convertToHtml({
             buffer: normalized,
         });
-        return html
-            .replace(
-                /<h([1-6])[^>]*>(.*?)<\/h\1>/gi,
-                (_, l, t) => "#".repeat(Number(l)) + " " + t + "\n\n",
-            )
-            .replace(/<strong[^>]*>(.*?)<\/strong>/gi, "**$1**")
-            .replace(/<li[^>]*>(.*?)<\/li>/gi, "- $1\n")
-            .replace(/<p[^>]*>(.*?)<\/p>/gi, "$1\n\n")
-            .replace(/<[^>]+>/g, "")
-            .replace(/&nbsp;/g, " ")
-            .replace(/&amp;/g, "&")
-            .replace(/&lt;/g, "<")
-            .replace(/&gt;/g, ">")
-            .replace(/\n{3,}/g, "\n\n")
-            .trim();
+        return convertDocxHtmlToMarkdown(html);
     } catch {
         return "";
     }

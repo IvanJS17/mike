@@ -14,8 +14,13 @@ function rawStreamLogDir(): string | null {
   return process.env.RAW_LLM_STREAM_LOG_DIR?.trim() || null;
 }
 
-function safeFilePart(value: string) {
-  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+export function safeFilePart(value: string) {
+  const result = value.replace(/[^a-zA-Z0-9._-]+/g, "-");
+  let start = 0;
+  while (start < result.length && result[start] === "-") start += 1;
+  let end = result.length;
+  while (end > start && result[end - 1] === "-") end -= 1;
+  return result.slice(start, end);
 }
 
 function stringifyJson(value: unknown) {

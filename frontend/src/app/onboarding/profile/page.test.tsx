@@ -47,6 +47,18 @@ describe("OnboardingProfilePage", () => {
         updateUserProfile.mockResolvedValue({});
     });
 
+    it.each(["", "   "])("does not advance without an organisation (%j)", async (organisation) => {
+        const user = userEvent.setup();
+        render(<OnboardingProfilePage />);
+        if (organisation) {
+            await user.type(screen.getByRole("textbox", { name: /Organisation/ }), organisation);
+        }
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        expect(updateUserProfile).not.toHaveBeenCalled();
+        expect(reloadProfile).not.toHaveBeenCalled();
+        expect(push).not.toHaveBeenCalled();
+    });
+
     it("allows an empty name and saves profile details before continuing", async () => {
         const user = userEvent.setup();
         render(<OnboardingProfilePage />);

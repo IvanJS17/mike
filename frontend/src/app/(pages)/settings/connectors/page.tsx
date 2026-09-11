@@ -38,6 +38,7 @@ import {
     updateMcpConnector,
 } from "@/app/lib/mikeApi";
 import { userFacingApiError } from "@/app/lib/userFacingError";
+import { isGoogleMcpServerUrl } from "@/app/lib/mcpConnectorHostname";
 import { settingsGlassIconButtonClassName } from "../settingsStyles";
 import { SettingsSection } from "../SettingsSection";
 import { SettingsToggle } from "../SettingsToggle";
@@ -98,16 +99,6 @@ function parseCustomHeaders(raw: string): Record<string, string> | undefined {
         headers[key] = value;
     }
     return headers;
-}
-
-function isGoogleMcpConnector(connector: McpConnectorSummary) {
-    try {
-        return new URL(connector.serverUrl).hostname
-            .toLowerCase()
-            .endsWith("googleapis.com");
-    } catch {
-        return false;
-    }
 }
 
 export default function ConnectorsPage() {
@@ -388,7 +379,7 @@ export default function ConnectorsPage() {
                     throw err;
                 }
                 replaceConnector(refreshed);
-                if (isGoogleMcpConnector(refreshed) && !refreshed.oauthConnected) {
+                if (isGoogleMcpServerUrl(refreshed.serverUrl) && !refreshed.oauthConnected) {
                     setAddAuthMessage(
                         "Authorize Google in the popup to finish connecting this MCP server.",
                     );
