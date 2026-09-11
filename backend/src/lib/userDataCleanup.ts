@@ -107,22 +107,67 @@ async function deleteDocumentVersionFiles(db: Db, documentIds: string[]) {
 
 async function deleteUserStoragePrefix(userId: string) {
     try {
-        const paths = await listFiles(`documents/${userId}/`);
-        await Promise.all(paths.map((path) => deleteFile(path).catch(() => {})));
+        const paths = new Set([
+            ...(await listFiles(`documents/${userId}/`)),
+            ...(await listFiles(`workflow-references/${userId}/`)),
+        ]);
+        await Promise.all(
+            [...paths].map((path) => deleteFile(path).catch(() => {})),
+        );
     } catch {
         // Version-linked objects are deleted above. Prefix cleanup is best-effort
         // for orphaned files left behind by interrupted uploads.
     }
 }
 
+async function removeEmailFromSharedWith(
+    db: Db,
+    table: "projects" | "tabular_reviews",
+    email: string | null | undefined,
+) {
+    const normalizedEmail = email?.trim().toLowerCase();
+    if (!normalizedEmail) return;
+
+    const { data, error } = await db
+        .from(table)
+        .select("id, shared_with")
+        .filter("shared_with", "cs", JSON.stringify([normalizedEmail]));
+    await throwIfError(error, `Failed to load shared ${table}`);
+
+    const updates = (data ?? [])
+        .map((row) => {
+            const sharedWith = Array.isArray(row.shared_with)
+                ? row.shared_with.filter(
+                      (value) =>
+                          typeof value !== "string" ||
+                          value.trim().toLowerCase() !== normalizedEmail,
+                  )
+                : [];
+            return { id: row.id as string, sharedWith };
+        })
+        .filter((row) => row.id);
+
+    await Promise.all(
+        updates.map(async ({ id, sharedWith }) => {
+            const { error: updateError } = await db
+                .from(table)
+                .update({ shared_with: sharedWith })
+                .eq("id", id);
+            await throwIfError(updateError, `Failed to update shared ${table}`);
+        }),
+    );
+}
+
 export async function deleteAllUserChats(db: Db, userId: string) {
-    const [assistantChats, tabularChats] = await Promise.all([
+    const [assistantChats, tabularChats, wordDocuments] = await Promise.all([
         db.from("chats").delete().eq("user_id", userId),
         db.from("tabular_review_chats").delete().eq("user_id", userId),
+        db.from("word_documents").delete().eq("user_id", userId),
     ]);
 
     await throwIfError(assistantChats.error, "Failed to delete assistant chats");
     await throwIfError(tabularChats.error, "Failed to delete tabular chats");
+    await throwIfError(wordDocuments.error, "Failed to delete Word chats");
 }
 
 export async function deleteAllUserTabularReviews(db: Db, userId: string) {
@@ -259,6 +304,7 @@ export async function deleteUserProjects(
 export async function deleteUserAccountData(
     db: Db,
     userId: string,
+    userEmail?: string | null,
 ) {
     const ownedProjectIds = await getOwnedProjectIds(db, userId);
     const documentIds = await getDocumentIdsForAccountDeletion(
@@ -268,6 +314,8 @@ export async function deleteUserAccountData(
     );
 
     await Promise.all([
+        removeEmailFromSharedWith(db, "projects", userEmail),
+        removeEmailFromSharedWith(db, "tabular_reviews", userEmail),
         deleteDocumentVersionFiles(db, documentIds),
         deleteUserStoragePrefix(userId),
     ]);
@@ -278,18 +326,43 @@ export async function deleteUserAccountData(
         db.from("tabular_review_chats").delete().eq("user_id", userId),
         db.from("tabular_reviews").delete().eq("user_id", userId),
         db.from("chats").delete().eq("user_id", userId),
+        db.from("word_documents").delete().eq("user_id", userId),
         db.from("project_subfolders").delete().eq("user_id", userId),
         db.from("hidden_workflows").delete().eq("user_id", userId),
         db
             .from("workflow_open_source_submissions")
             .delete()
             .eq("submitted_by_user_id", userId),
-        db.from("workflows").delete().eq("user_id", userId),
+        db.from("workflow_shares").delete().eq("shared_by_user_id", userId),
+        userEmail
+            ? db
+                  .from("workflow_shares")
+                  .delete()
+                  .eq("shared_with_email", userEmail.trim().toLowerCase())
+            : Promise.resolve({ error: null }),
+        // Audit rows carry the user's id, email, chat/document titles and prompt
+        // excerpts, so account erasure must remove them as well.
+        db.from("audit_events").delete().eq("user_id", userId),
         db.from("projects").delete().eq("user_id", userId),
+        db.from("quick_actions").delete().eq("user_id", userId),
+        db
+            .from("workflow_reference_documents")
+            .delete()
+            .eq("user_id", userId),
+        db
+            .from("default_workflow_installations")
+            .delete()
+            .eq("user_id", userId),
     ];
 
     const results = await Promise.all(deletions);
     for (const result of results) {
         await throwIfError(result.error, "Failed to delete account data");
     }
+
+    const { error: workflowsError } = await db
+        .from("workflows")
+        .delete()
+        .eq("user_id", userId);
+    await throwIfError(workflowsError, "Failed to delete workflows");
 }

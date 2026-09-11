@@ -10,7 +10,7 @@ import {
   extractDocxBodyText,
   type EditInput,
 } from "../../docxTrackedChanges";
-import { createDownloadUrl } from "../../downloadTokens";
+import { buildDownloadUrl } from "../../downloadTokens";
 import {
   contentSha256,
   loadActiveVersion,
@@ -95,8 +95,8 @@ export async function generateDocx(
   db: ReturnType<typeof createServerSupabase>,
   options?: {
     landscape?: boolean;
+    numberSections?: boolean;
     projectId?: string | null;
-    persist?: boolean;
   },
 ) {
   try {
@@ -153,6 +153,9 @@ export async function generateDocx(
       HeadingLevel.HEADING_3,
       HeadingLevel.HEADING_4,
     ];
+    // `=== true` is intentional: missing, null, or malformed values must
+    // produce an unnumbered document.
+    const numberSections = options?.numberSections === true;
     const LEGAL_NUMBERING_REF = "legal-clause-numbering";
     const legalNumbering = (level: number) => ({
       reference: LEGAL_NUMBERING_REF,
@@ -334,17 +337,23 @@ export async function generateDocx(
         children.push(new Paragraph({ children: [new PageBreak()] }));
       }
       if (section.heading) {
-        const stripped = stripManualNumbering(section.heading);
+        const stripped = numberSections
+          ? stripManualNumbering(section.heading)
+          : { text: section.heading.trim(), levelFromPrefix: null };
         const isUnnumbered = isUnnumberedHeading(stripped.text, sectionIndex);
         const skipHeading = isTitleLikeFirstHeading(
           stripped.text,
           sectionIndex,
         );
-        const idx = Math.min(
-          stripped.levelFromPrefix ?? (section.level ?? 1) - 1,
-          3,
+        const requestedLevel = Number.isInteger(section.level)
+          ? Number(section.level)
+          : 1;
+        const idx = Math.max(
+          0,
+          Math.min(stripped.levelFromPrefix ?? requestedLevel - 1, 3),
         );
-        currentClauseLevel = isUnnumbered || skipHeading ? null : idx;
+        currentClauseLevel =
+          !numberSections || isUnnumbered || skipHeading ? null : idx;
         const headingText =
           idx === 0 && !isUnnumbered
             ? stripped.text.toUpperCase()
@@ -353,7 +362,10 @@ export async function generateDocx(
           children.push(
             new Paragraph({
               heading: headingLevels[idx],
-              numbering: isUnnumbered ? undefined : legalNumbering(idx),
+              numbering:
+                numberSections && !isUnnumbered
+                  ? legalNumbering(idx)
+                  : undefined,
               spacing: { after: 160 },
               children: [
                 new TextRun({
@@ -434,7 +446,6 @@ export async function generateDocx(
         children.push(new Paragraph({ text: "" }));
       }
       if (section.content) {
-        let numberedBodyParagraphs = 0;
         const contentIsSignatureBlock =
           section.heading &&
           normalizeHeadingText(section.heading).includes("signature")
@@ -447,30 +458,33 @@ export async function generateDocx(
           const rawText = bulletMatch ? bulletMatch[1].trim() : trimmed;
           const manualList = parseManualListMarker(rawText);
           const numeric = stripManualNumbering(rawText);
-          const text = bulletMatch
-            ? rawText
-            : manualList.levelOffset !== null
-              ? manualList.text
-              : numeric.text;
           const inferredLevel =
             currentClauseLevel === null || contentIsSignatureBlock
               ? undefined
               : bulletMatch
-                ? currentClauseLevel + 2
+                ? undefined
                 : manualList.levelOffset !== null
                   ? currentClauseLevel + manualList.levelOffset
                   : numeric.levelFromPrefix !== null
                     ? numeric.levelFromPrefix
-                    : numberedBodyParagraphs === 0
-                      ? currentClauseLevel + 1
-                      : currentClauseLevel + 2;
-          if (currentClauseLevel !== null) numberedBodyParagraphs++;
+                    : undefined;
+          // Strip typed list markers only when Word numbering will replace
+          // them. This preserves intentional text such as "1. Final notice"
+          // in an otherwise unnumbered letter or signature block.
+          const text = bulletMatch
+            ? rawText
+            : inferredLevel === undefined
+              ? rawText
+              : manualList.levelOffset !== null
+                ? manualList.text
+                : numeric.text;
           children.push(
             new Paragraph({
               numbering:
                 inferredLevel === undefined
                   ? undefined
                   : legalNumbering(inferredLevel),
+              bullet: bulletMatch ? { level: 0 } : undefined,
               spacing: { after: 120 },
               children: [
                 new TextRun({
@@ -490,14 +504,16 @@ export async function generateDocx(
       : {};
 
     const doc = new Document({
-      numbering: {
-        config: [
-          {
-            reference: LEGAL_NUMBERING_REF,
-            levels: legalNumberingLevels,
-          },
-        ],
-      },
+      numbering: numberSections
+        ? {
+            config: [
+              {
+                reference: LEGAL_NUMBERING_REF,
+                levels: legalNumberingLevels,
+              },
+            ],
+          }
+        : undefined,
       sections: [{ properties: pageSetup, children }],
     });
     const buf = await Packer.toBuffer(doc);
@@ -514,16 +530,13 @@ export async function generateDocx(
         };
       }
     }
+    const docId = crypto.randomUUID().replace(/-/g, "");
     const safeTitle =
       title
         .replace(/[^a-zA-Z0-9 -]/g, "")
         .trim()
         .slice(0, 64) || "document";
     const filename = `${safeTitle}.docx`;
-    if (options?.persist === false) {
-      return { bytes: Buffer.from(buf), filename };
-    }
-    const docId = crypto.randomUUID().replace(/-/g, "");
     const key = generatedDocKey(userId, docId, filename);
 
     await uploadFile(
@@ -531,6 +544,7 @@ export async function generateDocx(
       buf.buffer as ArrayBuffer,
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     );
+    const downloadUrl = buildDownloadUrl(key, filename);
 
     // Persist to DB so generated docs are first-class documents:
     // openable in the DocPanel and editable via edit_document. In
@@ -574,13 +588,6 @@ export async function generateDocx(
       };
     }
     const versionId = versionRow.id as string;
-    const downloadUrl = await createDownloadUrl(db, {
-      documentId,
-      versionId,
-      storagePath: key,
-      filename,
-      userId,
-    });
 
     await db
       .from("documents")
@@ -994,6 +1001,7 @@ async function persistGeneratedFile(params: {
     }
   }
 
+  const downloadUrl = buildDownloadUrl(key, filename);
   const { data: docRow, error: docErr } = await db
     .from("documents")
     .insert({
@@ -1032,13 +1040,6 @@ async function persistGeneratedFile(params: {
     };
   }
   const versionId = versionRow.id as string;
-  const downloadUrl = await createDownloadUrl(db, {
-    documentId,
-    versionId,
-    storagePath: key,
-    filename,
-    userId,
-  });
 
   await db
     .from("documents")
@@ -1119,8 +1120,9 @@ export async function generatePpt(
 export async function loadCurrentVersionBytes(
   documentId: string,
   db: ReturnType<typeof createServerSupabase>,
+  versionId?: string | null,
 ): Promise<{ bytes: Buffer; storage_path: string } | null> {
-  const active = await loadActiveVersion(documentId, db);
+  const active = await loadActiveVersion(documentId, db, versionId);
   if (!active) return null;
   const raw = await downloadFile(active.storage_path);
   if (!raw) return null;
@@ -1350,14 +1352,10 @@ export async function runEditDocument(params: {
     },
   );
 
+  // Persistent, non-expiring permalink. The backend streams fresh bytes
+  // on each request, so this URL stays valid as long as the file exists.
   const resolvedFilename = versionFilename.trim() || "Untitled document.docx";
-  const permalink = await createDownloadUrl(db, {
-    documentId,
-    versionId: versionRowId,
-    storagePath: newPath,
-    filename: resolvedFilename,
-    userId,
-  });
+  const permalink = buildDownloadUrl(newPath, resolvedFilename);
 
   return {
     ok: true,
@@ -1385,6 +1383,7 @@ export async function getTurnReadIdentity(params: {
   filename: string;
   documentId?: string;
   versionId?: string | null;
+  versionNumber?: number | null;
   storagePath: string;
 } | null> {
   const { docLabel, docStore, docIndex, db } = params;
@@ -1401,6 +1400,7 @@ export async function getTurnReadIdentity(params: {
         filename: docInfo.filename,
         documentId,
         versionId: active.id,
+        versionNumber: active.version_number,
         storagePath: active.storage_path,
       };
     }
@@ -1412,6 +1412,7 @@ export async function getTurnReadIdentity(params: {
     filename: docInfo.filename,
     documentId,
     versionId: docIndex?.[docLabel]?.version_id ?? null,
+    versionNumber: docIndex?.[docLabel]?.version_number ?? null,
     storagePath: docInfo.storage_path,
   };
 }
@@ -1450,7 +1451,10 @@ export async function readDocumentContent(
   write: (s: string) => void,
   docIndex?: DocIndex,
   db?: ReturnType<typeof createServerSupabase>,
-  opts?: { emitEvents?: boolean },
+  opts?: {
+    emitEvents?: boolean;
+    readIdentity?: Awaited<ReturnType<typeof getTurnReadIdentity>>;
+  },
 ): Promise<string> {
   const emitEvents = opts?.emitEvents ?? true;
   devLog(`[read_document] called with docLabel="${docLabel}"`);
@@ -1467,13 +1471,24 @@ export async function readDocumentContent(
   );
 
   const documentId = docIndex?.[docLabel]?.document_id;
+  const readIdentity =
+    opts?.readIdentity ??
+    (emitEvents
+      ? await getTurnReadIdentity({ docLabel, docStore, docIndex, db })
+      : null);
+  const versionId =
+    readIdentity?.versionId ?? docIndex?.[docLabel]?.version_id ?? null;
+  const versionNumber =
+    readIdentity?.versionNumber ?? docIndex?.[docLabel]?.version_number ?? null;
   const emitDocRead = () => {
     if (!emitEvents) return;
     write(
       `data: ${JSON.stringify({
         type: "doc_read",
         filename: docInfo.filename,
-        document_id: documentId,
+        document_id: readIdentity?.documentId ?? documentId,
+        version_id: versionId,
+        version_number: versionNumber,
       })}\n\n`,
     );
   };
@@ -1482,16 +1497,30 @@ export async function readDocumentContent(
       `data: ${JSON.stringify({
         type: "doc_read_start",
         filename: docInfo.filename,
-        document_id: documentId,
+        document_id: readIdentity?.documentId ?? documentId,
+        version_id: versionId,
+        version_number: versionNumber,
       })}\n\n`,
     );
   try {
+    // The Word add-in supplies the active document's plain-text snapshot with
+    // the request. Keep it in the same document-tool pipeline as stored files:
+    // availability metadata is visible up front, but the body is returned only
+    // after the model explicitly calls read_document.
+    if (docInfo.inline_text !== undefined) {
+      devLog(
+        `[read_document] using request-scoped inline text (chars=${docInfo.inline_text.length}) for filename="${docInfo.filename}"`,
+      );
+      emitDocRead();
+      return docInfo.inline_text;
+    }
+
     // Prefer the current tracked-changes version (if any) so read_document
     // reflects accepted/pending edits rather than the original upload.
     let raw: ArrayBuffer | null = null;
     let sourcePath = docInfo.storage_path;
     if (documentId && db) {
-      const current = await loadCurrentVersionBytes(documentId, db);
+      const current = await loadCurrentVersionBytes(documentId, db, versionId);
       if (current) {
         raw = current.bytes.buffer.slice(
           current.bytes.byteOffset,
@@ -1615,7 +1644,13 @@ export async function readDocumentContent(
     );
     if (emitEvents)
       write(
-        `data: ${JSON.stringify({ type: "doc_read", filename: docInfo.filename })}\n\n`,
+        `data: ${JSON.stringify({
+          type: "doc_read",
+          filename: docInfo.filename,
+          document_id: readIdentity?.documentId ?? documentId,
+          version_id: versionId,
+          version_number: versionNumber,
+        })}\n\n`,
       );
     return "Document could not be read.";
   }
@@ -1735,6 +1770,7 @@ export async function findInDocumentContent(params: {
   write: (s: string) => void;
   docIndex?: DocIndex;
   db?: ReturnType<typeof createServerSupabase>;
+  readIdentity?: Awaited<ReturnType<typeof getTurnReadIdentity>>;
 }): Promise<string> {
   const {
     docLabel,
@@ -1758,6 +1794,14 @@ export async function findInDocumentContent(params: {
       error: `Document '${docLabel}' not found.`,
     });
   }
+  const documentId = docIndex?.[docLabel]?.document_id;
+  const readIdentity =
+    params.readIdentity ??
+    (await getTurnReadIdentity({ docLabel, docStore, docIndex, db }));
+  const versionId =
+    readIdentity?.versionId ?? docIndex?.[docLabel]?.version_id ?? null;
+  const versionNumber =
+    readIdentity?.versionNumber ?? docIndex?.[docLabel]?.version_number ?? null;
 
   // Announce the search to the UI, then reuse readDocumentContent for its
   // fallbacks — but suppress its own doc_read events so the user only sees
@@ -1766,6 +1810,9 @@ export async function findInDocumentContent(params: {
     `data: ${JSON.stringify({
       type: "doc_find_start",
       filename: docInfo.filename,
+      document_id: readIdentity?.documentId ?? documentId,
+      version_id: versionId,
+      version_number: versionNumber,
       query,
     })}\n\n`,
   );
@@ -1776,13 +1823,16 @@ export async function findInDocumentContent(params: {
     write,
     docIndex,
     db,
-    { emitEvents: false },
+    { emitEvents: false, readIdentity },
   );
   if (!text || text === "Document could not be read.") {
     write(
       `data: ${JSON.stringify({
         type: "doc_find",
         filename: docInfo.filename,
+        document_id: readIdentity?.documentId ?? documentId,
+        version_id: versionId,
+        version_number: versionNumber,
         query,
         total_matches: 0,
       })}\n\n`,
@@ -1813,6 +1863,9 @@ export async function findInDocumentContent(params: {
     `data: ${JSON.stringify({
       type: "doc_find",
       filename: docInfo.filename,
+      document_id: readIdentity?.documentId ?? documentId,
+      version_id: versionId,
+      version_number: versionNumber,
       query,
       total_matches: totalMatches,
     })}\n\n`,
@@ -1850,6 +1903,7 @@ export type TurnReadState = Map<
     filename: string;
     documentId?: string;
     versionId?: string | null;
+    versionNumber?: number | null;
     storagePath: string;
   }
 >;

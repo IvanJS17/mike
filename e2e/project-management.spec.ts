@@ -22,11 +22,7 @@ const PDF_FIXTURE = path.join(__dirname, "fixtures/test.pdf");
  * Creates a new project via the "New project" modal and waits until
  * NewProjectModal's onCreated handler redirects to /projects/<id>.
  *
- * Pass `filePath` to also upload a document during creation. This matters for
- * the folder test: ProjectPage only renders the document tree (and therefore
- * the root "Add Subfolder" input) when the project is NOT empty — an empty
- * project shows the "Drop PDF or DOCX files here" placeholder instead, which
- * has no folder input.
+ * Pass `filePath` to also upload a document during creation.
  */
 async function createProject(
     page: import("@playwright/test").Page,
@@ -202,12 +198,8 @@ test("delete a project", async ({ page }) => {
 
 test("create a folder inside a project", async ({ page }) => {
     const projectName = `E2E Proj ${Date.now()}`;
-    /* Create WITH a document so the project isn't empty. The "Add Subfolder"
-       button always sits in the documents toolbar, but the root folder INPUT
-       only renders inside the document tree (ProjectPage.renderLevel), which is
-       shown only for a non-empty project — an empty project shows the "Drop PDF
-       or DOCX files here" placeholder instead, with no folder input. */
-    await createProject(page, projectName, PDF_FIXTURE);
+    /* Folder creation must work before the project has any documents. */
+    await createProject(page, projectName);
 
     /*
      * After createProject we are on the new project page (Documents tab). The
@@ -218,14 +210,11 @@ test("create a folder inside a project", async ({ page }) => {
        "Add Subfolder" to "Folder" (a TabPillButton wired to the root
        createFolderAction — ProjectDocumentsView). Clicking it still renders the
        autofocused "Folder name" input at root level (creatingIn === null). */
-    const addSubfolderBtn = page.getByRole("button", { name: "Folder" });
-    await waitForProjectLoaded(page, addSubfolderBtn);
-
-    /* Confirm the uploaded document rendered, i.e. the project is non-empty and
-       the document tree (and therefore the root folder input) will render. */
-    await expect(page.getByText("test.pdf").first()).toBeVisible({
-        timeout: 10_000,
+    const addSubfolderBtn = page.getByRole("button", {
+        name: "Folder",
+        exact: true,
     });
+    await waitForProjectLoaded(page, addSubfolderBtn);
 
     /* Clicking "Add Subfolder" sets creatingFolderIn = null (root level). */
     await addSubfolderBtn.click();
@@ -248,6 +237,16 @@ test("create a folder inside a project", async ({ page }) => {
      */
     // REGRESSION: fails if folder creation button or API call is removed
     await expect(page.getByText(folderName)).toBeVisible({ timeout: 10_000 });
+
+    const folderRow = page.locator("div.group").filter({
+        hasText: folderName,
+    });
+    await expect(folderRow.locator('input[type="checkbox"]')).toBeVisible();
+    await expect(
+        folderRow.locator(
+            "svg.lucide-chevron-right, svg.lucide-chevron-down",
+        ),
+    ).toBeVisible();
 });
 
 // ─── Test 4: File upload type validation (wrong type rejected) ────────────────
@@ -268,7 +267,8 @@ test("file upload type validation — .txt file is rejected", async ({ page }) =
      *   (b) Server: the upload endpoint must still 400 unsupported extensions
      *       (defense in depth for API/SDK callers that bypass the web UI).
      *       The UI never emits that request anymore, so we exercise the
-     *       endpoint directly with the browser session's bearer token.
+     *       endpoint directly through the same-origin gateway and cookie
+     *       session.
      */
 
     /* Open the Add Documents modal. The "Add Documents" button only renders
@@ -280,42 +280,34 @@ test("file upload type validation — .txt file is rejected", async ({ page }) =
        removed from the upload handler. */
     const projectId = page.url().match(/\/projects\/([0-9a-f-]{36})/)?.[1];
     expect(projectId, "expected to be on a /projects/<id> page").toBeTruthy();
-    const accessToken = await page.evaluate(() => {
-        const item = Object.entries(localStorage).find(([k]) =>
-            k.includes("auth-token"),
+    const uploadStatus = await page.evaluate(async (id) => {
+        const body = new FormData();
+        body.append(
+            "file",
+            new Blob(
+                ["This is a plain text file that should be rejected."],
+                { type: "text/plain" },
+            ),
+            "test.txt",
         );
-        if (!item) return null;
-        try {
-            return JSON.parse(item[1]).access_token ?? null;
-        } catch {
-            return null;
-        }
-    });
-    expect(accessToken, "expected a Supabase session in localStorage").toBeTruthy();
-    const apiBase = process.env.MIKE_API_BASE_URL ?? "http://localhost:3001";
-    const uploadResponse = await page.request.post(
-        `${apiBase}/projects/${projectId}/documents`,
-        {
-            headers: { Authorization: `Bearer ${accessToken}` },
-            multipart: {
-                file: {
-                    name: "test.txt",
-                    mimeType: "text/plain",
-                    buffer: Buffer.from(
-                        "This is a plain text file that should be rejected.",
-                    ),
-                },
-            },
-        },
-    );
-    expect(uploadResponse.status()).toBe(400);
+        const response = await fetch(`/api/projects/${id}/documents`, {
+            method: "POST",
+            credentials: "include",
+            body,
+        });
+        return response.status;
+    }, projectId);
+    expect(uploadStatus).toBe(400);
 
     /* (a) UI-side filtering with a visible warning. */
     await addDocsBtn.click();
 
     const fileChooserPromise = page.waitForEvent("filechooser");
     /* The Upload button label is "Upload" (not "Uploading…") when idle */
-    await page.getByRole("button", { name: "Upload" }).first().click();
+    await page
+        .getByRole("dialog", { name: "Add Documents" })
+        .getByRole("button", { name: "Upload" })
+        .click();
     const fileChooser = await fileChooserPromise;
 
     /*

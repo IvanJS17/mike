@@ -1,14 +1,15 @@
 "use client";
 
 import type { Dispatch, SetStateAction } from "react";
-import { Loader2, Plus } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import {
     RowActionMenuItems,
     RowActions,
 } from "@/app/components/shared/RowActions";
+import { TableLoadMoreRow } from "@/app/components/shared/TableLoadMoreRow";
 import {
     TABLE_CHECKBOX_CLASS,
-    SkeletonDot,
+    SkeletonCheckbox,
     SkeletonLine,
     TableBody,
     TableCell,
@@ -23,6 +24,7 @@ import {
     type TableSortDirection,
     TableStickyCell,
 } from "@/app/components/shared/TablePrimitive";
+import { EmptyState } from "@/app/components/ui/empty-state";
 import { PillButton } from "@/app/components/ui/pill-button";
 import { TabularReviewSkeuoIcon } from "@/app/components/shared/AppSidebarSkeuoIcons";
 import type { Document, TabularReview } from "@/app/components/shared/types";
@@ -178,7 +180,7 @@ export function ProjectReviewsTable({
                 <TableHeaderRow className="pr-8 md:pr-8">
                     <TableStickyCell header>
                         {loading ? (
-                            <SkeletonDot className="mr-4" />
+                            <SkeletonCheckbox />
                         ) : (
                             <input
                                 type="checkbox"
@@ -246,26 +248,24 @@ export function ProjectReviewsTable({
                             No reviews found
                         </p>
                     ) : (
-                        <>
-                            <TabularReviewSkeuoIcon className="mb-4 h-8 w-8" />
-                            <p className="text-2xl font-medium font-serif text-gray-900">
-                                Tabular Reviews
-                            </p>
-                            <p className="mt-1 text-xs text-gray-400 max-w-xs">
-                                Extract data from project documents into tables
-                                using AI.
-                            </p>
-                            <PillButton
-                                tone="black"
-                                size="sm"
-                                onClick={onCreateReview}
-                                disabled={creatingReview || docs.length === 0}
-                                className="mt-4 px-3"
-                            >
-                                <Plus className="h-3.5 w-3.5" />
-                                Create
-                            </PillButton>
-                        </>
+                        <EmptyState
+                            icon={<TabularReviewSkeuoIcon />}
+                            title="Tabular Reviews"
+                            description="Extract data from project documents into tables using AI."
+                            action={
+                                <PillButton
+                                    tone="black"
+                                    size="sm"
+                                    onClick={onCreateReview}
+                                    disabled={
+                                        creatingReview || docs.length === 0
+                                    }
+                                    className="px-3"
+                                >
+                                    Create
+                                </PillButton>
+                            }
+                        />
                     )}
                 </TableEmptyState>
             ) : (
@@ -376,24 +376,14 @@ export function ProjectReviewsTable({
                     })}
                 </TableBody>
             )}
-            {!loading && hasMore && reviews.length > 0 && (
-                <div className="flex justify-center py-3">
-                    <button
-                        onClick={onLoadMore}
-                        disabled={loadingMore}
-                        className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium text-gray-500 transition-colors hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                        {loadingMore && (
-                            <Loader2 className="h-3 w-3 animate-spin" />
-                        )}
-                        {loadingMore
-                            ? "Loading…"
-                            : loadMoreError
-                              ? "Retry loading"
-                              : "Load more"}
-                    </button>
-                </div>
-            )}
+            <TableLoadMoreRow
+                loading={loading}
+                hasMore={hasMore}
+                itemCount={reviews.length}
+                loadingMore={loadingMore}
+                hasError={!!loadMoreError}
+                onLoadMore={onLoadMore}
+            />
         </TableScrollArea>
     );
 }
@@ -407,7 +397,7 @@ function ProjectReviewsLoadingRows() {
                 <TableRow key={i} interactive={false} className="pr-8 md:pr-8">
                     <TableStickyCell hover={false}>
                         <div className="flex min-w-0 items-center">
-                            <SkeletonDot className="mr-4" />
+                            <SkeletonCheckbox />
                             <SkeletonLine
                                 className={`h-3.5 ${titleWidths[i - 1]}`}
                             />

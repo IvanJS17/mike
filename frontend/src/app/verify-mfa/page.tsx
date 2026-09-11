@@ -6,7 +6,8 @@ import { Loader2 } from "lucide-react";
 import { SiteLogo } from "@/app/components/site-logo";
 import { PillButton } from "@/app/components/ui/pill-button";
 import { useAuth } from "@/app/contexts/AuthContext";
-import { supabase } from "@/app/lib/supabase";
+import { challengeAndVerifyMfa, listMfaFactors } from "@/app/lib/authApi";
+import { authGlassCardClassName } from "@/app/components/auth/authStyles";
 import {
     needsMfaVerification,
     VerificationCodeInput,
@@ -17,16 +18,7 @@ type MfaFactor = {
     id: string;
     friendly_name?: string | null;
     factor_type: string;
-    status?: string;
 };
-
-type EnrollmentState = {
-    factorId: string;
-    qrCode: string;
-};
-
-const authGlassCardClassName =
-    "rounded-2xl border border-white/70 bg-white/72 px-8 py-8 shadow-[0_4px_14px_rgba(15,23,42,0.045),inset_0_1px_0_rgba(255,255,255,0.86),inset_0_-8px_18px_rgba(255,255,255,0.12)] backdrop-blur-2xl";
 
 export default function VerifyMfaPage() {
     const router = useRouter();
@@ -37,22 +29,34 @@ export default function VerifyMfaPage() {
     const [code, setCode] = useState("");
     const [loading, setLoading] = useState(true);
     const [verifying, setVerifying] = useState(false);
-    const [enrollmentStartLoading, setEnrollmentStartLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [enrollment, setEnrollment] = useState<EnrollmentState | null>(null);
+    const isMfaPreview =
+        process.env.NODE_ENV !== "production" &&
+        searchParams.get("preview") === "mfa";
+    const displayedFactors = isMfaPreview
+        ? [
+              {
+                  id: "preview-factor",
+                  friendly_name: "Authenticator app",
+                  factor_type: "totp",
+              },
+          ]
+        : factors;
+    const displayedFactorId = isMfaPreview
+        ? "preview-factor"
+        : selectedFactorId;
+    const displayedLoading = isMfaPreview ? false : loading;
 
     const nextPath = safeNextPath(searchParams.get("next"));
-    const hasFactors = factors.length > 0;
-    const hasChallengeFactor = hasFactors || enrollment !== null;
-    const requiresEnrollment = factors.length === 0;
     const canVerify =
-        !loading &&
+        !displayedLoading &&
         !verifying &&
-        !enrollmentStartLoading &&
-        !!selectedFactorId &&
+        !!displayedFactorId &&
         code.trim().length === 6;
 
     useEffect(() => {
+        if (isMfaPreview) return;
+
         if (authLoading) return;
         if (!user) {
             router.replace("/login");
@@ -73,31 +77,20 @@ export default function VerifyMfaPage() {
                     return;
                 }
 
-                const { data, error: factorError } =
-                    await supabase.auth.mfa.listFactors();
+                const data = await listMfaFactors();
                 if (cancelled) return;
-                if (factorError) throw factorError;
 
-                const verified = (data.totp ?? [])
-                    .filter(
-                        (factor) =>
-                            typeof factor === "object" && factor.status === "verified",
-                    ) as MfaFactor[];
+                const verified = (data.totp ?? []) as MfaFactor[];
                 setFactors(verified);
                 setSelectedFactorId(verified[0]?.id ?? "");
-
-                if (!verified.length) {
+                if (verified.length === 0) {
                     setError(
-                        "No verified authenticator factor is available for this account. Enroll one to continue.",
+                        "No verified authenticator factor is available for this account.",
                     );
                 }
-            } catch (loadError) {
+            } catch {
                 if (cancelled) return;
-                setError(
-                    loadError instanceof Error
-                        ? loadError.message
-                        : "Unable to load authenticator verification.",
-                );
+                setError("Unable to load authenticator verification.");
             } finally {
                 if (!cancelled) setLoading(false);
             }
@@ -108,169 +101,97 @@ export default function VerifyMfaPage() {
         return () => {
             cancelled = true;
         };
-    }, [authLoading, nextPath, router, user]);
-
-    async function enrollAuthenticator() {
-        setEnrollmentStartLoading(true);
-        setError(null);
-
-        const { data, error: enrollError } = await supabase.auth.mfa.enroll({
-            factorType: "totp",
-            friendlyName: "LiTT Authenticator",
-        });
-
-        if (enrollError) {
-            setEnrollmentStartLoading(false);
-            setError(enrollError.message);
-            return;
-        }
-
-        const factorId = data?.id ?? "";
-        if (!factorId) {
-            setEnrollmentStartLoading(false);
-            setError("Unable to initialize authenticator setup.");
-            return;
-        }
-
-        setEnrollment({
-            factorId,
-            qrCode: data?.totp?.qr_code ?? "",
-        });
-        setSelectedFactorId(factorId);
-        setEnrollmentStartLoading(false);
-    }
+    }, [authLoading, isMfaPreview, nextPath, router, user]);
 
     async function verify() {
         if (!canVerify) return;
 
         setVerifying(true);
         setError(null);
-
-        let verifyError = null as null | string;
-
-        const { error: directVerifyError } =
-            await supabase.auth.mfa.challengeAndVerify({
-                factorId: selectedFactorId,
-                code: code.trim(),
-            });
-        if (directVerifyError) {
-            verifyError = directVerifyError.message;
-        }
-
-        setVerifying(false);
-
-        if (verifyError) {
-            setError(verifyError);
+        try {
+            await challengeAndVerifyMfa(displayedFactorId, code.trim());
+        } catch {
+            setVerifying(false);
+            setError("The verification code is invalid or expired.");
             return;
         }
 
+        setVerifying(false);
         setCode("");
         markMfaVerifiedForGate();
         router.replace(nextPath);
     }
 
     async function cancel() {
-        await signOut();
-        router.replace("/login");
+        setError(null);
+        try {
+            await signOut();
+            router.replace("/login");
+        } catch {
+            setError("Unable to sign out. Please try again.");
+        }
     }
 
     return (
-        <div className="relative flex min-h-dvh items-start justify-center bg-gray-50/80 px-6 pb-10 pt-32 md:pt-40">
+        <div className="relative flex min-h-dvh items-center justify-center bg-gray-50/80 px-6 py-10">
             <div className="absolute left-1/2 top-4 -translate-x-1/2 md:top-8">
                 <SiteLogo size="lg" asLink />
             </div>
             <div className={`w-full max-w-md ${authGlassCardClassName}`}>
                 <div className="mb-8 space-y-2">
-                    <h1 className="text-2xl font-serif">
-                        {enrollment
-                            ? "Set up authenticator"
-                            : "Verify your identity"}
+                    <h1 className="font-serif text-2xl font-medium text-gray-950">
+                        Verify your identity
                     </h1>
                     <p className="text-sm text-gray-500">
-                        {enrollment
-                            ? "Scan the QR code in your authenticator app and enter the code."
-                            : "Enter the six-digit code from your authenticator app to continue."}
+                        Enter the six-digit code from your authenticator app to
+                        continue.
                     </p>
                 </div>
 
                 <div className="space-y-6">
-                    {loading ? (
+                    {displayedLoading ? (
                         <div className="flex h-13 items-center justify-center text-sm text-gray-500">
                             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                             Loading authenticator...
                         </div>
-                    ) : requiresEnrollment && !enrollment ? (
-                        <div className="space-y-4">
-                            <p className="rounded-lg bg-gray-100 px-3 py-2 text-sm text-gray-600">
-                                {error}
-                            </p>
-                            <PillButton
-                                tone="black"
-                                size="normal"
-                                type="button"
-                                onClick={() => void enrollAuthenticator()}
-                                disabled={enrollmentStartLoading}
-                            >
-                                {enrollmentStartLoading ? (
-                                    <span className="inline-flex items-center gap-1.5">
-                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                        Preparing...
-                                    </span>
-                                ) : (
-                                    "Set up authenticator"
-                                )}
-                            </PillButton>
-                        </div>
+                    ) : displayedFactors.length === 0 ? (
+                        <p className="rounded-lg bg-gray-100 px-3 py-2 text-sm text-gray-600">
+                            No verified authenticator factor is available for
+                            this session.
+                        </p>
                     ) : (
                         <>
-                            {enrollment?.qrCode ? (
-                                <div className="rounded-xl border border-gray-100 bg-white p-4 text-center">
-                                    <img
-                                        src={enrollment.qrCode}
-                                        alt="Authenticator QR code"
-                                        className="mx-auto max-w-full"
-                                    />
-                                </div>
-                            ) : null}
-
-                            {hasChallengeFactor && factors.length > 1 ? (
+                            {displayedFactors.length > 1 && (
                                 <select
-                                    value={selectedFactorId}
+                                    value={displayedFactorId}
                                     onChange={(event) =>
                                         setSelectedFactorId(event.target.value)
                                     }
                                     className="h-9 w-full rounded-lg border border-transparent bg-gray-100 px-3 text-sm text-gray-900 shadow-none outline-none focus-visible:border-gray-200 focus-visible:ring-2 focus-visible:ring-gray-300/45"
                                 >
-                                    {factors.length
-                                        ? factors.map((factor) => (
-                                              <option
-                                                  key={factor.id}
-                                                  value={factor.id}
-                                              >
-                                                  {factor.friendly_name ||
-                                                      "Authenticator app"}
-                                              </option>
-                                          ))
-                                        : null}
+                                    {displayedFactors.map((factor) => (
+                                        <option
+                                            key={factor.id}
+                                            value={factor.id}
+                                        >
+                                            {factor.friendly_name ||
+                                                "Authenticator app"}
+                                        </option>
+                                    ))}
                                 </select>
-                            ) : null}
-
+                            )}
                             <VerificationCodeInput
                                 value={code}
                                 onChange={setCode}
                                 disabled={verifying}
-                                autoFocus={!loading}
+                                autoFocus={!displayedLoading}
                                 canSubmit={canVerify}
                                 onSubmit={() => void verify()}
                             />
                         </>
                     )}
 
-                    {!requiresEnrollment || enrollment
-                        ? error
-                            ? <p className="text-sm text-red-600">{error}</p>
-                            : null
-                        : null}
+                    {error && <p className="text-sm text-red-600">{error}</p>}
 
                     <div className="flex items-center justify-end gap-2 pt-4">
                         <button

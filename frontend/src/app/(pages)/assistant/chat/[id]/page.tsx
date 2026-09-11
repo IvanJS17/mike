@@ -5,18 +5,14 @@ import { useParams, useRouter } from "next/navigation";
 import { useAssistantChat } from "@/app/hooks/useAssistantChat";
 import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
 import { ChatView } from "@/app/components/assistant/ChatView";
-import {
-    getChat,
-    modelRouteFromChat,
-    type ModelRoute,
-} from "@/app/lib/mikeApi";
+import { getChat } from "@/app/lib/mikeApi";
 
 export default function AssistantChatPage() {
     const router = useRouter();
     const params = useParams();
     const id = params.id as string;
 
-    const { chats, setCurrentChatId, newChatMessages, setNewChatMessages } =
+    const { setCurrentChatId, newChatMessages, setNewChatMessages } =
         useChatHistoryContext();
 
     const initialMessages = newChatMessages ?? [];
@@ -25,11 +21,18 @@ export default function AssistantChatPage() {
 
     const hasAutoSent = useRef(false);
     const hasLoaded = useRef(false);
-    const [route, setRoute] = useState<ModelRoute | null>(null);
-    const createdChat = chats?.find((chat) => chat.id === id);
-    const createdChatRoute = createdChat
-        ? modelRouteFromChat(createdChat)
-        : null;
+    const [chatModel, setChatModel] = useState<string | null | undefined>(
+        initialMessages.length > 0
+            ? (initialMessages[0]?.model ?? null)
+            : undefined,
+    );
+    const [chatReasoningLevel, setChatReasoningLevel] = useState<
+        NonNullable<(typeof initialMessages)[number]["reasoning"]> | null | undefined
+    >(
+        initialMessages.length > 0
+            ? (initialMessages[0]?.reasoning ?? null)
+            : undefined,
+    );
 
     useEffect(() => {
         setCurrentChatId(id);
@@ -45,7 +48,8 @@ export default function AssistantChatPage() {
 
         getChat(id)
             .then(({ chat, messages: loaded }) => {
-                setRoute(modelRouteFromChat(chat));
+                setChatModel(chat.model ?? null);
+                setChatReasoningLevel(chat.reasoning_level ?? null);
                 if (loaded.length > 0) {
                     setMessages(loaded);
                 } else {
@@ -72,11 +76,12 @@ export default function AssistantChatPage() {
     return (
         <ChatView
             chatId={id}
+            chatModel={chatModel}
+            chatReasoningLevel={chatReasoningLevel}
             messages={messages}
             isResponseLoading={isResponseLoading}
             handleChat={handleChat}
             cancel={cancel}
-            route={route ?? createdChatRoute}
         />
     );
 }

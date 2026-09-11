@@ -1,5 +1,10 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+    uploadProjectDocument,
+    uploadStandaloneDocument,
+} from "@/app/lib/mikeApi";
+import type { Document } from "../shared/types";
 import { NewTRModal } from "./NewTRModal";
 
 vi.mock("@/app/lib/mikeApi", () => ({
@@ -7,6 +12,35 @@ vi.mock("@/app/lib/mikeApi", () => ({
     listWorkflows: vi.fn(async () => []),
     uploadProjectDocument: vi.fn(),
     uploadStandaloneDocument: vi.fn(),
+}));
+
+vi.mock("@/app/contexts/UserProfileContext", () => ({
+    useUserProfile: () => ({
+        profile: {
+            tabularModel: "gemini-3-flash-preview",
+            apiKeys: {
+                claude: { configured: false, source: null },
+                gemini: { configured: true, source: "user" },
+                openai: { configured: false, source: null },
+                openrouter: { configured: false, source: null },
+                vercel: { configured: false, source: null },
+                "opencode-go": { configured: false, source: null },
+            },
+            openRouterModels: [],
+            vercelModels: [],
+            openCodeGoModels: [],
+        },
+        loading: false,
+        apiKeysDegraded: false,
+    }),
+}));
+
+vi.mock("@/app/hooks/useOllamaModels", () => ({
+    useOllamaModels: () => [],
+}));
+
+vi.mock("next/navigation", () => ({
+    useRouter: () => ({ push: vi.fn() }),
 }));
 
 vi.mock("../shared/FileDirectory", () => ({
@@ -19,6 +53,10 @@ vi.mock("../shared/FileDirectory", () => ({
 }));
 
 describe("NewTRModal", () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
     it("shows folder grouping on the first screen and excludes Templates", () => {
         const onAdd = vi.fn();
         render(
@@ -36,7 +74,22 @@ describe("NewTRModal", () => {
             ),
         ).toBeInTheDocument();
 
-        fireEvent.change(screen.getByLabelText("Review name"), {
+        const reviewNameInput = screen.getByLabelText("Review name");
+        const modelSelect = screen.getByRole("button", {
+            name: "Choose model",
+        });
+        expect(
+            reviewNameInput.compareDocumentPosition(modelSelect) &
+                Node.DOCUMENT_POSITION_FOLLOWING,
+        ).toBeTruthy();
+        expect(modelSelect).toHaveClass(
+            "h-10",
+            "w-full",
+            "rounded-xl",
+            "liquid-glass-subtle",
+        );
+
+        fireEvent.change(reviewNameInput, {
             target: { value: "Closing review" },
         });
         const groupingSwitch = screen.getByRole("switch", {
@@ -60,6 +113,52 @@ describe("NewTRModal", () => {
             undefined,
             undefined,
             "folder",
+            "gemini-3-flash-preview",
         );
+    });
+
+    it("stores uploads from a project review in that project", async () => {
+        const uploadedDocument = {
+            id: "uploaded-document",
+            project_id: "project-1",
+            filename: "New agreement.pdf",
+            file_type: "pdf",
+        };
+        vi.mocked(uploadProjectDocument).mockResolvedValue(
+            uploadedDocument as Document,
+        );
+
+        render(
+            <NewTRModal
+                open
+                onClose={vi.fn()}
+                onAdd={vi.fn()}
+                projectId="project-1"
+                projectDocs={[]}
+                projectFolders={[]}
+                projectName="Acquisition"
+            />,
+        );
+
+        fireEvent.change(screen.getByLabelText("Review name"), {
+            target: { value: "Project review" },
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+        const file = new File(["agreement"], "New agreement.pdf", {
+            type: "application/pdf",
+        });
+        const input = document.querySelector<HTMLInputElement>(
+            'input[type="file"]',
+        );
+        fireEvent.change(input!, { target: { files: [file] } });
+
+        await waitFor(() =>
+            expect(uploadProjectDocument).toHaveBeenCalledWith(
+                "project-1",
+                file,
+            ),
+        );
+        expect(uploadStandaloneDocument).not.toHaveBeenCalled();
     });
 });

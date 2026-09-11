@@ -21,13 +21,6 @@ export default defineConfig({
         globals: true,
         environment: "jsdom",
         setupFiles: ["./vitest.setup.ts"],
-        // app/lib/supabase.ts creates its client at module load, so any
-        // component whose import graph reaches it needs these set. Dummy
-        // values — unit tests never talk to Supabase.
-        env: {
-            NEXT_PUBLIC_SUPABASE_URL: "http://localhost:54321",
-            NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY: "test-anon-key",
-        },
         // jsdom 27's CSS-color parser (@asamuzakjp/css-color) is CJS but
         // require()s the ESM-only @csstools/css-calc. That require() happens
         // in the worker process while the jsdom environment boots — before
@@ -49,24 +42,23 @@ export default defineConfig({
             // suites but not floor-gated (their coverage is UI-shaped and
             // noisy). src/app/lib/** is the client library: mikeApi (the
             // frontend half of the SSE contract), upload validation, model
-            // availability, utils, and the supabase wrapper.
+            // availability, utils, and the cookie-session auth wrapper.
             include: ["src/app/lib/**"],
             exclude: ["src/app/lib/**/*.test.*"],
             // No-regression RATCHET floor, not a target. The lib layer is
             // effectively fully tested: every mikeApi endpoint wrapper has a
             // route/method/body assertion, and the remaining gap is only the
             // dev-logging branch and a couple of `?? null` default arms.
-            // Measured on this tree: 99.69% statements, 98.53% branches,
-            // 100% functions, 100% lines. These floors sit ~2 points below
-            // that so an innocently small untested addition doesn't
-            // instantly red-flag main, while a real drop still fails CI.
+            // Measured on this tree: 99.81% statements, 97.09% branches,
+            // 100% functions, 100% lines. The floors are those measurements
+            // rounded down to whole percentages, so a real drop fails CI.
             // Floors only go up: when you add tests, raise them in the same
             // PR. Backlog + per-area status: docs/frontend-testing.md.
             thresholds: {
-                statements: 97,
-                branches: 96,
-                functions: 98,
-                lines: 98,
+                statements: 99,
+                branches: 97,
+                functions: 100,
+                lines: 100,
             },
         },
     },

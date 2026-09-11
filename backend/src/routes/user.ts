@@ -2,14 +2,19 @@ import crypto from "crypto";
 import { Router } from "express";
 import { requireAuth, requireMfaIfEnrolled } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
-import { recordAuditEvent } from "../lib/audit";
+import { provisionInitialOrganization } from "../lib/recovery/authorization/onboardingProvisioning";
+import { createSupabaseOnboardingProvisioningPort } from "../lib/recovery/authorization/supabaseOnboardingProvisioningPort";
+import { recordAudit } from "../lib/audit";
+import { sendInternalError } from "../lib/httpError";
 import {
-    DEFAULT_TABULAR_MODEL,
-    DEFAULT_TITLE_MODEL,
-    CLAUDE_LOW_MODELS,
-    OPENAI_LOW_MODELS,
+    isSupportedOpenCodeGoModel,
+    REASONING_LEVELS,
     resolveModel,
 } from "../lib/llm";
+import {
+    normalizeOptionalModelPreference,
+    normalizeReasoningLevel,
+} from "../lib/modelSelection";
 import {
     type ApiKeyStatus,
     getUserApiKeyStatus,
@@ -42,6 +47,14 @@ import {
     userExportFilename,
 } from "../lib/userDataExport";
 import { findProfileUserByEmail } from "../lib/userLookup";
+import { configuredApiPublicUrl } from "../lib/runtimeConfig";
+import {
+    getAllUserRouterModels,
+    replaceUserRouterModels,
+    ROUTER_SLUGS,
+    type RouterModelSelections,
+    type RouterSlug,
+} from "../lib/routerModels";
 
 export const userRouter = Router();
 
@@ -50,12 +63,22 @@ const MONTHLY_CREDIT_LIMIT = 999999;
 type UserProfileRow = {
     display_name: string | null;
     organisation: string | null;
+    jurisdiction?: string | null;
+    practice_setting?: string | null;
+    professional_title?: string | null;
+    practice_areas?: string[] | null;
+    onboarding_version?: number | null;
+    password_set_at?: string | null;
     message_credits_used: number;
     credits_reset_date: string;
     tier: string;
     title_model: string | null;
-    tabular_model: string;
+    tabular_model: string | null;
+    last_selected_chat_model?: string | null;
+    last_selected_reasoning_level?: string | null;
     mfa_on_login: boolean | null;
+    quick_actions_visible: boolean | null;
+    dark_mode: boolean | null;
 };
 
 function errorMessage(error: unknown): string {
@@ -83,14 +106,17 @@ function backendPublicUrl(req: {
     protocol: string;
     get(name: string): string | undefined;
 }) {
-    return (
-        process.env.API_PUBLIC_URL ||
-        process.env.BACKEND_URL ||
-        `${req.protocol}://${req.get("host")}`
-    ).replace(/\/+$/, "");
+    const configured = configuredApiPublicUrl();
+    if (configured) return configured;
+    if (process.env.NODE_ENV === "production") {
+        throw new Error("API_PUBLIC_URL is required for connector OAuth");
+    }
+    const host = req.get("host");
+    if (!host) throw new Error("Request host is required for connector OAuth");
+    return new URL(`${req.protocol}://${host}`).origin;
 }
 
-function frontendUrl(path = "/account/connectors") {
+function frontendUrl(path = "/settings/connectors") {
     const base = (process.env.FRONTEND_URL ?? "http://localhost:3000").replace(
         /\/+$/,
         "",
@@ -104,11 +130,14 @@ function shortHash(value: string) {
         : null;
 }
 
-function mcpOAuthPopupHtml(payload: {
-    success: boolean;
-    connectorId?: string;
-    detail?: string;
-}, nonce: string) {
+function mcpOAuthPopupHtml(
+    payload: {
+        success: boolean;
+        connectorId?: string;
+        detail?: string;
+    },
+    nonce: string,
+) {
     const targetOrigin = new URL(frontendUrl()).origin;
     const targetUrl = frontendUrl();
     const message = JSON.stringify({
@@ -160,9 +189,34 @@ function mcpOAuthPopupCsp(nonce: string) {
     ].join("; ");
 }
 
+const PROFILE_SELECT_WITH_CHAT_SELECTIONS =
+    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, last_selected_chat_model, last_selected_reasoning_level, mfa_on_login, quick_actions_visible, dark_mode";
+const PROFILE_SELECT_WITH_LAST_SELECTED_CHAT_MODEL =
+    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, last_selected_chat_model, mfa_on_login, quick_actions_visible, dark_mode";
 const PROFILE_SELECT =
-    "display_name, organisation, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login";
-const PROFILE_SELECT_NO_LEGAL =
+    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login, quick_actions_visible, dark_mode";
+// Deploy-before-migrate tolerance is per column: a database that already has
+// the 20260821 onboarding/password columns but not yet dark_mode must keep
+// them rather than fall all the way back to a lower tier. This is exactly
+// PROFILE_SELECT minus dark_mode.
+const PROFILE_SELECT_NO_DARK_MODE =
+    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login, quick_actions_visible";
+// PROFILE_SELECT minus the 20260821 onboarding / password-capability columns,
+// for databases that have not applied those migrations yet. Migration 02
+// (password_set_at) gets its own tier so a database that applied 01 but not
+// 02 keeps its live onboarding/personalisation columns.
+const PROFILE_SELECT_NO_PASSWORD =
+    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login, quick_actions_visible";
+const PROFILE_SELECT_NO_ONBOARDING =
+    "display_name, organisation, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login, quick_actions_visible";
+const ONBOARDING_PROFILE_COLUMNS = [
+    "jurisdiction",
+    "practice_setting",
+    "professional_title",
+    "practice_areas",
+    "onboarding_version",
+];
+const PROFILE_SELECT_NO_QUICK_ACTIONS =
     "display_name, organisation, message_credits_used, credits_reset_date, tier, title_model, tabular_model, mfa_on_login";
 const LEGACY_PROFILE_SELECT =
     "display_name, organisation, message_credits_used, credits_reset_date, tier, tabular_model";
@@ -178,18 +232,160 @@ function isMissingProfileColumn(error: unknown, column: string): boolean {
     return record.code === "42703" && message.includes(column);
 }
 
+// Loads a profile while tolerating older databases that lack newer preference
+// columns. Tries the full select first, then falls back through the legacy
+// cascade (which also handles missing title_model / mfa_on_login) and applies
+// safe defaults for missing fields.
 async function selectProfile(
     db: ReturnType<typeof createServerSupabase>,
     userId: string,
     mode: "maybe" | "single",
 ) {
-    const fullQuery = db
+    const newestQuery = db
         .from("user_profiles")
-        .select(PROFILE_SELECT)
+        .select(PROFILE_SELECT_WITH_CHAT_SELECTIONS)
         .eq("user_id", userId);
-    return mode === "single"
-        ? await fullQuery.single()
-        : await fullQuery.maybeSingle();
+    const newest =
+        mode === "single"
+            ? await newestQuery.single()
+            : await newestQuery.maybeSingle();
+    if (!newest.error) return newest;
+    let cascadeError: unknown = newest.error;
+
+    if (isMissingProfileColumn(cascadeError, "last_selected_reasoning_level")) {
+        const modelOnlyQuery = db
+            .from("user_profiles")
+            .select(PROFILE_SELECT_WITH_LAST_SELECTED_CHAT_MODEL)
+            .eq("user_id", userId);
+        const modelOnly =
+            mode === "single"
+                ? await modelOnlyQuery.single()
+                : await modelOnlyQuery.maybeSingle();
+        if (!modelOnly.error) {
+            if (modelOnly.data && typeof modelOnly.data === "object") {
+                Object.assign(modelOnly.data as Record<string, unknown>, {
+                    last_selected_reasoning_level: null,
+                });
+            }
+            return modelOnly;
+        }
+        cascadeError = modelOnly.error;
+    }
+
+    if (isMissingProfileColumn(cascadeError, "last_selected_chat_model")) {
+        const fullQuery = db
+            .from("user_profiles")
+            .select(PROFILE_SELECT)
+            .eq("user_id", userId);
+        const full =
+            mode === "single"
+                ? await fullQuery.single()
+                : await fullQuery.maybeSingle();
+        if (!full.error) {
+            if (full.data && typeof full.data === "object") {
+                Object.assign(full.data as Record<string, unknown>, {
+                    last_selected_chat_model: null,
+                    last_selected_reasoning_level: null,
+                });
+            }
+            return full;
+        }
+        cascadeError = full.error;
+    }
+
+    // dark_mode is the newest column, so its retry tier sits above the
+    // 20260821 tiers: a database missing only dark_mode keeps its live
+    // onboarding, password and quick-action columns and defaults the theme
+    // to light. A database old enough to lack the 20260821 columns too
+    // fails the full select on one of those instead (they sort earlier in
+    // the select list), so this tier is skipped and the tiers below handle it.
+    if (isMissingProfileColumn(cascadeError, "dark_mode")) {
+        const noDarkQuery = db
+            .from("user_profiles")
+            .select(PROFILE_SELECT_NO_DARK_MODE)
+            .eq("user_id", userId);
+        const noDark =
+            mode === "single"
+                ? await noDarkQuery.single()
+                : await noDarkQuery.maybeSingle();
+        if (!noDark.error) {
+            if (noDark.data && typeof noDark.data === "object") {
+                Object.assign(noDark.data as Record<string, unknown>, {
+                    dark_mode: false,
+                });
+            }
+            return noDark;
+        }
+        cascadeError = noDark.error;
+    }
+
+    // A database that predates the 20260821 migrations rejects the full
+    // select on the first of the new columns, which would otherwise skip
+    // every tier below (they key on *their* new column's name) and land on
+    // a select that silently resets the legal-research and quick-action
+    // preferences to defaults. Two retry tiers, most-migrated first:
+    // missing only password_set_at (migration 02) keeps the live
+    // onboarding columns; missing the migration-01 columns drops them all,
+    // and serializeProfile treats the absent fields as legacy-exempt —
+    // matching what the migration's backfill would write.
+    if (isMissingProfileColumn(cascadeError, "password_set_at")) {
+        const prePasswordQuery = db
+            .from("user_profiles")
+            .select(PROFILE_SELECT_NO_PASSWORD)
+            .eq("user_id", userId);
+        const prePassword =
+            mode === "single"
+                ? await prePasswordQuery.single()
+                : await prePasswordQuery.maybeSingle();
+        if (!prePassword.error) return prePassword;
+        cascadeError = prePassword.error;
+    }
+    if (
+        ONBOARDING_PROFILE_COLUMNS.some((column) =>
+            isMissingProfileColumn(cascadeError, column),
+        )
+    ) {
+        const preOnboardingQuery = db
+            .from("user_profiles")
+            .select(PROFILE_SELECT_NO_ONBOARDING)
+            .eq("user_id", userId);
+        const preOnboarding =
+            mode === "single"
+                ? await preOnboardingQuery.single()
+                : await preOnboardingQuery.maybeSingle();
+        if (!preOnboarding.error) return preOnboarding;
+        cascadeError = preOnboarding.error;
+    }
+
+    if (isMissingProfileColumn(cascadeError, "quick_actions_visible")) {
+        const previousQuery = db
+            .from("user_profiles")
+            .select(PROFILE_SELECT_NO_QUICK_ACTIONS)
+            .eq("user_id", userId);
+        const previous =
+            mode === "single"
+                ? await previousQuery.single()
+                : await previousQuery.maybeSingle();
+        if (!previous.error) {
+            if (previous.data && typeof previous.data === "object") {
+                Object.assign(previous.data, {
+                    quick_actions_visible: true,
+                    dark_mode: false,
+                });
+            }
+            return previous;
+        }
+    }
+
+    const legacy = await selectProfileLegacy(db, userId, mode);
+    if (legacy.data && typeof legacy.data === "object") {
+        const row = legacy.data as Record<string, unknown>;
+        Object.assign(row, { quick_actions_visible: true });
+        if (!("dark_mode" in row)) {
+            Object.assign(row, { dark_mode: false });
+        }
+    }
+    return legacy;
 }
 
 async function selectProfileLegacy(
@@ -199,7 +395,7 @@ async function selectProfileLegacy(
 ) {
     const query = db
         .from("user_profiles")
-        .select(PROFILE_SELECT_NO_LEGAL)
+        .select(PROFILE_SELECT_NO_QUICK_ACTIONS)
         .eq("user_id", userId);
     const result =
         mode === "single" ? await query.single() : await query.maybeSingle();
@@ -259,27 +455,254 @@ async function selectProfileLegacy(
     return legacy;
 }
 
-function serializeProfile(row: UserProfileRow, apiKeyStatus?: ApiKeyStatus) {
+const CATALOG_MODEL_ID_RE = /^[^\s/]+\/[^\s]+$/;
+
+/**
+ * A router's catalog-id shape. OpenRouter and Vercel publish vendor/model
+ * pairs; OpenCode Go publishes bare model names ("glm-5"), so requiring a
+ * slash there would reject its entire catalog.
+ */
+const ROUTER_MODEL_ID_RE: Record<RouterSlug, RegExp> = {
+    openrouter: CATALOG_MODEL_ID_RE,
+    vercel: CATALOG_MODEL_ID_RE,
+    "opencode-go": /^[^\s]+$/,
+};
+
+/**
+ * The profile field each router's selection is read from and written to.
+ * Mirrored by the frontend's updateUserProfile payload.
+ */
+export const ROUTER_PROFILE_FIELDS: Record<RouterSlug, string> = {
+    openrouter: "openRouterModels",
+    vercel: "vercelModels",
+    "opencode-go": "openCodeGoModels",
+};
+
+export function normalizeRouterModels(
+    value: unknown,
+    provider: RouterSlug,
+): string[] {
+    if (!Array.isArray(value)) return [];
+    const models: string[] = [];
+    const seen = new Set<string>();
+    for (const item of value) {
+        if (typeof item !== "string") continue;
+        const trimmed = item.trim();
+        // Strip a leading router slug ("openrouter/deepseek/deepseek-v3" →
+        // "deepseek/deepseek-v3") only when what remains is still a full
+        // vendor/model catalog id. Some catalog ids legitimately begin with
+        // the router's own slug (OpenRouter's "openrouter/auto", Vercel's
+        // "vercel/v0-1.5-md"); for those the raw id IS the canonical form
+        // and stripping would destroy it.
+        const catalogIdRe = ROUTER_MODEL_ID_RE[provider];
+        const stripped = trimmed.replace(new RegExp(`^${provider}/`), "");
+        const model = catalogIdRe.test(stripped) ? stripped : trimmed;
+        if (
+            !model ||
+            model.length > 200 ||
+            !catalogIdRe.test(model) ||
+            (provider === "opencode-go" &&
+                !isSupportedOpenCodeGoModel(model)) ||
+            seen.has(model)
+        ) {
+            continue;
+        }
+        seen.add(model);
+        models.push(model);
+        if (models.length === 50) break;
+    }
+    return models;
+}
+
+function serializeProfile(
+    routerModels: RouterModelSelections,
+    row: UserProfileRow,
+    apiKeyStatus?: ApiKeyStatus,
+) {
     const creditsUsed = row.message_credits_used ?? 0;
-    const titleFallback = apiKeyStatus?.gemini
-        ? DEFAULT_TITLE_MODEL
-        : apiKeyStatus?.openai
-          ? OPENAI_LOW_MODELS[0]
-          : apiKeyStatus?.claude
-            ? CLAUDE_LOW_MODELS[0]
-            : DEFAULT_TITLE_MODEL;
     return {
         displayName: row.display_name,
         organisation: row.organisation,
+        jurisdiction: row.jurisdiction ?? null,
+        practiceSetting: row.practice_setting ?? null,
+        professionalTitle: row.professional_title ?? null,
+        practiceAreas: Array.isArray(row.practice_areas)
+            ? row.practice_areas
+            : [],
+        // Databases that have not yet applied the onboarding migration must
+        // not lock existing users out of the app. NULL means a new user still
+        // needs onboarding; 0 identifies a legacy-exempt user; 1 is complete.
+        onboardingVersion:
+            row.onboarding_version === undefined
+                ? 0
+                : row.onboarding_version,
+        onboardingComplete:
+            row.onboarding_version === undefined ||
+            row.onboarding_version !== null,
+        passwordSet: !!row.password_set_at,
         messageCreditsUsed: creditsUsed,
         creditsResetDate: row.credits_reset_date,
         creditsRemaining: Math.max(MONTHLY_CREDIT_LIMIT - creditsUsed, 0),
         tier: row.tier || "Free",
-        titleModel: resolveModel(row.title_model, titleFallback),
-        tabularModel: resolveModel(row.tabular_model, DEFAULT_TABULAR_MODEL),
+        titleModel: normalizeOptionalModelPreference(
+            row.title_model,
+            routerModels,
+        ),
+        tabularModel: normalizeOptionalModelPreference(
+            row.tabular_model,
+            routerModels,
+        ),
+        lastSelectedChatModel: normalizeOptionalModelPreference(
+            row.last_selected_chat_model,
+            routerModels,
+        ),
+        lastSelectedReasoningLevel:
+            normalizeReasoningLevel(row.last_selected_reasoning_level) ??
+            "high",
         mfaOnLogin: row.mfa_on_login === true,
+        quickActionsVisible: row.quick_actions_visible !== false,
+        darkMode: row.dark_mode === true,
+        ...Object.fromEntries(
+            ROUTER_SLUGS.map((slug) => [
+                ROUTER_PROFILE_FIELDS[slug],
+                routerModels[slug],
+            ]),
+        ),
         ...(apiKeyStatus ? { apiKeyStatus } : {}),
     };
+}
+
+const PRACTICE_SETTINGS = new Set([
+    "private_practice",
+    "in_house",
+    "not_practising",
+]);
+
+const PROFESSIONAL_TITLES = new Set([
+    "Partner",
+    "Senior Associate",
+    "Associate",
+    "Law Clerk",
+    "Counsel",
+    "General Counsel",
+    "Legal Counsel",
+    "Other",
+]);
+
+function isPracticeSetting(value: string): boolean {
+    return PRACTICE_SETTINGS.has(value);
+}
+
+function normalizeProfessionalTitle(
+    value: unknown,
+): string | null | undefined {
+    if (value === null || value === undefined || value === "") return null;
+    if (typeof value !== "string") return undefined;
+    const title = value.trim();
+    return PROFESSIONAL_TITLES.has(title) ? title : undefined;
+}
+
+function normalizePracticeAreas(value: unknown): string[] | null {
+    if (!Array.isArray(value)) return null;
+    const practiceAreas = Array.from(
+        new Set(
+            value
+                .filter((item): item is string => typeof item === "string")
+                .map((item) => item.trim())
+                .filter(Boolean),
+        ),
+    );
+    if (
+        practiceAreas.length > 20 ||
+        practiceAreas.some((item) => item.length > 100)
+    ) {
+        return null;
+    }
+    return practiceAreas;
+}
+
+type PersonalisationUpdate = {
+    jurisdiction?: string | null;
+    practice_setting?: string | null;
+    professional_title?: string | null;
+    practice_areas?: string[];
+};
+
+function parsePersonalisationPayload(
+    raw: Record<string, unknown>,
+    { allowClearing }: { allowClearing: boolean },
+):
+    | { ok: true; update: PersonalisationUpdate }
+    | { ok: false; detail: string } {
+    const update: PersonalisationUpdate = {};
+
+    if ("jurisdiction" in raw) {
+        if (
+            allowClearing &&
+            (raw.jurisdiction === null || raw.jurisdiction === "")
+        ) {
+            update.jurisdiction = null;
+        } else {
+            const jurisdiction =
+                typeof raw.jurisdiction === "string"
+                    ? raw.jurisdiction.trim()
+                    : "";
+            if (!jurisdiction || jurisdiction.length > 100) {
+                return {
+                    ok: false,
+                    detail: "Select a valid jurisdiction of practice",
+                };
+            }
+            update.jurisdiction = jurisdiction;
+        }
+    }
+
+    if ("practiceSetting" in raw) {
+        if (
+            allowClearing &&
+            (raw.practiceSetting === null || raw.practiceSetting === "")
+        ) {
+            update.practice_setting = null;
+        } else {
+            const practiceSetting =
+                typeof raw.practiceSetting === "string"
+                    ? raw.practiceSetting.trim()
+                    : "";
+            if (!isPracticeSetting(practiceSetting)) {
+                return {
+                    ok: false,
+                    detail: "Select a valid professional setting",
+                };
+            }
+            update.practice_setting = practiceSetting;
+        }
+    }
+
+    if ("professionalTitle" in raw) {
+        const professionalTitle = normalizeProfessionalTitle(
+            raw.professionalTitle,
+        );
+        if (
+            professionalTitle === undefined ||
+            (!allowClearing && professionalTitle === null)
+        ) {
+            return { ok: false, detail: "Select a valid title" };
+        }
+        update.professional_title = professionalTitle;
+    }
+
+    if ("practiceAreas" in raw) {
+        const practiceAreas = normalizePracticeAreas(raw.practiceAreas);
+        if (!practiceAreas) {
+            return {
+                ok: false,
+                detail: "Select no more than 20 valid practice areas",
+            };
+        }
+        update.practice_areas = practiceAreas;
+    }
+
+    return { ok: true, update };
 }
 
 function validateProfilePayload(body: unknown):
@@ -288,10 +711,18 @@ function validateProfilePayload(body: unknown):
           update: {
               display_name?: string | null;
               organisation?: string | null;
-              title_model?: string;
-              tabular_model?: string;
+              jurisdiction?: string | null;
+              practice_setting?: string | null;
+              professional_title?: string | null;
+              practice_areas?: string[];
+              title_model?: string | null;
+              tabular_model?: string | null;
+              last_selected_chat_model?: string | null;
+              last_selected_reasoning_level?: string | null;
+                    quick_actions_visible?: boolean;
               updated_at: string;
           };
+          routerModels?: Partial<Record<RouterSlug, string[]>>;
       }
     | { ok: false; detail: string } {
     if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -302,8 +733,17 @@ function validateProfilePayload(body: unknown):
     const allowedFields = new Set([
         "displayName",
         "organisation",
+        "jurisdiction",
+        "practiceSetting",
+        "professionalTitle",
+        "practiceAreas",
         "titleModel",
         "tabularModel",
+        "lastSelectedChatModel",
+        "lastSelectedReasoningLevel",
+        "quickActionsVisible",
+        "darkMode",
+        ...ROUTER_SLUGS.map((slug) => ROUTER_PROFILE_FIELDS[slug]),
     ]);
     const invalidField = Object.keys(raw).find(
         (key) => !allowedFields.has(key),
@@ -318,11 +758,32 @@ function validateProfilePayload(body: unknown):
     const update: {
         display_name?: string | null;
         organisation?: string | null;
-        title_model?: string;
-        tabular_model?: string;
+        jurisdiction?: string | null;
+        practice_setting?: string | null;
+        professional_title?: string | null;
+        practice_areas?: string[];
+        title_model?: string | null;
+        tabular_model?: string | null;
+        last_selected_chat_model?: string | null;
+        last_selected_reasoning_level?: string | null;
+        quick_actions_visible?: boolean;
+        dark_mode?: boolean;
         updated_at: string;
     } = { updated_at: new Date().toISOString() };
+    const routerModels: Partial<Record<RouterSlug, string[]>> = {};
 
+    const personalisation = parsePersonalisationPayload(raw, {
+        allowClearing: true,
+    });
+    if (!personalisation.ok) return personalisation;
+    Object.assign(update, personalisation.update);
+
+    // Both fields flow into every chat's system prompt via
+    // buildUserPersonalisationPrompt, so an unbounded value would inflate
+    // token cost on every message. Truncate (not reject) at 200 characters:
+    // that is exactly what the signup trigger (handle_new_user's
+    // left(..., 200)) does to the same columns, and rejection would strand
+    // any over-long value written before this cap existed.
     if ("displayName" in raw) {
         if (raw.displayName !== null && typeof raw.displayName !== "string") {
             return {
@@ -330,7 +791,8 @@ function validateProfilePayload(body: unknown):
                 detail: "displayName must be a string or null",
             };
         }
-        update.display_name = raw.displayName?.trim() || null;
+        update.display_name =
+            raw.displayName?.trim().slice(0, 200) || null;
     }
 
     if ("organisation" in raw) {
@@ -340,32 +802,136 @@ function validateProfilePayload(body: unknown):
                 detail: "organisation must be a string or null",
             };
         }
-        update.organisation = raw.organisation?.trim() || null;
+        update.organisation =
+            raw.organisation?.trim().slice(0, 200) || null;
     }
 
     if ("tabularModel" in raw) {
-        if (typeof raw.tabularModel !== "string") {
-            return { ok: false, detail: "tabularModel must be a string" };
+        if (raw.tabularModel === null || raw.tabularModel === "") {
+            update.tabular_model = null;
+        } else if (typeof raw.tabularModel !== "string") {
+            return {
+                ok: false,
+                detail: "tabularModel must be a string or null",
+            };
+        } else {
+            const resolved = resolveModel(raw.tabularModel, "");
+            if (!resolved) {
+                return { ok: false, detail: "Unsupported tabularModel" };
+            }
+            update.tabular_model = resolved;
         }
-        const resolved = resolveModel(raw.tabularModel, "");
-        if (!resolved) {
-            return { ok: false, detail: "Unsupported tabularModel" };
-        }
-        update.tabular_model = resolved;
     }
 
     if ("titleModel" in raw) {
-        if (typeof raw.titleModel !== "string") {
-            return { ok: false, detail: "titleModel must be a string" };
+        if (raw.titleModel === null || raw.titleModel === "") {
+            update.title_model = null;
+        } else if (typeof raw.titleModel !== "string") {
+            return {
+                ok: false,
+                detail: "titleModel must be a string or null",
+            };
+        } else {
+            const resolved = resolveModel(raw.titleModel, "");
+            if (!resolved) {
+                return { ok: false, detail: "Unsupported titleModel" };
+            }
+            update.title_model = resolved;
         }
-        const resolved = resolveModel(raw.titleModel, "");
-        if (!resolved) {
-            return { ok: false, detail: "Unsupported titleModel" };
-        }
-        update.title_model = resolved;
     }
 
-    return { ok: true, update };
+    if ("lastSelectedChatModel" in raw) {
+        if (
+            raw.lastSelectedChatModel === null ||
+            raw.lastSelectedChatModel === ""
+        ) {
+            update.last_selected_chat_model = null;
+        } else if (typeof raw.lastSelectedChatModel !== "string") {
+            return {
+                ok: false,
+                detail: "lastSelectedChatModel must be a string or null",
+            };
+        } else {
+            const resolved = resolveModel(raw.lastSelectedChatModel, "");
+            if (!resolved) {
+                return {
+                    ok: false,
+                    detail: "Unsupported lastSelectedChatModel",
+                };
+            }
+            update.last_selected_chat_model = resolved;
+        }
+    }
+
+    if ("lastSelectedReasoningLevel" in raw) {
+        if (typeof raw.lastSelectedReasoningLevel !== "string") {
+            return {
+                ok: false,
+                detail: "lastSelectedReasoningLevel must be a string",
+            };
+        }
+        if (!(REASONING_LEVELS as readonly string[]).includes(
+            raw.lastSelectedReasoningLevel,
+        )) {
+            return {
+                ok: false,
+                detail: "Unsupported lastSelectedReasoningLevel",
+            };
+        }
+        update.last_selected_reasoning_level =
+            raw.lastSelectedReasoningLevel;
+    }
+
+    for (const slug of ROUTER_SLUGS) {
+        const field = ROUTER_PROFILE_FIELDS[slug];
+        if (!(field in raw)) continue;
+        const value = raw[field];
+        if (!Array.isArray(value)) {
+            return {
+                ok: false,
+                detail: `${field} must be an array of model IDs`,
+            };
+        }
+        // Check the cap before normalizing: normalizeRouterModels truncates
+        // at 50, so a longer payload would otherwise surface as the
+        // misleading "invalid or duplicate model ID".
+        if (value.length > 50) {
+            return {
+                ok: false,
+                detail: `${field} can include at most 50 models`,
+            };
+        }
+        const models = normalizeRouterModels(value, slug);
+        if (models.length !== value.length) {
+            return {
+                ok: false,
+                detail: `${field} contains an invalid or duplicate model ID`,
+            };
+        }
+        routerModels[slug] = models;
+    }
+
+    if ("quickActionsVisible" in raw) {
+        if (typeof raw.quickActionsVisible !== "boolean") {
+            return {
+                ok: false,
+                detail: "quickActionsVisible must be a boolean",
+            };
+        }
+        update.quick_actions_visible = raw.quickActionsVisible;
+    }
+
+    if ("darkMode" in raw) {
+        if (typeof raw.darkMode !== "boolean") {
+            return {
+                ok: false,
+                detail: "darkMode must be a boolean",
+            };
+        }
+        update.dark_mode = raw.darkMode;
+    }
+
+    return { ok: true, update, routerModels };
 }
 
 function readBooleanBodyField(
@@ -386,26 +952,6 @@ function readBooleanBodyField(
     }
 
     return { ok: true, value: raw[field] };
-}
-
-function readInviteBody(
-    body: unknown,
-): { ok: true; email: string } | { ok: false; detail: string } {
-    if (!body || typeof body !== "object" || Array.isArray(body)) {
-        return { ok: false, detail: "Expected a JSON object" };
-    }
-
-    const raw = body as Record<string, unknown>;
-    const invalidField = Object.keys(raw).find((key) => key !== "email");
-    if (invalidField) {
-        return { ok: false, detail: `Unsupported field: ${invalidField}` };
-    }
-
-    if (typeof raw.email !== "string" || !raw.email.trim()) {
-        return { ok: false, detail: "email is required" };
-    }
-
-    return { ok: true, email: raw.email.trim() };
 }
 
 async function userHasVerifiedTotpFactor(
@@ -485,7 +1031,21 @@ async function loadProfile(
         row = resetData as UserProfileRow;
     }
 
-    return { data: serializeProfile(row, options.apiKeyStatus), error: null };
+    try {
+        const routerModels = await getAllUserRouterModels(userId, db);
+        return {
+            data: serializeProfile(routerModels, row, options.apiKeyStatus),
+            error: null,
+        };
+    } catch (routerModelsError) {
+        return {
+            data: null,
+            error:
+                routerModelsError instanceof Error
+                    ? routerModelsError
+                    : new Error(errorMessage(routerModelsError)),
+        };
+    }
 }
 
 // POST /user/profile
@@ -493,7 +1053,7 @@ userRouter.post("/profile", requireAuth, async (_req, res) => {
     const userId = res.locals.userId as string;
     const db = createServerSupabase();
     const error = await ensureProfileRow(db, userId);
-    if (error) return void res.status(500).json({ detail: error.message });
+    if (error) return void sendInternalError(res, error);
     res.json({ ok: true });
 });
 
@@ -513,27 +1073,6 @@ userRouter.get("/lookup", requireAuth, async (req, res) => {
     });
 });
 
-// POST /user/invite
-userRouter.post("/invite", requireAuth, async (req, res) => {
-    const parsed = readInviteBody(req.body);
-    if (!parsed.ok) return void res.status(400).json({ detail: parsed.detail });
-
-    const db = createServerSupabase();
-    const { error } = await db.auth.admin.inviteUserByEmail(
-        parsed.email,
-        { redirectTo: frontendUrl("/accept-invite") },
-    );
-    if (error) return void res.status(500).json({ detail: error.message });
-
-    await recordAuditEvent(db, {
-        actorUserId: res.locals.userId as string,
-        eventType: "user.invited",
-        eventDetail: { email: parsed.email },
-    });
-
-    res.status(200).json({ ok: true });
-});
-
 // GET /user/profile
 userRouter.get("/profile", requireAuth, async (_req, res) => {
     const userId = res.locals.userId as string;
@@ -543,7 +1082,7 @@ userRouter.get("/profile", requireAuth, async (_req, res) => {
         repairMissing: true,
         apiKeyStatus,
     });
-    if (error) return void res.status(500).json({ detail: error.message });
+    if (error) return void sendInternalError(res, error);
     res.json({ ...data, apiKeyStatus });
 });
 
@@ -556,14 +1095,140 @@ userRouter.patch("/profile", requireAuth, async (req, res) => {
     const db = createServerSupabase();
     const ensureError = await ensureProfileRow(db, userId);
     if (ensureError)
-        return void res.status(500).json({ detail: ensureError.message });
+        return void sendInternalError(res, ensureError);
 
     const { error: updateError } = await db
         .from("user_profiles")
         .update(parsed.update)
         .eq("user_id", userId);
     if (updateError)
+        return void sendInternalError(res, updateError);
+
+    for (const slug of ROUTER_SLUGS) {
+        const models = parsed.routerModels?.[slug];
+        if (models === undefined) continue;
+        try {
+            await replaceUserRouterModels(userId, slug, models, db);
+        } catch (routerModelsError) {
+            return void sendInternalError(res, routerModelsError);
+        }
+    }
+
+    const apiKeyStatus = await getUserApiKeyStatus(userId, db);
+    const { data, error } = await loadProfile(db, userId, { apiKeyStatus });
+    if (error) return void sendInternalError(res, error);
+    res.json({ ...data, apiKeyStatus });
+});
+
+// POST /user/onboarding
+userRouter.post("/onboarding", requireAuth, async (req, res) => {
+    const body =
+        req.body && typeof req.body === "object" && !Array.isArray(req.body)
+            ? (req.body as Record<string, unknown>)
+            : null;
+    if (!body) {
+        return void res.status(400).json({ detail: "Expected a JSON object" });
+    }
+
+    const invalidField = Object.keys(body).find(
+        (key) =>
+            key !== "jurisdiction" &&
+            key !== "practiceSetting" &&
+            key !== "professionalTitle" &&
+            key !== "practiceAreas",
+    );
+    if (invalidField) {
+        return void res.status(400).json({
+            detail: `Unsupported onboarding field: ${invalidField}`,
+        });
+    }
+
+    const personalisation = parsePersonalisationPayload(body, {
+        allowClearing: false,
+    });
+    if (!personalisation.ok) {
+        return void res.status(400).json({ detail: personalisation.detail });
+    }
+    const personalisationUpdate = personalisation.update;
+
+    const userId = res.locals.userId as string;
+    const db = createServerSupabase();
+    const ensureError = await ensureProfileRow(db, userId);
+    if (ensureError) {
+        return void sendInternalError(res, ensureError);
+    }
+
+    const profileResult = await selectProfile(db, userId, "maybe");
+    if (profileResult.error) {
+        return void sendInternalError(res, profileResult.error);
+    }
+    const profile = profileResult.data as UserProfileRow | null;
+    const organizationName =
+        typeof profile?.organisation === "string"
+            ? profile.organisation.trim()
+            : "";
+    if (!organizationName || organizationName.length > 200) {
+        return void res.status(409).json({
+            detail: "Complete your organization profile before onboarding",
+        });
+    }
+
+    const provisioning = await provisionInitialOrganization(
+        { user_id: userId, organization_name: organizationName },
+        createSupabaseOnboardingProvisioningPort(db),
+    );
+    if (!provisioning.ok) {
+        if (provisioning.error.kind === "invalid_input") {
+            return void res
+                .status(400)
+                .json({ detail: "organizationName is required" });
+        }
+        return void res.status(503).json({
+            detail: "Onboarding provisioning is temporarily unavailable",
+        });
+    }
+
+    const { error: updateError } = await db
+        .from("user_profiles")
+        .update({
+            ...personalisationUpdate,
+            organisation: organizationName,
+            onboarding_version: 1,
+            updated_at: new Date().toISOString(),
+        })
+        .eq("user_id", userId);
+    if (updateError) {
         return void res.status(500).json({ detail: updateError.message });
+    }
+
+    const apiKeyStatus = await getUserApiKeyStatus(userId, db);
+    const { data, error } = await loadProfile(db, userId, { apiKeyStatus });
+    if (error) return void res.status(500).json({ detail: error.message });
+    res.json({ ...data, apiKeyStatus });
+});
+
+// POST /user/security/password-set
+// Record password capability only after verifying Supabase's auth.users row.
+userRouter.post("/security/password-set", requireAuth, async (_req, res) => {
+    const userId = res.locals.userId as string;
+    const db = createServerSupabase();
+    const ensureError = await ensureProfileRow(db, userId);
+    if (ensureError) {
+        return void res.status(500).json({ detail: ensureError.message });
+    }
+
+    const { data: passwordSetAt, error: syncError } = await db.rpc(
+        "sync_user_password_set",
+        { p_user_id: userId },
+    );
+    if (syncError) {
+        return void res.status(500).json({ detail: syncError.message });
+    }
+    if (!passwordSetAt) {
+        return void res.status(409).json({
+            detail: "Supabase has not recorded a password for this account",
+        });
+    }
 
     const apiKeyStatus = await getUserApiKeyStatus(userId, db);
     const { data, error } = await loadProfile(db, userId, { apiKeyStatus });
@@ -586,9 +1251,7 @@ userRouter.patch(
         if (parsed.value) {
             const factorCheck = await userHasVerifiedTotpFactor(db, userId);
             if (!factorCheck.ok) {
-                return void res.status(500).json({
-                    detail: factorCheck.error.message,
-                });
+                return void sendInternalError(res, factorCheck.error);
             }
             if (!factorCheck.hasVerifiedTotp) {
                 return void res.status(400).json({
@@ -599,7 +1262,7 @@ userRouter.patch(
 
         const ensureError = await ensureProfileRow(db, userId);
         if (ensureError)
-            return void res.status(500).json({ detail: ensureError.message });
+            return void sendInternalError(res, ensureError);
 
         const { error: updateError } = await db
             .from("user_profiles")
@@ -609,11 +1272,11 @@ userRouter.patch(
             })
             .eq("user_id", userId);
         if (updateError)
-            return void res.status(500).json({ detail: updateError.message });
+            return void sendInternalError(res, updateError);
 
         const apiKeyStatus = await getUserApiKeyStatus(userId, db);
         const { data, error } = await loadProfile(db, userId, { apiKeyStatus });
-        if (error) return void res.status(500).json({ detail: error.message });
+        if (error) return void sendInternalError(res, error);
         res.json({ ...data, apiKeyStatus });
     },
 );
@@ -657,7 +1320,7 @@ userRouter.put(
                 provider,
                 error: detail,
             });
-            res.status(500).json({ detail });
+            sendInternalError(res, err);
         }
     },
 );
@@ -676,7 +1339,7 @@ userRouter.get("/mcp-connectors", requireAuth, async (_req, res) => {
             userId,
             error: detail,
         });
-        res.status(500).json({ detail });
+        sendInternalError(res, err);
     }
 });
 
@@ -698,7 +1361,7 @@ userRouter.get(
                 connectorId: req.params.connectorId,
                 error: detail,
             });
-            res.status(404).json({ detail });
+            res.status(404).json({ detail: "Connector not found" });
         }
     },
 );
@@ -737,7 +1400,9 @@ userRouter.post(
                 userId,
                 error: detail,
             });
-            res.status(400).json({ detail });
+            res.status(400).json({
+                detail: "Connector settings are invalid or the server could not be reached.",
+            });
         }
     },
 );
@@ -797,7 +1462,9 @@ userRouter.patch(
                 connectorId: req.params.connectorId,
                 error: detail,
             });
-            res.status(400).json({ detail });
+            res.status(400).json({
+                detail: "Connector settings are invalid or the server could not be reached.",
+            });
         }
     },
 );
@@ -820,7 +1487,7 @@ userRouter.delete(
                 connectorId: req.params.connectorId,
                 error: detail,
             });
-            res.status(500).json({ detail });
+            sendInternalError(res, err);
         }
     },
 );
@@ -841,7 +1508,10 @@ userRouter.post(
                 redirectUri,
                 db,
             );
-            res.json(result);
+            res.json({
+                ...result,
+                callbackOrigin: new URL(redirectUri).origin,
+            });
         } catch (err) {
             const detail = errorMessage(err);
             console.error("[user/mcp-connectors] oauth start failed", {
@@ -849,7 +1519,9 @@ userRouter.post(
                 connectorId: req.params.connectorId,
                 error: detail,
             });
-            res.status(400).json({ detail });
+            res.status(400).json({
+                detail: "Connector authorization could not be started.",
+            });
         }
     },
 );
@@ -895,7 +1567,15 @@ userRouter.get("/mcp-connectors/oauth/callback", async (req, res) => {
         res.status(400)
             .set("Content-Security-Policy", mcpOAuthPopupCsp(nonce))
             .type("html")
-            .send(mcpOAuthPopupHtml({ success: false, detail }, nonce));
+            .send(
+                mcpOAuthPopupHtml(
+                    {
+                        success: false,
+                        detail: "Connector authorization could not be completed.",
+                    },
+                    nonce,
+                ),
+            );
     }
 });
 
@@ -924,10 +1604,12 @@ userRouter.post(
             if (err instanceof McpOAuthRequiredError) {
                 return void res.status(401).json({
                     code: err.code,
-                    detail,
+                    detail: "This connector needs to be authorized again.",
                 });
             }
-            res.status(400).json({ detail });
+            res.status(400).json({
+                detail: "Connector tools could not be refreshed.",
+            });
         }
     },
 );
@@ -961,7 +1643,9 @@ userRouter.patch(
                 toolId: req.params.toolId,
                 error: detail,
             });
-            res.status(400).json({ detail });
+            res.status(400).json({
+                detail: "Connector tool settings could not be updated.",
+            });
         }
     },
 );
@@ -973,12 +1657,13 @@ userRouter.delete(
     requireMfaIfEnrolled,
     async (_req, res) => {
         const userId = res.locals.userId as string;
+        const userEmail = res.locals.userEmail as string | undefined;
         const db = createServerSupabase();
         try {
-            await deleteUserAccountData(db, userId);
+            await deleteUserAccountData(db, userId, userEmail);
             const { error } = await db.auth.admin.deleteUser(userId);
             if (error)
-                return void res.status(500).json({ detail: error.message });
+                return void sendInternalError(res, error);
             res.status(204).send();
         } catch (err) {
             const detail = errorMessage(err);
@@ -986,7 +1671,7 @@ userRouter.delete(
                 userId,
                 error: detail,
             });
-            res.status(500).json({ detail });
+            sendInternalError(res, err);
         }
     },
 );
@@ -1008,7 +1693,7 @@ userRouter.delete(
                 userId,
                 error: detail,
             });
-            res.status(500).json({ detail });
+            sendInternalError(res, err);
         }
     },
 );
@@ -1030,7 +1715,7 @@ userRouter.delete(
                 userId,
                 error: detail,
             });
-            res.status(500).json({ detail });
+            sendInternalError(res, err);
         }
     },
 );
@@ -1052,7 +1737,7 @@ userRouter.delete(
                 userId,
                 error: detail,
             });
-            res.status(500).json({ detail });
+            sendInternalError(res, err);
         }
     },
 );
@@ -1073,11 +1758,17 @@ userRouter.get(
                 "Content-Disposition",
                 `attachment; filename="${userExportFilename("account", userId)}"`,
             );
+            void recordAudit(createServerSupabase(), {
+                userId,
+                userEmail: res.locals.userEmail as string | undefined,
+                action: "export.account",
+                surface: "account",
+            });
             res.json(data);
         } catch (err) {
             const detail = errorMessage(err);
             console.error("[user/export] failed", { userId, error: detail });
-            res.status(500).json({ detail });
+            sendInternalError(res, err);
         }
     },
 );
@@ -1098,6 +1789,12 @@ userRouter.get(
                 "Content-Disposition",
                 `attachment; filename="${userExportFilename("chats", userId)}"`,
             );
+            void recordAudit(createServerSupabase(), {
+                userId,
+                userEmail: res.locals.userEmail as string | undefined,
+                action: "export.chats",
+                surface: "account",
+            });
             res.json(data);
         } catch (err) {
             const detail = errorMessage(err);
@@ -1105,7 +1802,7 @@ userRouter.get(
                 userId,
                 error: detail,
             });
-            res.status(500).json({ detail });
+            sendInternalError(res, err);
         }
     },
 );
@@ -1130,6 +1827,12 @@ userRouter.get(
                 "Content-Disposition",
                 `attachment; filename="${userExportFilename("tabular-reviews", userId)}"`,
             );
+            void recordAudit(createServerSupabase(), {
+                userId,
+                userEmail: res.locals.userEmail as string | undefined,
+                action: "export.tabular",
+                surface: "account",
+            });
             res.json(data);
         } catch (err) {
             const detail = errorMessage(err);
@@ -1137,7 +1840,7 @@ userRouter.get(
                 userId,
                 error: detail,
             });
-            res.status(500).json({ detail });
+            sendInternalError(res, err);
         }
     },
 );

@@ -10,7 +10,33 @@ Severity:
 - **P2:** important but deferrable after explicit classification;
 - **P3:** maintenance/polish.
 
-## Open ledger
+## Candidate remediation ledger
+
+TD-001/003/004/005/006/007 have recovery implementations and candidate verification
+in the Phase 3 matrix: pinned-batch reconstruction, complete schema convergence,
+Auth/MFA/tenancy, governed routing, the persisted MX catalog and upstream Word
+approved-redline integration. They are not declared integrated into main by a local
+PASS. Closure is bound to the candidate's exact Reviewer receipt; main acceptance
+still requires G3/G4. Reconstructing the pin does not imply Git ancestry merged or
+a new census of upstream commits.
+
+## Remaining release debt and owners
+
+| ID | Severity/boundary | Owner | Accepted candidate behavior / rationale | Next gate / exit |
+| --- | --- | --- | --- | --- |
+| TD-008 | P1 production retention | Iván + legal/product; Engineer implements | Destructive evidence operations fail closed; no privileged row deletion for teardown | Before G7: approved retention/erasure ADR, API/schema behavior and tests |
+| TD-009 | P1 operational release | Iván authorizes; Engineer operates | Only local synthetic candidate restore is proven | G5 after G4, then authorized remote staging and encrypted backup/restore with accepted RPO/RTO |
+| TD-010 | P2 external Drive | Iván authorizes; Engineer executes | Fake transport only, no real Google Drive claim | Separately authorized G6 account/folder/token canary and cleanup |
+| TD-011 | P2 global coverage | Engineer | Targeted gates and default-suite counts, not a fresh global coverage percentage | First post-integration maintenance slice: measure current coverage and risk-prioritized ratchets |
+| TD-012 | P2 broader frontend coverage | Engineer; designer for visual decisions | Verified removal/citation controls and bounded Beta; not exhaustive assistant/tabular/browser QA | First post-integration UI slice: identified navigation/stream/visual regressions |
+| TD-015 | P2 worktree lifecycle | Engineer after owner scope | Preserve historical worktrees and receipts; no bulk prune | Separate inventory-backed archive/remove task |
+| TD-016 | P2 hosted AGPL operations | Iván/operator + Engineer | Existing notices preserved; no hosted release claimed | Before G7: version-matched Corresponding Source/notice/no-secret distribution procedure |
+| TD-017 | P2 performance | Engineer | Functional synthetic proof, not throughput/latency SLO | Before production sizing: representative bounded benchmark with hardware/provider scope |
+| TD-018 | P3 board hygiene | Engineer | Exact current task/receipt, no board-count progress claim | First maintenance window after integration: archive only classified historical cards |
+| Word host matrix | G6 access boundary | Iván provides host/access; Engineer verifies | Chromium/WebKit use Office/API mocks | Authorized Word desktop/web host matrix; mock PASS is not host certification |
+| Build fonts | P3 reproducibility | Engineer | Current frontend build uses public Google Fonts assets, no app secrets | Next build-hardening slice: classify source-backed font caching/pinning without altering design |
+
+## Historical open ledger (2026-08-30; superseded status, retained risk evidence)
 
 | ID | Severity | Area | Debt / risk | Evidence | Exit criterion |
 | --- | --- | --- | --- | --- | --- |

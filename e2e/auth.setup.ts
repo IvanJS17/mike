@@ -1,6 +1,7 @@
 import { test as setup, expect } from "@playwright/test";
 import path from "path";
 import fs from "fs";
+import { completeOnboardingIfRequired } from "./onboarding";
 
 const authFile = path.join(__dirname, ".auth/user.json");
 
@@ -85,10 +86,8 @@ setup("authenticate", async ({ page }) => {
     const password = process.env.E2E_PASSWORD ?? "E2eTestPass1!";
 
     /* Bootstrap the shared user plus a dedicated user for destructive auth
-       tests (logout / account deletion). The logout test calls Supabase
-       signOut() which uses GLOBAL scope and revokes the user's session
-       server-side; running it against the shared user would 401 every other
-       parallel worker. Isolating it onto its own user keeps the suite stable. */
+       tests such as account deletion. Isolating destructive flows from the
+       shared cookie session keeps parallel workers stable. */
     await ensureUser(email, password);
     await ensureUser(
         process.env.E2E_LOGOUT_EMAIL ?? "e2e-logout@mike.local",
@@ -102,8 +101,10 @@ setup("authenticate", async ({ page }) => {
     await page.fill("#password", password);
     await page.click('button[type="submit"]');
 
-    /* After login the app redirects to /assistant */
-    await page.waitForURL(/\/assistant/, { timeout: 15_000 });
+    /* New fixture users must complete the onboarding lifecycle before their
+       shared authenticated state can be used by the rest of the suite. On
+       later runs the already-onboarded user goes directly to /assistant. */
+    await completeOnboardingIfRequired(page);
 
     /* Save the authenticated session for all subsequent tests */
     await page.context().storageState({ path: authFile });

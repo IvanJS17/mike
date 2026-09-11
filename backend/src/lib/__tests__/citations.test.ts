@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { execFileSync } from "node:child_process";
 import {
     parseCitations,
     parseCitationsWithDiagnostics,
@@ -7,7 +8,7 @@ import {
     CITATIONS_OPEN_TAG,
     CITATIONS_CLOSE_TAG,
 } from "../chat/citations";
-import type { DocIndex } from "../chat/types";
+import type { DocIndex, DocStore } from "../chat/types";
 
 function citationsBlock(json: string) {
     return `Answer text.\n${CITATIONS_OPEN_TAG}\n${json}\n${CITATIONS_CLOSE_TAG}`;
@@ -41,6 +42,22 @@ describe("parseCitationsWithDiagnostics", () => {
         );
         expect(citations).toEqual([]);
         expect(diagnostics.error).toBe("CITATIONS block JSON was not an array.");
+    });
+
+    it("does not spend unbounded time on a missing close tag", () => {
+        const source = [
+            "const { parseCitationsWithDiagnostics } = require(process.argv[1]);",
+            "process.stdout.write(JSON.stringify(parseCitationsWithDiagnostics('<CITATIONS>' + '\\t'.repeat(100000))));",
+        ].join("\n");
+        const output = execFileSync(process.execPath, ["--import", "tsx", "-e", source, require.resolve("../chat/citations.ts")], {
+            timeout: 5000,
+            encoding: "utf8",
+            stdio: "pipe",
+        });
+        expect(JSON.parse(output)).toEqual({
+            citations: [],
+            diagnostics: { hasBlock: false, rawLength: 0, error: null },
+        });
     });
 });
 
@@ -176,86 +193,6 @@ describe("parseCitations (document citations)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// parseCitations — case citations
-// ---------------------------------------------------------------------------
-
-describe("parseCitations (case citations)", () => {
-    it("parses a case citation from a numeric cluster_id", () => {
-        const [citation] = parseCitations(
-            citationsBlock('[{"ref": 1, "cluster_id": 12345, "quote": "held that"}]'),
-        );
-        expect(citation).toMatchObject({ kind: "case", ref: 1, cluster_id: 12345 });
-        expect((citation as { quotes: unknown[] }).quotes).toEqual([
-            { opinionId: null, type: null, author: null, quote: "held that" },
-        ]);
-    });
-
-    it("accepts clusterId camelCase and string cluster ids", () => {
-        const citations = parseCitations(
-            citationsBlock(
-                '[{"ref": 1, "clusterId": 7, "quote": "a"},' +
-                    '{"ref": 2, "cluster_id": "42", "quote": "b"}]',
-            ),
-        );
-        expect(citations.map((c) => (c as { cluster_id: number }).cluster_id)).toEqual([
-            7, 42,
-        ]);
-    });
-
-    it("floors fractional cluster ids", () => {
-        const [citation] = parseCitations(
-            citationsBlock('[{"ref": 1, "cluster_id": 12.9, "quote": "q"}]'),
-        );
-        expect((citation as { cluster_id: number }).cluster_id).toBe(12);
-    });
-
-    it("treats non-positive cluster ids as document citations", () => {
-        // cluster_id 0 fails the > 0 check, so the entry needs a doc_id.
-        expect(
-            parseCitations(citationsBlock('[{"ref": 1, "cluster_id": 0, "quote": "q"}]')),
-        ).toEqual([]);
-    });
-
-    it("normalizes structured case quotes with opinion metadata", () => {
-        const [citation] = parseCitations(
-            citationsBlock(
-                JSON.stringify([
-                    {
-                        ref: 3,
-                        cluster_id: 99,
-                        quotes: [
-                            {
-                                quote: "majority text",
-                                opinion_id: 11.7,
-                                type: "majority",
-                                author: "Judge A",
-                            },
-                            { text: "concurrence text", opinionId: 12 },
-                            { type: "no quote text, dropped" },
-                        ],
-                    },
-                ]),
-            ),
-        );
-        expect((citation as { quotes: unknown[] }).quotes).toEqual([
-            {
-                opinionId: 11,
-                type: "majority",
-                author: "Judge A",
-                quote: "majority text",
-            },
-            { opinionId: 12, type: null, author: null, quote: "concurrence text" },
-        ]);
-    });
-
-    it("drops case citations with no quotes at all", () => {
-        expect(
-            parseCitations(citationsBlock('[{"ref": 1, "cluster_id": 5}]')),
-        ).toEqual([]);
-    });
-});
-
-// ---------------------------------------------------------------------------
 // parsePartialCitationObjects
 // ---------------------------------------------------------------------------
 
@@ -338,6 +275,13 @@ describe("createCitation", () => {
             filename: "contract.pdf",
             page: 4,
             quote: "q",
+            document: {
+                document_id: "uuid-aaa",
+                title: "contract.pdf",
+                type: "pdf",
+                metadata: [],
+                quotes: [{ quote: "q", target: { page: 4 } }],
+            },
         });
     });
 
@@ -353,33 +297,25 @@ describe("createCitation", () => {
         });
     });
 
-    it("enriches a case citation from the cluster map", () => {
+    it("uses request-scoped document metadata for inline citations", () => {
         const [parsed] = parseCitations(
-            citationsBlock('[{"ref": 2, "cluster_id": 55, "quote": "held"}]'),
+            citationsBlock('[{"ref": 1, "doc_id": "active-word-document", "quote": "q"}]'),
         );
-        expect(createCitation(parsed, docIndex)).toMatchObject({
-            type: "citation_data",
-            kind: "case",
-            ref: 2,
-            cluster_id: 55,
-            case_name: null,
-            citation: null,
-            url: null,
-            pdfUrl: null,
-            dateFiled: null,
-        });
-    });
+        const docStore: DocStore = new Map([
+            [
+                "active-word-document",
+                {
+                    storage_path: "inline:word-document:test",
+                    file_type: "text/markdown",
+                    filename: "Contract.docx",
+                    inline_text: "q",
+                },
+            ],
+        ]);
 
-    it("nulls case metadata when the cluster map has no entry", () => {
-        const [parsed] = parseCitations(
-            citationsBlock('[{"ref": 2, "cluster_id": 55, "quote": "held"}]'),
-        );
-        expect(createCitation(parsed, docIndex)).toMatchObject({
-            case_name: null,
-            citation: null,
-            url: null,
-            pdfUrl: null,
-            dateFiled: null,
+        expect(createCitation(parsed, docIndex, docStore)).toMatchObject({
+            filename: "Contract.docx",
+            document: { title: "Contract.docx" },
         });
     });
 });

@@ -2,12 +2,8 @@
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import {
-  streamChat,
-  streamProjectChat,
-} from "@/app/lib/mikeApi";
+import { streamChat, streamProjectChat } from "@/app/lib/mikeApi";
 import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
-import { useGenerateChatTitle } from "./useGenerateChatTitle";
 import type {
   AssistantEvent,
   Citation,
@@ -20,10 +16,14 @@ interface UseAssistantChatOptions {
   projectId?: string;
 }
 
-function readableStreamError(value: unknown): string {
-  if (typeof value === "string" && value.trim()) return value.trim();
+function readableStreamError(value: unknown, safeToDisplay: boolean): string {
+  if (safeToDisplay && typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
   return "Sorry, something went wrong.";
 }
+
+
 
 export function useAssistantChat({
   initialMessages = [],
@@ -37,8 +37,8 @@ export function useAssistantChat({
     setCurrentChatId,
     saveChat,
     setNewChatMessages,
+    updateChatTitle,
   } = useChatHistoryContext();
-  const { generate: generateTitle } = useGenerateChatTitle();
 
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [isResponseLoading, setIsResponseLoading] = useState(false);
@@ -149,7 +149,10 @@ export function useAssistantChat({
     if (after.length === before.length) return;
     eventsRef.current = after;
     const snapshot = [...after];
-    updateLatestAssistantMessage((message) => ({ ...message, events: snapshot }));
+    updateLatestAssistantMessage((message) => ({
+      ...message,
+      events: snapshot,
+    }));
   };
 
   const pushThinkingPlaceholder = () => {
@@ -162,7 +165,10 @@ export function useAssistantChat({
       { type: "thinking" as const, isStreaming: true },
     ];
     const snapshot = [...eventsRef.current];
-    updateLatestAssistantMessage((message) => ({ ...message, events: snapshot }));
+    updateLatestAssistantMessage((message) => ({
+      ...message,
+      events: snapshot,
+    }));
   };
 
   const pushEvent = (event: AssistantEvent) => {
@@ -173,7 +179,10 @@ export function useAssistantChat({
     const next = eventsRef.current.filter((e) => !isStreamingPlaceholder(e));
     eventsRef.current = [...next, event];
     const snapshot = [...eventsRef.current];
-    updateLatestAssistantMessage((message) => ({ ...message, events: snapshot }));
+    updateLatestAssistantMessage((message) => ({
+      ...message,
+      events: snapshot,
+    }));
   };
 
   const updateMatchingEvent = (
@@ -190,7 +199,10 @@ export function useAssistantChat({
     newEvents[idx] = updater(events[idx]);
     eventsRef.current = newEvents;
     const snapshot = [...newEvents];
-    updateLatestAssistantMessage((message) => ({ ...message, events: snapshot }));
+    updateLatestAssistantMessage((message) => ({
+      ...message,
+      events: snapshot,
+    }));
     return true;
   };
 
@@ -253,7 +265,12 @@ export function useAssistantChat({
         ? displayMessages
         : [
             ...displayMessages,
-            { role: "assistant", content: "", citations: [], events: [] },
+            {
+              role: "assistant",
+              content: "",
+              citations: [],
+              events: [],
+            },
           ],
     );
 
@@ -276,6 +293,9 @@ export function useAssistantChat({
         workflow: currentMessage.workflow,
       }));
 
+      const model = message.model;
+      const reasoning = message.reasoning;
+
       const displayedDoc = opts?.displayedDoc ?? null;
 
       // Pull the user's attachments from the just-submitted message.
@@ -295,6 +315,8 @@ export function useAssistantChat({
             projectId,
             messages: apiMessages,
             chat_id: chatId,
+            model,
+            reasoning,
             displayed_doc: displayedDoc
               ? {
                   filename: displayedDoc.filename,
@@ -309,13 +331,15 @@ export function useAssistantChat({
         : streamChat({
             messages: apiMessages,
             chat_id: chatId,
+            model,
+            reasoning,
             ask_inputs_response: opts?.askInputsResponse,
             signal: controller.signal,
           }));
 
       if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`HTTP ${response.status}: ${errText}`);
+        await response.body?.cancel().catch(() => {});
+        throw new Error(`Chat request failed with status ${response.status}`);
       }
 
       const reader = response.body?.getReader();
@@ -354,19 +378,36 @@ export function useAssistantChat({
               continue;
             }
 
+            if (
+              data.type === "chat_title" &&
+              typeof data.chatId === "string" &&
+              typeof data.title === "string"
+            ) {
+              updateChatTitle(data.chatId, data.title);
+              continue;
+            }
+
             if (data.type === "content_done") {
               setIsLoadingCitations(true);
               continue;
             }
 
             if (data.type === "error") {
-              const message = readableStreamError(data.message);
+              const safeToDisplay = data.safe_to_display === true;
+              const message = readableStreamError(
+                data.message,
+                safeToDisplay,
+              );
               clearStreamingPlaceholders();
               finalizeStreamingContent();
               finalizeStreamingReasoning();
               eventsRef.current = [
                 ...eventsRef.current,
-                { type: "error", message },
+                {
+                  type: "error",
+                  message,
+                  ...(safeToDisplay ? { safe_to_display: true } : {}),
+                },
               ];
               const snapshot = [...eventsRef.current];
               updateLatestAssistantMessage((assistantMessage) => ({
@@ -508,6 +549,8 @@ export function useAssistantChat({
               continue;
             }
 
+
+
             if (data.type === "mcp_tool_start") {
               pushEvent({
                 type: "mcp_tool_call",
@@ -552,10 +595,32 @@ export function useAssistantChat({
               continue;
             }
 
+
+
+
+
+
+
+
+
+
+
             if (data.type === "doc_read_start") {
               pushEvent({
                 type: "doc_read",
                 filename: data.filename as string,
+                document_id:
+                  typeof data.document_id === "string"
+                    ? (data.document_id as string)
+                    : undefined,
+                version_id:
+                  typeof data.version_id === "string"
+                    ? (data.version_id as string)
+                    : null,
+                version_number:
+                  typeof data.version_number === "number"
+                    ? (data.version_number as number)
+                    : null,
                 isStreaming: true,
               });
               continue;
@@ -565,10 +630,9 @@ export function useAssistantChat({
               const rawItems = Array.isArray(data.items)
                 ? (data.items as unknown[])
                 : [];
-              const items = rawItems.reduce<Extract<
-                AssistantEvent,
-                { type: "ask_inputs" }
-              >["items"]>((acc, item, index) => {
+              const items = rawItems.reduce<
+                Extract<AssistantEvent, { type: "ask_inputs" }>["items"]
+              >((acc, item, index) => {
                 if (!item || typeof item !== "object") return acc;
                 const row = item as Record<string, unknown>;
                 const id =
@@ -595,40 +659,57 @@ export function useAssistantChat({
                       })
                     : [];
                   acc.push({
-                      id,
-                      kind: "choice" as const,
-                      question:
-                        typeof row.question === "string"
-                          ? row.question
-                          : "Please choose an option.",
-                      options,
-                      allow_other: row.allow_other !== false,
-                      other_label:
-                        typeof row.other_label === "string"
-                          ? row.other_label
-                          : "Other",
-                      response_prefix:
-                        typeof row.response_prefix === "string"
-                          ? row.response_prefix
-                          : undefined,
+                    id,
+                    kind: "choice" as const,
+                    question:
+                      typeof row.question === "string"
+                        ? row.question
+                        : "Please choose an option.",
+                    options,
+                    allow_other: row.allow_other !== false,
+                    other_label:
+                      typeof row.other_label === "string"
+                        ? row.other_label
+                        : "Other",
+                    response_prefix:
+                      typeof row.response_prefix === "string"
+                        ? row.response_prefix
+                        : undefined,
+                  });
+                  return acc;
+                }
+                if (row.kind === "text") {
+                  acc.push({
+                    id,
+                    kind: "text" as const,
+                    question:
+                      typeof row.question === "string"
+                        ? row.question
+                        : "Please provide the requested information.",
+                    response_prefix:
+                      typeof row.response_prefix === "string"
+                        ? row.response_prefix
+                        : undefined,
                   });
                   return acc;
                 }
                 if (row.kind === "documents") {
                   const documentTypes = Array.isArray(row.document_types)
                     ? (row.document_types as unknown[])
-                        .filter((type): type is string => typeof type === "string")
+                        .filter(
+                          (type): type is string => typeof type === "string",
+                        )
                         .map((type) => type.trim())
                         .filter(Boolean)
                     : [];
                   acc.push({
-                      id,
-                      kind: "documents" as const,
-                      document_types: documentTypes,
-                      response_prefix:
-                        typeof row.response_prefix === "string"
-                          ? row.response_prefix
-                          : undefined,
+                    id,
+                    kind: "documents" as const,
+                    document_types: documentTypes,
+                    response_prefix:
+                      typeof row.response_prefix === "string"
+                        ? row.response_prefix
+                        : undefined,
                   });
                   return acc;
                 }
@@ -646,7 +727,28 @@ export function useAssistantChat({
                   e.type === "doc_read" &&
                   e.filename === data.filename &&
                   !!e.isStreaming,
-                (e) => ({ ...e, isStreaming: false }),
+                (e) => {
+                  const event = e as Extract<
+                    AssistantEvent,
+                    { type: "doc_read" }
+                  >;
+                  return {
+                    ...event,
+                    document_id:
+                      typeof data.document_id === "string"
+                        ? (data.document_id as string)
+                        : event.document_id,
+                    version_id:
+                      typeof data.version_id === "string"
+                        ? (data.version_id as string)
+                        : event.version_id,
+                    version_number:
+                      typeof data.version_number === "number"
+                        ? (data.version_number as number)
+                        : event.version_number,
+                    isStreaming: false,
+                  };
+                },
               );
               pushThinkingPlaceholder();
               continue;
@@ -656,6 +758,18 @@ export function useAssistantChat({
               pushEvent({
                 type: "doc_find",
                 filename: data.filename as string,
+                document_id:
+                  typeof data.document_id === "string"
+                    ? (data.document_id as string)
+                    : undefined,
+                version_id:
+                  typeof data.version_id === "string"
+                    ? (data.version_id as string)
+                    : null,
+                version_number:
+                  typeof data.version_number === "number"
+                    ? (data.version_number as number)
+                    : null,
                 query: (data.query as string) ?? "",
                 total_matches: 0,
                 isStreaming: true,
@@ -670,19 +784,32 @@ export function useAssistantChat({
                   e.filename === data.filename &&
                   e.query === (data.query as string) &&
                   !!e.isStreaming,
-                (e) => ({
-                  ...e,
-                  isStreaming: false,
-                  total_matches:
-                    typeof data.total_matches === "number"
-                      ? (data.total_matches as number)
-                      : (
-                          e as {
-                            type: "doc_find";
-                            total_matches: number;
-                          }
-                        ).total_matches,
-                }),
+                (e) => {
+                  const event = e as Extract<
+                    AssistantEvent,
+                    { type: "doc_find" }
+                  >;
+                  return {
+                    ...event,
+                    document_id:
+                      typeof data.document_id === "string"
+                        ? (data.document_id as string)
+                        : event.document_id,
+                    version_id:
+                      typeof data.version_id === "string"
+                        ? (data.version_id as string)
+                        : event.version_id,
+                    version_number:
+                      typeof data.version_number === "number"
+                        ? (data.version_number as number)
+                        : event.version_number,
+                    isStreaming: false,
+                    total_matches:
+                      typeof data.total_matches === "number"
+                        ? (data.total_matches as number)
+                        : event.total_matches,
+                  };
+                },
               );
               pushThinkingPlaceholder();
               continue;
@@ -831,8 +958,7 @@ export function useAssistantChat({
                 data.status === "final"
                   ? data.status
                   : "final";
-              const incoming = (data.citations ??
-                []) as Citation[];
+              const incoming = (data.citations ?? []) as Citation[];
               if (status === "started" || status === "partial") {
                 updateLatestAssistantMessage((message) => ({
                   ...message,
@@ -889,18 +1015,6 @@ export function useAssistantChat({
 
       await loadChats();
 
-      const finalChatIdForTitle = streamedChatId || chatId || null;
-      if (finalChatIdForTitle && apiMessagesForTurn.length === 1) {
-        const titleParts = [message.content];
-        if (message.workflow)
-          titleParts.push(`Workflow: ${message.workflow.title}`);
-        if (message.files?.length)
-          titleParts.push(
-            `Files: ${message.files.map((f) => f.filename).join(", ")}`,
-          );
-        void generateTitle(finalChatIdForTitle, titleParts.join("\n"));
-      }
-
       return streamedChatId || null;
     } catch (error: unknown) {
       if (error instanceof Error && error.name === "AbortError") {
@@ -937,10 +1051,7 @@ export function useAssistantChat({
         });
       } else {
         finalizeStreamingContent();
-        const errorMessage =
-          error instanceof Error && error.message
-            ? error.message
-            : "Sorry, something went wrong.";
+        const errorMessage = "Sorry, something went wrong.";
         setMessages((prev) => {
           const assistantIndex = [...prev]
             .map((message, index) => ({ message, index }))
@@ -981,10 +1092,11 @@ export function useAssistantChat({
   ): Promise<string | null> => {
     if (!message.content.trim()) return null;
 
+    setMessages([message]);
+    setNewChatMessages([message]);
+
     const newChatId = await saveChat(projectId);
     if (newChatId) {
-      setMessages([message]);
-      setNewChatMessages([message]);
       setChatId(newChatId);
       setCurrentChatId(newChatId);
     }

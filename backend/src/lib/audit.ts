@@ -1,98 +1,146 @@
-/**
- * Audit trail (W1.13): append-only event recording.
- * The audit_events table rejects UPDATE/DELETE at the database level; this
- * helper is the single write path for the backend.
- */
+// Audit history of user actions -> public.audit_events (see the 20260728
+// migration). Fire-and-forget by design: recording an event must NEVER throw
+// or block the user-facing path — failures are logged and swallowed.
 
 import type { createServerSupabase } from "./supabase";
 
 type Db = ReturnType<typeof createServerSupabase>;
 
-export type AuditEventType =
-  | "user.invited"
-  | "membership.revoked"
-  | "document.uploaded"
-  | "document.deleted"
-  | "document.downloaded"
-  | "ai.execution.started"
-  | "ai.execution.completed"
-  | "ai.execution.failed"
-  | "ai.review.created"
-  | "ai.review.item_decided"
-  | "ai.review.completed"
-  | "ai.review.report_exported"
-  | "ai.review.redline_bundle_created"
-  | "ai.review.drive_published"
-  | "ai.review.drive_publication_failed";
+export type AuditStatus = "completed" | "cancelled" | "failed";
 
-export type AiAuditDetailInput = {
-  executionId: string;
-  projectId: string;
-  matterId: string | null;
-  documentVersionId: string;
-  inputSha256: string;
-  outputSha256: string | null;
-  status: "pending" | "running" | "succeeded" | "failed";
-  routeProvider: string;
-  routeModel: string;
-  credentialRef: string;
-  errorClass: string | null;
-  [key: string]: unknown;
+export type AuditEventInput = {
+  userId: string;
+  userEmail?: string | null;
+  action: string;
+  status?: AuditStatus;
+  title?: string | null;
+  surface?: string | null;
+  projectId?: string | null;
+  chatId?: string | null;
+  documentId?: string | null;
+  reviewId?: string | null;
+  model?: string | null;
+  detail?: Record<string, unknown> | null;
 };
 
-/**
- * Build the metadata-only payload used for AI lifecycle audit events.
- * The allow-list is intentional: callers may pass provider response objects,
- * prompts or content for local processing, but none of those values can enter
- * the audit row.
- */
-export function buildAiAuditDetail(
-  input: AiAuditDetailInput,
-): Record<string, unknown> {
-  return {
-    execution_id: input.executionId,
-    project_id: input.projectId,
-    matter_id: input.matterId,
-    document_version_id: input.documentVersionId,
-    input_sha256: input.inputSha256,
-    output_sha256: input.outputSha256,
-    status: input.status,
-    route_provider: input.routeProvider,
-    route_model: input.routeModel,
-    credential_ref: input.credentialRef,
-    error_class: input.errorClass,
-  };
-}
-
-export async function recordAuditEvent(
+export async function recordAudit(
   db: Db,
-  event: {
-    actorUserId: string | null;
-    organizationId?: string | null;
-    eventType: AuditEventType;
-    eventDetail?: Record<string, unknown>;
-  },
+  event: AuditEventInput,
 ): Promise<void> {
   try {
     const { error } = await db.from("audit_events").insert({
-      actor_user_id: event.actorUserId,
-      organization_id: event.organizationId ?? null,
-      event_type: event.eventType,
-      event_detail: event.eventDetail ?? {},
+      actor_user_id: event.userId,
+      user_email: event.userEmail ?? null,
+      event_type: event.action,
+      status: event.status ?? "completed",
+      title: event.title?.slice(0, 300) ?? null,
+      surface: event.surface ?? null,
+      project_id: event.projectId ?? null,
+      chat_id: event.chatId ?? null,
+      document_id: event.documentId ?? null,
+      review_id: event.reviewId ?? null,
+      model: event.model ?? null,
+      event_detail: event.detail ?? {},
     });
-    if (error) {
-      // Audit failures must never break the underlying operation; they are
-      // logged and surfaced to the operator via the W1.14 daily export gap.
-      console.error(
-        `[audit] failed to record ${event.eventType}`,
-        error.message,
-      );
-    }
+    if (error) console.error("[audit] insert failed:", error.message);
   } catch (err) {
-    // Even a thrown exception must not break the underlying operation.
     console.error(
-      `[audit] failed to record ${event.eventType}`,
-      err instanceof Error ? err.message : String(err),
+      "[audit] insert threw:",
+      err instanceof Error ? err.message : err,
     );
+  }
+}
+
+/** Shape of the persisted assistant events we mine for artifact actions. */
+type TurnEvent = {
+  type?: string;
+  filename?: string;
+  document_id?: string;
+  title?: string;
+  workflow_id?: string;
+  // doc_replicated nests each produced copy under `copies` (see the
+  // AssistantEvent union in chat/streaming.ts); the top-level `filename` is the
+  // *source* document and there is no top-level document_id.
+  copies?: Array<{
+    new_filename?: string;
+    document_id?: string;
+    version_id?: string;
+  }>;
+};
+
+/**
+ * Record one chat turn: a chat.message row plus one row per artifact the turn
+ * produced (generated/edited/replicated documents, applied workflows).
+ */
+export async function recordChatTurn(
+  db: Db,
+  base: {
+    userId: string;
+    userEmail?: string | null;
+    chatId: string | null;
+    projectId?: string | null;
+    title?: string | null;
+    model?: string | null;
+    status?: AuditStatus;
+    flags?: Record<string, unknown>;
+  },
+  events: unknown[] | null | undefined,
+): Promise<void> {
+  const surface = base.projectId ? "project" : "assistant";
+  await recordAudit(db, {
+    userId: base.userId,
+    userEmail: base.userEmail,
+    action: "chat.message",
+    status: base.status ?? "completed",
+    title: base.title,
+    surface,
+    projectId: base.projectId ?? null,
+    chatId: base.chatId,
+    model: base.model,
+    detail: base.flags && Object.keys(base.flags).length ? base.flags : null,
+  });
+  for (const raw of events ?? []) {
+    const ev = raw as TurnEvent;
+    // A single doc_replicated event can produce several copies; emit one
+    // document.generated row per copy, reading the copy's own new_filename and
+    // document_id rather than the (source) top-level filename / absent id.
+    if (ev?.type === "doc_replicated") {
+      for (const copy of ev.copies ?? []) {
+        await recordAudit(db, {
+          userId: base.userId,
+          userEmail: base.userEmail,
+          action: "document.generated",
+          title: copy.new_filename ?? null,
+          surface,
+          projectId: base.projectId ?? null,
+          chatId: base.chatId,
+          documentId: copy.document_id ?? null,
+          model: base.model,
+          detail: null,
+        });
+      }
+      continue;
+    }
+    const action =
+      ev?.type === "doc_created"
+        ? "document.generated"
+        : ev?.type === "doc_edited"
+          ? "document.edited"
+          : ev?.type === "workflow_applied"
+            ? "workflow.applied"
+            : null;
+    if (!action) continue;
+    await recordAudit(db, {
+      userId: base.userId,
+      userEmail: base.userEmail,
+      action,
+      title: ev.filename ?? ev.title ?? null,
+      surface,
+      projectId: base.projectId ?? null,
+      chatId: base.chatId,
+      documentId: ev.document_id ?? null,
+      model: base.model,
+      detail: ev.workflow_id ? { workflow_id: ev.workflow_id } : null,
+    });
   }
 }

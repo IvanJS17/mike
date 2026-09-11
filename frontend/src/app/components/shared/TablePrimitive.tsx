@@ -4,6 +4,7 @@ import {
     useEffect,
     useRef,
     useState,
+    type CSSProperties,
     type HTMLAttributes,
     type ComponentType,
     type MouseEvent as ReactMouseEvent,
@@ -23,9 +24,9 @@ import {
     LiquidDropdownItem,
 } from "@/app/components/ui/liquid-dropdown";
 import {
-    APP_SURFACE_ACTIVE_CLASS,
-    APP_SURFACE_GROUP_HOVER_CLASS,
-    APP_SURFACE_HOVER_CLASS,
+    LIQUID_GLASS_SELECTED_CLASS,
+    LIQUID_GLASS_GROUP_HOVER_CLASS,
+    LIQUID_GLASS_HOVER_CLASS,
     LIQUID_TABLE_SURFACE_CLASS,
 } from "@/app/components/ui/liquid-surface";
 
@@ -43,7 +44,23 @@ export const TABLE_STICKY_CELL_BG = "bg-app-surface";
 export const TABLE_PRIMARY_CELL_WIDTH_CLASS =
     "w-[248px] sm:w-[292px] md:w-[332px] shrink-0";
 export const TABLE_CHECKBOX_CLASS =
-    "mr-4 h-2.5 w-2.5 shrink-0 rounded border-gray-200 cursor-pointer accent-black";
+    "mr-3 h-2.5 w-2.5 shrink-0 rounded border-gray-200 cursor-pointer accent-black";
+
+// A child checkbox is centered beneath its parent folder's 16px chevron.
+// Root padding is 12px; advancing one level crosses the 10px checkbox, its
+// 12px margin, and half the 6px width difference between both controls.
+const TABLE_TREE_ROOT_PADDING_PX = 12;
+const TABLE_TREE_DEPTH_INDENT_PX = 25;
+
+export function tableTreeCellStyle(
+    depth: number,
+): CSSProperties | undefined {
+    if (depth <= 0) return undefined;
+    return {
+        paddingLeft:
+            TABLE_TREE_ROOT_PADDING_PX + depth * TABLE_TREE_DEPTH_INDENT_PX,
+    };
+}
 
 type DivProps = HTMLAttributes<HTMLDivElement>;
 
@@ -85,12 +102,13 @@ export function TableFilters<T extends string>({
         <DropdownMenu open={open} onOpenChange={setOpen}>
             <DropdownMenuTrigger asChild>
                 <button
+                    type="button"
                     aria-label={label}
                     title={selected?.label ?? label}
                     className={`flex h-[18px] w-[22px] items-center justify-center rounded-sm transition-colors ${
                         value
-                            ? `text-gray-700 ${APP_SURFACE_HOVER_CLASS} hover:text-gray-900`
-                            : `text-gray-400 ${APP_SURFACE_HOVER_CLASS} hover:text-gray-700`
+                            ? `text-gray-700 ${LIQUID_GLASS_HOVER_CLASS} hover:text-gray-900`
+                            : `text-gray-400 ${LIQUID_GLASS_HOVER_CLASS} hover:text-gray-700`
                     }`}
                 >
                     <ChevronDown
@@ -105,6 +123,7 @@ export function TableFilters<T extends string>({
                 className={`z-[120] overflow-hidden ${widthClassName}`}
             >
                 <LiquidDropdownItem
+                    selected={value === null}
                     onSelect={() => onChange(null)}
                     className="flex w-full items-center justify-between px-3 py-2"
                 >
@@ -120,6 +139,7 @@ export function TableFilters<T extends string>({
                     return (
                         <LiquidDropdownItem
                             key={option.value}
+                            selected={value === option.value}
                             onSelect={() => onChange(option.value)}
                             className="flex w-full items-center justify-between px-3 py-2"
                         >
@@ -154,11 +174,12 @@ export function SkeletonLine({ className }: { className?: string }) {
     );
 }
 
-export function SkeletonDot({ className }: { className?: string }) {
+export function SkeletonCheckbox({ className }: { className?: string }) {
     return (
         <div
+            aria-hidden="true"
             className={cn(
-                "h-2.5 w-2.5 shrink-0 rounded bg-gray-100 animate-pulse",
+                "mr-3 h-2.5 w-2.5 shrink-0 rounded bg-gray-100 animate-pulse",
                 className,
             )}
         />
@@ -180,7 +201,7 @@ export function TableScrollArea({
     return (
         <div
             className={cn(
-                "mx-4 mb-2 min-h-0 min-w-0 flex-1 rounded-2xl md:mx-6 md:mb-3",
+                "mx-4 mb-2 min-h-0 min-w-0 flex-1 rounded-2xl md:mx-8 md:mb-3",
                 className,
             )}
         >
@@ -295,8 +316,8 @@ export function TableRow({
                 className={cn(
                     "group flex h-10 min-w-max items-center pr-3 transition-colors",
                     interactive && "cursor-pointer",
-                    interactive && !selected && APP_SURFACE_HOVER_CLASS,
-                    selected && APP_SURFACE_ACTIVE_CLASS,
+                    interactive && !selected && LIQUID_GLASS_HOVER_CLASS,
+                    selected && LIQUID_GLASS_SELECTED_CLASS,
                     className,
                 )}
                 onContextMenu={handleContextMenu}
@@ -329,6 +350,7 @@ export function TableRow({
 export function TableStickyCell({
     children,
     className,
+    style,
     widthClassName = TABLE_PRIMARY_CELL_WIDTH_CLASS,
     bgClassName = TABLE_STICKY_CELL_BG,
     header = false,
@@ -341,14 +363,15 @@ export function TableStickyCell({
 }) {
     return (
         <div
+            style={style}
             className={cn(
-                "sticky left-0 z-[60] flex pl-4 pr-2 text-left",
+                "sticky left-0 z-[60] flex pl-3 pr-2 text-left",
                 widthClassName,
                 bgClassName,
                 header
                     ? "z-[80] items-center self-stretch"
                     : "py-2 transition-colors",
-                !header && hover && APP_SURFACE_GROUP_HOVER_CLASS,
+                !header && hover && LIQUID_GLASS_GROUP_HOVER_CLASS,
                 className,
             )}
         >
@@ -360,6 +383,7 @@ export function TableStickyCell({
 export function TablePrimaryCell({
     children,
     className,
+    style,
     widthClassName = TABLE_PRIMARY_CELL_WIDTH_CLASS,
     bgClassName,
     selected,
@@ -399,10 +423,10 @@ export function TablePrimaryCell({
                     }}
                     onBlur={onEditCommit}
                     onClick={(e) => e.stopPropagation()}
-                    className="min-w-0 flex-1 text-sm text-gray-800 bg-transparent outline-none"
+                    className="min-w-0 flex-1 text-xs text-gray-800 bg-transparent outline-none"
                 />
             ) : (
-                <span className="min-w-0 flex-1 truncate text-sm text-gray-800">
+                <span className="min-w-0 flex-1 truncate text-xs text-gray-800">
                     {label}
                 </span>
             )
@@ -412,8 +436,9 @@ export function TablePrimaryCell({
 
     return (
         <TableStickyCell
+            style={style}
             widthClassName={widthClassName}
-            bgClassName={selected ? APP_SURFACE_ACTIVE_CLASS : bgClassName}
+            bgClassName={selected ? LIQUID_GLASS_SELECTED_CLASS : bgClassName}
             className={className}
             hover={!selected}
         >
@@ -426,6 +451,12 @@ export function TablePrimaryCell({
                         onClick={(e) => e.stopPropagation()}
                         className={TABLE_CHECKBOX_CLASS}
                         title={checkboxTitle}
+                        aria-label={
+                            checkboxTitle ??
+                            (typeof label === "string"
+                                ? `Select ${label}`
+                                : undefined)
+                        }
                     />
                 )}
                 {content}
@@ -448,7 +479,7 @@ export function TableHeaderCell({ children, className, ...props }: DivProps) {
 export function TableCell({ children, className, ...props }: DivProps) {
     return (
         <div
-            className={cn("shrink-0 truncate text-sm text-gray-500", className)}
+            className={cn("shrink-0 truncate text-xs text-gray-500", className)}
             {...props}
         >
             {children}
@@ -474,7 +505,7 @@ export function TableEmptyState({
     return (
         <div
             className={cn(
-                "mx-auto flex w-full max-w-xs flex-1 flex-col items-start justify-center py-24",
+                "mx-auto flex w-full max-w-[260px] flex-1 flex-col items-start justify-center py-24 text-left",
                 className,
             )}
         >

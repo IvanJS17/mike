@@ -12,7 +12,7 @@ import {
   locateQuote,
   verifyQuoteAgainstSource,
   verifyDocumentCitationAnnotation,
-  verifyDocumentCitations,
+  verifyCitations,
 } from "./verifyCitations";
 
 // Deterministic in-memory source text — no storage/model/network. Proves
@@ -197,6 +197,44 @@ describe("verifyDocumentCitationAnnotation", () => {
     expect(ann.verified).toBe(false);
   });
 
+  it("updates verification and corrected text on normalized document quotes", async () => {
+    const annotation = {
+      ...docAnnotation([
+        { page: 1, quote: "the TENANT shall pay rent" },
+        { page: 2, quote: "Nonexistent clause here." },
+      ]),
+      document: {
+        document_id: "doc-1",
+        title: "lease.docx",
+        type: "docx",
+        metadata: [],
+        quotes: [
+          { quote: "the TENANT shall pay rent", target: { page: 1 } },
+          { quote: "Nonexistent clause here.", target: { page: 2 } },
+        ],
+      },
+    };
+
+    const verified = (await verifyDocumentCitationAnnotation(
+      annotation,
+      fetcher,
+    )) as Record<string, unknown>;
+    const document = verified.document as {
+      quotes: { quote: string; verification: { verified: boolean } }[];
+    };
+
+    expect(document.quotes).toMatchObject([
+      {
+        quote: "The Tenant shall pay rent",
+        verification: { verified: true },
+      },
+      {
+        quote: "Nonexistent clause here.",
+        verification: { verified: false },
+      },
+    ]);
+  });
+
   it("unreadable source → all quotes unverified", async () => {
     const ann = (await verifyDocumentCitationAnnotation(
       docAnnotation([{ page: 1, quote: "The Tenant shall pay rent" }]),
@@ -204,40 +242,17 @@ describe("verifyDocumentCitationAnnotation", () => {
     )) as Record<string, unknown>;
     expect(ann.verified).toBe(false);
   });
-
-  it("leaves case-law annotations untouched", async () => {
-    const caseAnn = {
-      type: "citation_data",
-      kind: "case",
-      ref: 2,
-      cluster_id: 42,
-      case_name: "Roe v. Doe",
-      quotes: [
-        { opinionId: null, type: null, author: null, quote: "held that…" },
-      ],
-    };
-    const out = await verifyDocumentCitationAnnotation(caseAnn, fetcher);
-    expect(out).toBe(caseAnn);
-    expect(out as Record<string, unknown>).not.toHaveProperty("verified");
-  });
 });
 
-describe("verifyDocumentCitations (batch)", () => {
-  it("verifies documents and passes case citations through unchanged", async () => {
-    const caseAnn = {
-      type: "citation_data",
-      kind: "case",
-      ref: 2,
-      cluster_id: 7,
-    };
-    const out = await verifyDocumentCitations(
+describe("verifyCitations (batch)", () => {
+  it("verifies document citations in a batch", async () => {
+    const out = await verifyCitations(
       [
         docAnnotation([{ page: 1, quote: "The Tenant shall pay rent" }]),
-        caseAnn,
       ],
       fetcherFor({ "doc-1": SOURCE }),
     );
     expect((out[0] as Record<string, unknown>).verified).toBe(true);
-    expect(out[1]).toBe(caseAnn);
+    expect(out).toHaveLength(1);
   });
 });

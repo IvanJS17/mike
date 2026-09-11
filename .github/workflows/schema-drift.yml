@@ -1,0 +1,54 @@
+# LiTT supported recovery: current fresh schema versus the pinned, populated
+# d9fa baseline through the explicit hash-checked upgrade driver. Do not restore
+# upstream's unrelated baseline or concatenate arbitrary migration directories.
+# PostgreSQL schema/security proof; real Auth remains a separate Stack/Beta gate.
+name: Schema drift
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, upstream-main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: schema-drift-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+jobs:
+  drift:
+    name: Fresh install vs upgraded deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend test dependencies
+        working-directory: backend
+        run: npm ci
+      - name: Pin the isolated PostgreSQL runtime
+        run: |
+          set -euo pipefail
+          docker pull postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+          docker tag postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777 postgres:16-alpine
+      - name: Verify full schema, populated preservation, rollback and cleanup
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          RUN_RECOVERY_CORE_CONVERGENCE_RUNTIME=1 RUN_RECOVERY_DRIVE_UPGRADE_RUNTIME=1 npm test -- src/__tests__/integration/recoveryCoreConvergence.runtime.test.ts src/__tests__/integration/recoveryDriveUpgrade.runtime.test.ts --no-file-parallelism 2>&1 | tee recovery-schema-proof.log
+      - name: Preserve the actual verification log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-schema-proof
+          path: backend/recovery-schema-proof.log
+          if-no-files-found: ignore

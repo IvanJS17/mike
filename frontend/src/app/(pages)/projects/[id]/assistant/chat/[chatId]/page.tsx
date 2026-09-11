@@ -26,8 +26,6 @@ import {
     deleteDocument,
     getChat,
     getProject,
-    modelRouteFromChat,
-    type ModelRoute,
     uploadProjectDocument,
     createProjectFolder,
     renameProjectFolder,
@@ -223,7 +221,6 @@ export default function ProjectAssistantChatPage({ params }: Props) {
     const [project, setProject] = useState<Project | null>(null);
     const [chatTitle, setChatTitle] = useState<string | null>(null);
     const [chatOwnerId, setChatOwnerId] = useState<string | null>(null);
-    const [chatRoute, setChatRoute] = useState<ModelRoute | null>(null);
     const [ownerOnlyAction, setOwnerOnlyAction] = useState<string | null>(null);
     const [chatLoaded, setChatLoaded] = useState(false);
     const [creatingChat, setCreatingChat] = useState(false);
@@ -278,6 +275,18 @@ export default function ProjectAssistantChatPage({ params }: Props) {
         renameChat: renameChatInHistory,
     } = useChatHistoryContext();
     const [initialMessages] = useState<Message[]>(newChatMessages ?? []);
+    const [chatModel, setChatModel] = useState<string | null | undefined>(
+        initialMessages.length > 0
+            ? (initialMessages[0]?.model ?? null)
+            : undefined,
+    );
+    const [chatReasoningLevel, setChatReasoningLevel] = useState<
+        NonNullable<Message["reasoning"]> | null | undefined
+    >(
+        initialMessages.length > 0
+            ? (initialMessages[0]?.reasoning ?? null)
+            : undefined,
+    );
     const { messages, isResponseLoading, handleChat, setMessages, cancel } =
         useAssistantChat({ initialMessages, chatId, projectId });
     const pendingInitialUserMessageRef = useRef<Message | null>(
@@ -285,10 +294,6 @@ export default function ProjectAssistantChatPage({ params }: Props) {
             ? initialMessages[0]
             : null,
     );
-    const createdChat = chats?.find((chat) => chat.id === chatId);
-    const createdChatRoute = createdChat
-        ? modelRouteFromChat(createdChat)
-        : null;
 
     const hasLoaded = useRef(false);
     const hasAutoSent = useRef(false);
@@ -382,7 +387,8 @@ export default function ProjectAssistantChatPage({ params }: Props) {
             .then(({ chat, messages: loaded }) => {
                 setChatTitle(chat.title);
                 setChatOwnerId(chat.user_id ?? null);
-                setChatRoute(modelRouteFromChat(chat));
+                setChatModel(chat.model ?? null);
+                setChatReasoningLevel(chat.reasoning_level ?? null);
                 if (loaded.length > 0) setMessages(loaded);
             })
             .catch(() => router.replace(`/projects/${projectId}/assistant`))
@@ -939,16 +945,22 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                         ? {
                               label: project.name,
                               onClick: () =>
-                                  router.push(`/projects/${projectId}/assistant`),
+                                  router.push(`/projects/${projectId}`),
                               title: "Back to project",
                           }
                         : {
                               loading: true,
                               skeletonClassName: "w-32",
                               onClick: () =>
-                                  router.push(`/projects/${projectId}/assistant`),
+                                  router.push(`/projects/${projectId}`),
                               title: "Back to project",
                           },
+                    {
+                        label: "Chats",
+                        onClick: () =>
+                            router.push(`/projects/${projectId}/assistant`),
+                        title: "Back to Chats",
+                    },
                     chatLoaded
                         ? {
                               label: chatTitle ?? "Untitled New Chat",
@@ -1308,14 +1320,14 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                         <div className="flex-1 px-4 py-4 space-y-4">
                             <div className="flex justify-end">
                                 <div className="bg-gray-100 rounded-2xl p-4 w-3/4">
-                                    <div className="h-3 bg-gradient-to-r from-gray-200 via-gray-300 to-gray-200 bg-[length:200%_100%] animate-[shimmer_2s_ease-in-out_infinite] rounded w-full" />
+                                    <div className="theme-shimmer h-3 bg-[length:200%_100%] animate-[shimmer_2s_ease-in-out_infinite] rounded w-full" />
                                 </div>
                             </div>
                             <div className="space-y-2">
                                 {[1, 2, 3].map((i) => (
                                     <div
                                         key={i}
-                                        className={`h-3 bg-gradient-to-r from-gray-200 via-gray-300 to-gray-200 bg-[length:200%_100%] animate-[shimmer_2s_ease-in-out_infinite] rounded ${i === 3 ? "w-4/6" : "w-full"}`}
+                                        className={`theme-shimmer h-3 bg-[length:200%_100%] animate-[shimmer_2s_ease-in-out_infinite] rounded ${i === 3 ? "w-4/6" : "w-full"}`}
                                     />
                                 ))}
                             </div>
@@ -1327,7 +1339,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                     ) : (
                         <div
                             ref={messagesContainerRef}
-                            className="flex-1 overflow-y-auto px-4 pt-6 md:pt-8 space-y-6 md:space-y-8 min-h-0"
+                            className="assistant-chat-message-fade flex-1 overflow-y-auto px-4 pt-6 md:pt-8 space-y-6 md:space-y-8 min-h-0"
                             style={{
                                 paddingBottom: DEFAULT_ASSISTANT_BOTTOM_PADDING,
                                 scrollbarGutter: "stable",
@@ -1354,6 +1366,18 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                                 content={msg.content ?? ""}
                                                 files={msg.files}
                                                 workflow={msg.workflow}
+                                                onFileClick={(file) => {
+                                                    if (!file.document_id)
+                                                        return;
+                                                    handleOpenDocument({
+                                                        documentId:
+                                                            file.document_id,
+                                                        filename:
+                                                            file.filename,
+                                                        versionId: null,
+                                                        versionNumber: null,
+                                                    });
+                                                }}
                                             />
                                         </div>
                                     ) : (
@@ -1396,16 +1420,19 @@ export default function ProjectAssistantChatPage({ params }: Props) {
 
                     {/* ChatInput */}
                     <div className="absolute bottom-2 left-0 right-0 z-30 w-full md:bottom-3">
-                        <div className="pointer-events-none absolute -bottom-2 left-4 right-4 z-0 h-7 bg-white/50 backdrop-blur-[1px] md:-bottom-3" />
+                        <div className="pointer-events-none absolute -bottom-2 left-4 right-4 z-0 h-7 bg-app-background md:-bottom-3" />
                         <div className="relative z-20 w-full px-4">
                             <ChatInput
                                 ref={chatInputRef}
                                 onSubmit={handleSubmit}
                                 onCancel={cancel}
                                 isLoading={isResponseLoading}
-                                route={chatRoute ?? createdChatRoute}
+                                chatKey={chatId}
+                                chatModel={chatModel}
+                                chatReasoningLevel={chatReasoningLevel}
                                 hideAddDocButton
                                 projectId={projectId}
+                                onDocumentClick={handleDocClick}
                                 onDocumentsUploaded={(documents) =>
                                     setProject((prev) =>
                                         prev

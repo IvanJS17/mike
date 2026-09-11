@@ -1,9 +1,10 @@
+import { createRef } from "react";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { listWorkflows } from "@/app/lib/mikeApi";
-import type { Workflow } from "../shared/types";
-import { ChatInput } from "./ChatInput";
+import type { Document, Workflow } from "../shared/types";
+import { ChatInput, type ChatInputHandle } from "./ChatInput";
 
 vi.mock("@/app/lib/mikeApi", () => ({
     listWorkflows: vi.fn(),
@@ -13,6 +14,7 @@ vi.mock("@/app/lib/mikeApi", () => ({
 
 vi.mock("@/app/hooks/useSelectedModel", () => ({
     useSelectedModel: () => ["claude-sonnet-4-6", vi.fn()],
+    useSelectedReasoning: () => ["high", vi.fn()],
 }));
 
 vi.mock("@/app/contexts/UserProfileContext", () => ({
@@ -57,6 +59,81 @@ describe("ChatInput workflow slash commands", () => {
         vi.stubGlobal("ResizeObserver", ResizeObserverMock);
     });
 
+    it("opens an attached document without removing it", async () => {
+        const ref = createRef<ChatInputHandle>();
+        const onDocumentClick = vi.fn();
+        const user = userEvent.setup();
+        const document = {
+            id: "document-1",
+            filename: "agreement.docx",
+            file_type: "docx",
+        } as Document;
+
+        render(
+            <ChatInput
+                ref={ref}
+                onSubmit={vi.fn()}
+                onCancel={vi.fn()}
+                isLoading={false}
+                onDocumentClick={onDocumentClick}
+            />,
+        );
+
+        act(() => ref.current?.addDoc(document));
+        const openButton = screen.getByRole("button", {
+            name: "Open agreement.docx",
+        });
+        expect(openButton.parentElement).toHaveClass("liquid-glass-flat");
+        expect(openButton.parentElement).not.toHaveClass(
+            "liquid-glass-subtle",
+        );
+        await user.click(openButton);
+
+        expect(onDocumentClick).toHaveBeenCalledWith(document);
+        expect(
+            screen.getByRole("button", { name: "Remove agreement.docx" }),
+        ).toBeInTheDocument();
+    });
+
+    it("submits the attached document's current version", async () => {
+        const ref = createRef<ChatInputHandle>();
+        const onSubmit = vi.fn();
+        const user = userEvent.setup();
+        const document = {
+            id: "document-1",
+            filename: "agreement.docx",
+            file_type: "docx",
+            current_version_id: "version-4",
+            active_version_number: 4,
+        } as Document;
+
+        render(
+            <ChatInput
+                ref={ref}
+                onSubmit={onSubmit}
+                onCancel={vi.fn()}
+                isLoading={false}
+            />,
+        );
+
+        act(() => ref.current?.addDoc(document));
+        await user.type(screen.getByRole("combobox"), "Review this");
+        await user.keyboard("{Enter}");
+
+        expect(onSubmit).toHaveBeenCalledWith(
+            expect.objectContaining({
+                files: [
+                    {
+                        filename: "agreement.docx",
+                        document_id: "document-1",
+                        version_id: "version-4",
+                        version_number: 4,
+                    },
+                ],
+            }),
+        );
+    });
+
     it("attaches the selected workflow without submitting", async () => {
         const onSubmit = vi.fn();
         const user = userEvent.setup();
@@ -97,7 +174,44 @@ describe("ChatInput workflow slash commands", () => {
         );
     });
 
-    it("treats slash as ordinary input when no workflows define commands", async () => {
+    it("replaces an existing draft with an explicitly supplied workflow prompt", async () => {
+        const ref = createRef<ChatInputHandle>();
+        const user = userEvent.setup();
+        render(
+            <ChatInput
+                ref={ref}
+                onSubmit={vi.fn()}
+                onCancel={vi.fn()}
+                isLoading={false}
+            />,
+        );
+
+        const input = screen.getByRole("combobox");
+        await user.type(input, "Existing draft");
+
+        act(() => {
+            ref.current?.startWorkflow(
+                { id: "workflow-1", title: "Contract Intake" },
+                "Quick Action prompt",
+            );
+        });
+
+        expect(input).toHaveValue("Quick Action prompt");
+
+        await user.clear(input);
+        await user.type(input, "Another existing draft");
+
+        act(() => {
+            ref.current?.startWorkflowDocumentSelection(
+                { id: "workflow-1", title: "Contract Intake" },
+                "Document Quick Action prompt",
+            );
+        });
+
+        expect(input).toHaveValue("Document Quick Action prompt");
+    });
+
+    it("treats slash as ordinary input when workflow titles cannot form commands", async () => {
         let resolveWorkflows!: (workflows: Workflow[]) => void;
         vi.mocked(listWorkflows).mockReturnValue(
             new Promise((resolve) => {
@@ -110,6 +224,7 @@ describe("ChatInput workflow slash commands", () => {
                 metadata: {
                     ...workflow.metadata,
                     name: null,
+                    title: "---",
                 },
             } as Workflow,
         ];

@@ -1,18 +1,13 @@
 FROM node:22-slim
 
-WORKDIR /app
-COPY package*.json ./
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
 RUN npm ci
-COPY . .
+COPY frontend/ ./
+COPY backend/src/lib/sourceDocuments.ts /app/backend/src/lib/
+COPY backend/src/lib/chat/types.ts /app/backend/src/lib/chat/
 
-# NEXT_PUBLIC_* are inlined at build time, so they must be present during `next build`.
-ARG NEXT_PUBLIC_SUPABASE_URL
-ARG NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY
-ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:3001
-ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL \
-    NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY=$NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY \
-    NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
-
+ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
 ENV NODE_ENV=production

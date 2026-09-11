@@ -145,13 +145,41 @@ export function verifyQuoteAgainstSource(
 
 type DocQuoteEntry = { page: number | string; quote: string };
 
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function withVerifiedDocumentQuotes(
+  documentValue: unknown,
+  verifiedQuotes: { quote: string; verification: QuoteVerification }[],
+): Record<string, unknown> | undefined {
+  const document = record(documentValue);
+  if (!document) return undefined;
+  const documentQuotes = Array.isArray(document.quotes) ? document.quotes : [];
+  return {
+    ...document,
+    quotes: documentQuotes.map((value, index) => {
+      const quote = record(value);
+      const verifiedQuote = verifiedQuotes[index];
+      return quote && verifiedQuote
+        ? {
+            ...quote,
+            quote: verifiedQuote.quote,
+            verification: verifiedQuote.verification,
+          }
+        : value;
+    }),
+  };
+}
+
 /**
  * Attach server-side verification to one document citation annotation.
- * Case-law annotations (kind === "case") are returned untouched — with
- * CourtListener disabled they carry no source metadata and are never marked
- * verified. For document annotations, source text is fetched once via
- * `getSourceText(doc_id)` and each quote is located in it; corrected quotes
- * have the exact source excerpt swapped in so the UI never shows drifted text.
+ * Source text is fetched once via `getSourceText(doc_id)` and each quote is
+ * located in it;
+ * corrected quotes have the exact source excerpt swapped in so the UI never
+ * shows drifted text.
  */
 export async function verifyDocumentCitationAnnotation(
   annotation: unknown,
@@ -159,7 +187,6 @@ export async function verifyDocumentCitationAnnotation(
 ): Promise<unknown> {
   if (!annotation || typeof annotation !== "object") return annotation;
   const a = annotation as Record<string, unknown>;
-  if (a.kind === "case") return annotation;
   const docId = typeof a.doc_id === "string" ? a.doc_id : null;
   if (!docId) return annotation;
 
@@ -191,24 +218,28 @@ export async function verifyDocumentCitationAnnotation(
 
   const verified = verifiedQuotes.every((q) => q.verification.verified);
 
+  const verifiedDocument = withVerifiedDocumentQuotes(
+    a.document,
+    verifiedQuotes,
+  );
+
   return {
     ...a,
     quote: verifiedQuotes[0]?.quote ?? a.quote,
     quotes: verifiedQuotes,
     verified,
+    ...(verifiedDocument ? { document: verifiedDocument } : {}),
   };
 }
 
-/**
- * Verify a batch of citation annotations. Document annotations are verified
- * against source text supplied by `getSourceText`; case annotations pass
- * through unchanged.
- */
-export async function verifyDocumentCitations(
+/** Verify document citation annotations against extracted file text. */
+export async function verifyCitations(
   annotations: unknown[],
   getSourceText: (docId: string) => Promise<string>,
 ): Promise<unknown[]> {
   return Promise.all(
-    annotations.map((a) => verifyDocumentCitationAnnotation(a, getSourceText)),
+    annotations.map((annotation) =>
+      verifyDocumentCitationAnnotation(annotation, getSourceText),
+    ),
   );
 }

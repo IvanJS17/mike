@@ -1,62 +1,73 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-const mocks = vi.hoisted(() => ({
-    getSession: vi.fn(),
-}));
-
-vi.mock("@/app/lib/supabase", () => ({
-    supabase: {
-        auth: {
-            getSession: mocks.getSession,
-        },
-    },
-}));
-
-import { DocDownloadBlock } from "./EventBlocks";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import { AskInputsBlock, DocDownloadBlock } from "./EventBlocks";
 
 describe("DocDownloadBlock", () => {
-    beforeEach(() => {
-        mocks.getSession.mockReset().mockResolvedValue({
-            data: { session: { access_token: "jwt-user-1" } },
-        });
-        vi.stubGlobal("fetch", vi.fn());
-        vi.stubGlobal("URL", {
-            createObjectURL: vi.fn(() => "blob:download"),
-            revokeObjectURL: vi.fn(),
-        });
-        vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
-            () => {},
-        );
-    });
-
-    afterEach(() => {
-        vi.restoreAllMocks();
-        vi.unstubAllGlobals();
-    });
-
-    it("fetches a chat grant with the bearer and no-store cache policy", async () => {
-        const fetchMock = vi.mocked(fetch);
-        fetchMock.mockResolvedValue({
-            ok: true,
-            blob: vi.fn().mockResolvedValue(new Blob(["pdf"])),
-        } as unknown as Response);
-
-        render(
+    it("shows the file icon without a file-type label", () => {
+        const { container } = render(
             <DocDownloadBlock
-                filename="contract.pdf"
-                download_url="/download/opaque-grant"
+                filename="agreement.docx"
+                download_url="/documents/agreement/download"
+                versionNumber={2}
             />,
         );
 
-        fireEvent.click(screen.getAllByRole("button")[1]);
-        await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+        expect(screen.getByText("agreement")).toHaveClass("text-lg");
+        expect(screen.queryByText("DOCX")).not.toBeInTheDocument();
+        expect(
+            container.querySelector(
+                'img[src*="/icons/file-types/word.svg"]',
+            ),
+        ).toHaveClass("h-4", "w-4");
+    });
+});
 
-        const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-        expect(url).toBe("http://localhost:3001/download/opaque-grant");
-        expect(init).toMatchObject({
-            cache: "no-store",
-            headers: { Authorization: "Bearer jwt-user-1" },
+describe("AskInputsBlock", () => {
+    it("collapses completed input details and toggles them from the label", () => {
+        render(
+            <AskInputsBlock
+                event={{
+                    type: "ask_inputs",
+                    items: [
+                        {
+                            id: "address",
+                            kind: "text",
+                            question: "What is the registered address?",
+                        },
+                    ],
+                }}
+                response={{
+                    type: "ask_inputs_response",
+                    responses: [
+                        {
+                            id: "address",
+                            kind: "text",
+                            question: "What is the registered address?",
+                            answer: "1 Legal Plaza",
+                        },
+                    ],
+                }}
+            />,
+        );
+
+        const toggle = screen.getByRole("button", {
+            name: "Asked for input",
         });
+        expect(toggle).toHaveAttribute("aria-expanded", "false");
+        expect(
+            screen.queryByText("What is the registered address?"),
+        ).not.toBeInTheDocument();
+
+        fireEvent.click(toggle);
+        expect(toggle).toHaveAttribute("aria-expanded", "true");
+        expect(
+            screen.getByText("What is the registered address?"),
+        ).toBeInTheDocument();
+        expect(screen.getByText("1 Legal Plaza")).toBeInTheDocument();
+
+        fireEvent.click(toggle);
+        expect(
+            screen.queryByText("What is the registered address?"),
+        ).not.toBeInTheDocument();
     });
 });

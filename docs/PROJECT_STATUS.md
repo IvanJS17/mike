@@ -3,22 +3,40 @@
 > Canonical operational status for this fork. Kanban cards are execution receipts,
 > not the project roadmap or source of truth.
 
-**Last reconciled:** 2026-08-30<br>
+**Last reconciled:** 2026-09-09<br>
 **Repository:** `IvanJS17/mike`<br>
 **Upstream:** `Open-Legal-Products/mike`
 
 ## Executive status
 
-LiTT is a Mexican legal-practice adaptation of MikeOSS. The Phase 0 control package,
-the reviewed Beta Jurídica 0.1 baseline and the reviewed upstream compatibility
-ledger are integrated in `origin/main`. Phase 0 and Phase 1 are complete. Product
-recovery implementation has not started: no writer is active, and Phase 2 remains
-blocked on the coordinator-owned compiling contract scaffold and migration baseline.
+Phase 2 recovery has been assembled on `recovery/upstream-1b58-phase2`, based on
+the pinned MikeOSS core and ported LiTT invariants, not a monolithic upstream merge.
+The final Phase 3 candidate includes DB-backed MX catalog content, removal of
+CourtListener, governed evidence/review/approved artifacts, and an isolated
+fake-provider/fake-Drive Beta plus populated backup/restore harness.
 
-This is not a production-readiness claim. No current remote staging or production
-runtime was verified while producing this status.
+The current evidence and the 16 acceptance criteria are recorded in
+[`PHASE3_RECOVERY_DECISION.md`](PHASE3_RECOVERY_DECISION.md). That package separates
+code/test proof from the governing exact-tree review and publication receipts.
+A historical PASS or a successful build does not approve this candidate.
 
-## Immutable Git identities
+Authorized close boundary: exact-snapshot Reviewer PASS, commit, recovery-only
+push and independent remote readback. No new PR, merge, remote deployment, real
+LLM/Drive canary or production promotion is authorized. Main remains the supported
+`d9fa8380e63837b6441cef169cf5ef80dfb55e54` baseline observed at reconciliation.
+
+## Current immutable input identities
+
+| Input | Commit | Tree |
+| --- | --- | --- |
+| Last reviewed recovery parent | `f4dc9846eaa5fba2a97288c645112a59eaadba36` | `31262db2d54e11e4c35b7addaaabe81734f97f2e` |
+| Pinned upstream target | `1b58c7aa0520ff185c44698cea1a9e0c96af50ab` | `ce8d7e1a6e4b5460258441a5568a353c52180162` |
+
+The commit containing this document, its exact tree, Reviewer card/verdict and
+published remote OID are recorded externally after freeze. This avoids
+predeclaring a self-referential commit or editing documentation after approval.
+
+## Historical immutable Git identities (2026-08-30)
 
 The values below were read from Git after fetching `origin` and `upstream` on
 2026-08-30. The ledger-acceptance baseline is the immutable input to this docs-only
@@ -44,8 +62,8 @@ Git relations from the common ancestor:
   Beta/control proof is recorded in the compatibility ledger; no monolithic merge
   was used.
 
-Moving refs can change after this document. Every recovery task must fetch and pin a
-new immutable tuple before implementation.
+Moving refs can change. Revalidate the recovery tuple before a new task; do not
+advance the pinned upstream target during this recovery closeout.
 
 ## Product boundary
 
@@ -134,7 +152,7 @@ remote staging, a real provider/Drive canary or production.
 | Beta G3 exact-head CI | 8/8 PASS |
 | Beta G4 post-merge | 5/5 push workflows plus bounded 2/2 Beta journey PASS; cleanup complete |
 | Compatibility ledger | Integrated by PR #19 at `0cafb80`; review `t_15f7252d` PASS; PR CI 8/8 and post-merge 5/5 PASS |
-| Upstream recovery implementation | Not started; writers active: 0 |
+| Upstream recovery implementation | Assembled on recovery; exact-candidate technical evidence in the Phase 3 package; main integration remains a separate gate |
 | Local staging harness | Versioned; historical local smokes are not current remote proof |
 | Remote staging | Not verified |
 | Real Shared Drive canary | Blocked pending dedicated account/token/folder and authorization |
@@ -142,42 +160,30 @@ remote staging, a real provider/Drive canary or production.
 
 ## Current blockers and risks
 
-1. **Upstream recovery:** 278 upstream-only commits remain to be reconstructed or
-   classified in executable Phase 2 slices.
-2. **Schema reconciliation:** both lines substantially changed `backend/schema.sql`
-   and migration semantics.
-3. **Provider architecture:** upstream moved to Vercel AI SDK while LiTT added
-   governed routes, BYOK and receipts on the previous adapter layer.
-4. **Workflow architecture:** upstream moved workflows into a database-backed
-   catalog; the Mexican playbook must be ported with provenance and hashes.
-5. **Word add-in overlap:** upstream rewrote document chat/edit workflows while
-   Beta added governed redline application.
-6. **Retention decision:** product semantics for deleting projects/accounts while AI
-   and audit records are append-only remain undefined for production.
-7. **Operational evidence:** no remote staging, restore or real provider/Drive proof
-   is current for the integrated baseline.
-8. **Coverage debt:** backend and UI surfaces outside the Beta journey remain
-    incompletely covered; existing coverage documents may lag the recovery result.
+The former reconstruction blockers (schema, auth/tenancy, provider architecture,
+workflow catalog and Word overlap) have candidate implementations and verification
+receipts. Their governance and integration states must be read from the exact
+Phase 3 receipt, not inferred from the older Beta evidence above.
 
-The actionable ledger is in [`TECHNICAL_DEBT.md`](TECHNICAL_DEBT.md).
+Remaining release decisions/debt:
+
+- production retention/erasure remains undefined; destructive evidence operations
+  remain fail-closed and disposable test teardown is not a retention mechanism;
+- real Word host compatibility, remote staging, real providers/Shared Drive,
+  SMTP, backups, monitoring/DNS and production each need their own permission;
+- representative load, global coverage, broader frontend scenarios, operational
+  AGPL source offer and historical-worktree cleanup remain bounded follow-ups.
+
+The actionable owner/exit ledger is in [`TECHNICAL_DEBT.md`](TECHNICAL_DEBT.md).
 
 ## Current decision and next gate
 
-New product features remain paused. Phase 0, Phase 1 and the compatibility-ledger
-gate are complete. The next engineering gate in
-[`UPSTREAM_RECOVERY_PLAN.md`](UPSTREAM_RECOVERY_PLAN.md) is Phase 2 setup:
-
-1. create the coordinator recovery worktree from pinned upstream
-   `1b58c7aa0520ff185c44698cea1a9e0c96af50ab`;
-2. establish the compiling RED contract scaffold, migration baseline and shared
-   interfaces under coordinator ownership;
-3. execute Slice A serially before any limited writer parallelism;
-4. prove recovered parity through the Beta journey and release gates;
-5. enter the permanent upstream policy only after the recovered candidate completes
-   Phase 3 and is integrated.
-
-No writer starts from this documentation transition, and no retention, egress,
-tenancy or jurisdiction decision is inferred.
+Finish the candidate's 16 gates and consume one exact-snapshot Reviewer verdict.
+Only after PASS may the already-authorized recovery-only publication occur.
+The owner then decides PR authorization; exact-head CI, merge/post-merge, formal
+G5, each G6 boundary and G7 production remain separate. A candidate restore is not
+formal post-merge G5. Permanent Phase 4 intake is prepared, not activated, and the
+upstream pin is unchanged. No cron or external automation is authorized here.
 
 See [`RELEASE_GATES.md`](RELEASE_GATES.md) for what each PASS does and does not
 authorize, and [`UPSTREAM_POLICY.md`](UPSTREAM_POLICY.md) for the steady-state rule.

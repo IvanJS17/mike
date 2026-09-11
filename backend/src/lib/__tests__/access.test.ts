@@ -29,17 +29,12 @@ function makeDb(tables: Record<string, Row[]>) {
                 },
                 filter: (column: string, operator: string, value: string) => {
                     if (operator !== "cs") return query;
-                    const expected = (JSON.parse(value) as string[]).map((item) =>
-                        item.toLowerCase(),
-                    );
+                    const expected = JSON.parse(value) as string[];
                     rows = rows.filter((row) => {
                         const actual = row[column];
-                        const normalizedActual = Array.isArray(actual)
-                            ? actual.map((item) => String(item).toLowerCase())
-                            : [];
                         return (
                             Array.isArray(actual) &&
-                            expected.every((item) => normalizedActual.includes(item))
+                            expected.every((item) => actual.includes(item))
                         );
                     });
                     return query;
@@ -58,11 +53,21 @@ function makeDb(tables: Record<string, Row[]>) {
 describe("access helpers", () => {
     const db = makeDb({
         projects: [
-            { id: "own-project", user_id: "owner" },
-            { id: "private-project", user_id: "other-owner" },
+            { id: "own-project", user_id: "owner", shared_with: [] },
+            {
+                id: "shared-project",
+                user_id: "other-owner",
+                shared_with: ["reviewer@example.com"],
+            },
+            { id: "private-project", user_id: "other-owner", shared_with: [] },
         ],
         documents: [
             { id: "own-doc", user_id: "owner", project_id: null },
+            {
+                id: "shared-doc",
+                user_id: "other-owner",
+                project_id: "shared-project",
+            },
             {
                 id: "private-doc",
                 user_id: "other-owner",
@@ -73,64 +78,81 @@ describe("access helpers", () => {
 
     it("allows project owners", async () => {
         await expect(
-            checkProjectAccess("own-project", "owner", db),
+            checkProjectAccess("own-project", "owner", "owner@example.com", db),
         ).resolves.toMatchObject({ ok: true, isOwner: true });
     });
 
-    it("denies non-owner project access", async () => {
+    it("allows shared project access case-insensitively", async () => {
         await expect(
-            checkProjectAccess("private-project", "reviewer", db),
+            checkProjectAccess(
+                "shared-project",
+                "reviewer",
+                " REVIEWER@EXAMPLE.COM ",
+                db,
+            ),
+        ).resolves.toMatchObject({ ok: true, isOwner: false });
+    });
+
+    it("denies private project access", async () => {
+        await expect(
+            checkProjectAccess(
+                "private-project",
+                "reviewer",
+                "reviewer@example.com",
+                db,
+            ),
         ).resolves.toEqual({ ok: false });
     });
 
-    it("allows document owners only", async () => {
+    it("allows document owners and shared-project readers", async () => {
         await expect(
             ensureDocAccess(
                 { user_id: "owner", project_id: null },
                 "owner",
+                "owner@example.com",
                 db,
             ),
         ).resolves.toMatchObject({ ok: true, isOwner: true });
 
         await expect(
-            ensureDocAccess({ user_id: "other-owner", project_id: null }, "reviewer", db),
-        ).resolves.toEqual({ ok: false });
-    });
-
-    it("filters user-supplied document IDs to owned documents only", async () => {
-        await expect(
-            filterAccessibleDocumentIds(
-                ["own-doc", "private-doc", "missing-doc"],
-                "owner",
+            ensureDocAccess(
+                { user_id: "other-owner", project_id: "shared-project" },
+                "reviewer",
+                "reviewer@example.com",
                 db,
             ),
-        ).resolves.toEqual(["own-doc"]);
+        ).resolves.toMatchObject({ ok: true, isOwner: false });
     });
 
-    it("lists owned projects", async () => {
-        await expect(listAccessibleProjectIds("owner", db)).resolves.toEqual([
-            "own-project",
-        ]);
+    it("filters user-supplied document IDs to accessible documents only", async () => {
+        await expect(
+            filterAccessibleDocumentIds(
+                ["own-doc", "shared-doc", "private-doc", "missing-doc"],
+                "reviewer",
+                "reviewer@example.com",
+                db,
+            ),
+        ).resolves.toEqual(["shared-doc"]);
     });
 
-    it("allows review owners only", async () => {
+    it("lists own and directly shared projects", async () => {
+        await expect(
+            listAccessibleProjectIds("owner", " Reviewer@Example.com ", db),
+        ).resolves.toEqual(expect.arrayContaining(["own-project", "shared-project"]));
+    });
+
+    it("allows direct review sharing without project access", async () => {
         await expect(
             ensureReviewAccess(
                 {
-                    user_id: "owner",
+                    user_id: "other-owner",
                     project_id: null,
+                    shared_with: ["Reviewer@Example.com"],
                 },
-                "owner",
-                db,
-            ),
-        ).resolves.toMatchObject({ ok: true, isOwner: true });
-
-        await expect(
-            ensureReviewAccess(
-                { user_id: "other-owner", project_id: null },
                 "reviewer",
+                "reviewer@example.com",
                 db,
             ),
-        ).resolves.toEqual({ ok: false });
+        ).resolves.toMatchObject({ ok: true, isOwner: false });
     });
 });

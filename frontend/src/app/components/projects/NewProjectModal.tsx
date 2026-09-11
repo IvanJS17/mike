@@ -1,18 +1,22 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Upload } from "lucide-react";
+import { Upload, User, X } from "lucide-react";
 import {
     addDocumentToProject,
     createProject,
     uploadProjectDocument,
 } from "@/app/lib/mikeApi";
 import { FileDirectory } from "../shared/FileDirectory";
+import { AddUserInput } from "../shared/AddUserInput";
 import type { Document, Project } from "../shared/types";
+import type { UserLookupResult } from "@/app/lib/mikeApi";
+import { useAuth } from "@/app/contexts/AuthContext";
 import { Modal } from "../modals/Modal";
-import { ModalFieldLabel } from "../modals/ModalFieldLabel";
-import { ModalTextInput } from "../modals/ModalTextInput";
+import { FieldLabel, FormTextInput } from "../ui/form-field";
 import { ProjectPracticeField } from "./ProjectPracticeField";
+import { userFacingApiError } from "@/app/lib/userFacingError";
+import { LIQUID_GLASS_MODAL_ROW_HOVER_CLASS } from "@/shared/ui/LiquidGlassUI";
 
 interface Props {
     open: boolean;
@@ -25,11 +29,14 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
     const [name, setName] = useState("");
     const [cmNumber, setCmNumber] = useState("");
     const [practice, setPractice] = useState("");
+    const [sharedUsers, setSharedUsers] = useState<UserLookupResult[]>([]);
     const [selectedDocuments, setSelectedDocuments] = useState<Document[]>([]);
     const [pendingFiles, setPendingFiles] = useState<File[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const { user } = useAuth();
+    const ownEmail = user?.email?.trim().toLowerCase() ?? null;
     const formId = "new-project-modal-form";
 
     if (!open) return null;
@@ -65,6 +72,11 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
                 practice.trim() && practice.trim() !== "Other"
                     ? practice.trim()
                     : undefined,
+                ownEmail
+                    ? sharedUsers
+                          .map((user) => user.email)
+                          .filter((email) => email !== ownEmail)
+                    : sharedUsers.map((user) => user.email),
             );
             await Promise.all([
                 ...selectedDocuments.map((document) =>
@@ -79,7 +91,7 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
             resetForm();
             onClose();
         } catch (err: unknown) {
-            setError((err as Error).message || "Failed to create project");
+            setError(userFacingApiError(err, "Failed to create project"));
         } finally {
             setLoading(false);
         }
@@ -90,6 +102,7 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
         setName("");
         setCmNumber("");
         setPractice("");
+        setSharedUsers([]);
         setSelectedDocuments([]);
         setPendingFiles([]);
         setError("");
@@ -98,6 +111,40 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
     function handleClose() {
         resetForm();
         onClose();
+    }
+
+    function validateShareUser(email: string) {
+        if (ownEmail && email === ownEmail) {
+            return "You cannot share a project with yourself.";
+        }
+        if (
+            sharedUsers.some(
+                (user) => user.email.trim().toLowerCase() === email,
+            )
+        ) {
+            return `${email} already has access.`;
+        }
+        return null;
+    }
+
+    function handleAddShareUser(user: UserLookupResult) {
+        setSharedUsers((prev) => [
+            ...prev,
+            {
+                ...user,
+                email: user.email.trim().toLowerCase(),
+            },
+        ]);
+    }
+
+    function handleRemoveShareUser(email: string) {
+        setSharedUsers((prev) =>
+            prev.filter(
+                (user) =>
+                    user.email.trim().toLowerCase() !==
+                    email.trim().toLowerCase(),
+            ),
+        );
     }
 
     return (
@@ -164,10 +211,10 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
                 {step === "details" ? (
                     <div className="space-y-6">
                         <div>
-                            <ModalFieldLabel htmlFor="new-project-name">
+                            <FieldLabel htmlFor="new-project-name">
                                 Project name
-                            </ModalFieldLabel>
-                            <ModalTextInput
+                            </FieldLabel>
+                            <FormTextInput
                                 id="new-project-name"
                                 type="text"
                                 value={name}
@@ -179,10 +226,10 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
                         </div>
 
                         <div>
-                            <ModalFieldLabel htmlFor="new-project-cm-number">
+                            <FieldLabel htmlFor="new-project-cm-number">
                                 CM number
-                            </ModalFieldLabel>
-                            <ModalTextInput
+                            </FieldLabel>
+                            <FormTextInput
                                 id="new-project-cm-number"
                                 type="text"
                                 value={cmNumber}
@@ -194,9 +241,9 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
                         </div>
 
                         <div>
-                            <ModalFieldLabel htmlFor="new-project-practice">
+                            <FieldLabel htmlFor="new-project-practice">
                                 Practice
-                            </ModalFieldLabel>
+                            </FieldLabel>
                             <ProjectPracticeField
                                 id="new-project-practice"
                                 value={practice}
@@ -204,6 +251,65 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
                             />
                         </div>
 
+                        <div className="space-y-2">
+                            <FieldLabel as="p">
+                                Share with
+                            </FieldLabel>
+                            <AddUserInput
+                                onAdd={handleAddShareUser}
+                                validateEmail={validateShareUser}
+                                placeholder="Add colleagues by email..."
+                            />
+                            {sharedUsers.length > 0 && (
+                                <ul className="space-y-1 pt-1">
+                                    {sharedUsers.map((entry) => {
+                                        const displayName =
+                                            entry.display_name?.trim();
+                                        const primary = displayName || "User";
+                                        const initial = displayName
+                                            ?.charAt(0)
+                                            .toUpperCase();
+                                        return (
+                                            <li
+                                                key={entry.email}
+                                                className={`${LIQUID_GLASS_MODAL_ROW_HOVER_CLASS} flex items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors`}
+                                            >
+                                                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-white/80 bg-white text-gray-700 shadow-[0_4px_12px_rgba(15,23,42,0.10),inset_0_1px_0_rgba(255,255,255,0.92),inset_0_-1px_0_rgba(255,255,255,0.64)]">
+                                                    {initial ? (
+                                                        <span className="font-serif text-[11px] leading-none">
+                                                            {initial}
+                                                        </span>
+                                                    ) : (
+                                                        <User className="h-2.5 w-2.5" />
+                                                    )}
+                                                </div>
+                                                <div className="min-w-0 flex-1">
+                                                    <p className="truncate text-xs text-gray-800">
+                                                        {primary}
+                                                        <span className="text-gray-400">
+                                                            {" "}
+                                                            · {entry.email}
+                                                        </span>
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                        handleRemoveShareUser(
+                                                            entry.email,
+                                                        )
+                                                    }
+                                                    className="self-center inline-flex items-center rounded-full px-2 py-1 text-xs text-gray-500 transition-colors hover:text-red-600"
+                                                    aria-label={`Remove ${entry.email}`}
+                                                >
+                                                    <X className="h-3 w-3" />
+                                                </button>
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            )}
+                        </div>
                     </div>
                 ) : (
                     <div className="flex min-h-0 flex-1 flex-col">

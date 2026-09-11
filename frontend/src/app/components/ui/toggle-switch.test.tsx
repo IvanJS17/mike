@@ -28,4 +28,18 @@ describe("ToggleSwitch", () => {
         fireEvent.click(toggle);
         expect(onCheckedChange).toHaveBeenCalledWith(false);
     });
+
+    it("renders the off-state track without a dark outline", () => {
+        const { container } = render(
+            <ToggleSwitch checked={false} onCheckedChange={() => {}}>
+                Group documents
+            </ToggleSwitch>,
+        );
+
+        const track = container.querySelector(
+            '[data-slot="toggle-switch-track"]',
+        );
+        expect(track).toHaveClass("bg-gray-300");
+        expect(track).not.toHaveClass("ring-1", "ring-gray-400");
+    });
 });

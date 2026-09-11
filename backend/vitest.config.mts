@@ -17,23 +17,23 @@ export default defineConfig({
             include: ["src/lib/**"],
             // No-regression RATCHET floor, not a target. src/lib/** spans the
             // tested libs (access, storage keys/dispositions, downloadTokens,
-            // userApiKeys provider/env checks, chat doc resolution, safeError,
+            // userApiKeys provider/env checks, chat doc resolution,
             // llm model resolution, chat citations, userLookup,
             // documentVersions, userDataCleanup, docxTrackedChanges,
-            // documentTypes, chat prompts, systemWorkflows) AND the large,
-            // still-untested feature libs (mcp, chat tool
-            // dispatch, llm providers, spreadsheet handling), so the global
-            // number is still low. Measured on this tree: 23.88% statements,
-            // 17.98% branches, 23.06% functions, 23.79% lines. These floors
-            // sit just below that (rounded down to whole percents) so CI
+            // documentTypes, chat prompts, workflow catalog ingestion) AND the large,
+            // lightly tested feature libs (courtlistener, mcp, chat tool
+            // dispatch, llm providers, spreadsheet handling). Measured on
+            // this tree: 52.72% statements, 46.31% branches, 53.24% functions,
+            // 54.11% lines. These floors sit just below that (rounded down to
+            // whole percents) so CI
             // fails on a *drop*. Floors only go up: when you add tests, raise
             // them in the same PR. Backlog + per-area status:
             // docs/testing-coverage.md.
             thresholds: {
-                statements: 23,
-                branches: 17,
-                functions: 23,
-                lines: 23,
+                statements: 52,
+                branches: 46,
+                functions: 53,
+                lines: 54,
             },
         },
     },

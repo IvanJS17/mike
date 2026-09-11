@@ -5,6 +5,7 @@ import request from "supertest";
 // request time (not import time), so setting them here is early enough even
 // though imported modules evaluate before this assignment runs.
 process.env.SUPABASE_URL = "http://supabase.test.local";
+process.env.SUPABASE_PUBLISHABLE_KEY = "test-publishable-key";
 process.env.SUPABASE_SECRET_KEY = "test-service-key";
 
 // Mock the supabase-js client factory so the real requireAuth middleware never
@@ -18,19 +19,32 @@ vi.mock("@supabase/supabase-js", () => ({
     })),
 }));
 
-import { app } from "../../app";
+import { app, configuredAllowedOrigins } from "../../app";
 
 const ALLOWED_ORIGIN = process.env.FRONTEND_URL ?? "http://localhost:3000";
 
 describe("CORS allowlist", () => {
+    it("includes deployed Word and explicitly configured client origins", () => {
+        const origins = configuredAllowedOrigins({
+            FRONTEND_URL: "https://app.example.com",
+            WORD_ADDIN_URL: "https://word.example.com",
+            ALLOWED_ORIGINS:
+                "https://review.example.com, https://admin.example.com ",
+        });
+
+        expect([...origins]).toEqual([
+            "https://app.example.com",
+            "https://word.example.com",
+            "https://review.example.com",
+            "https://admin.example.com",
+        ]);
+    });
     it("reflects an allowlisted origin with credentials", async () => {
         const res = await request(app)
             .options("/chat")
             .set("Origin", ALLOWED_ORIGIN)
             .set("Access-Control-Request-Method", "POST");
-        expect(res.headers["access-control-allow-origin"]).toBe(
-            ALLOWED_ORIGIN,
-        );
+        expect(res.headers["access-control-allow-origin"]).toBe(ALLOWED_ORIGIN);
         expect(res.headers["access-control-allow-credentials"]).toBe("true");
     });
 

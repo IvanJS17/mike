@@ -1,4 +1,9 @@
-import { type DocIndex, resolveDoc } from "./types";
+import { type DocIndex, type DocStore, resolveDoc } from "./types";
+import {
+  sourceDocumentType,
+  type SourceDocumentQuote,
+} from "../sourceDocuments";
+import { extractDelimitedBlock } from "../textBlocks";
 
 // ---------------------------------------------------------------------------
 // Internal citation parse types
@@ -24,21 +29,7 @@ type ParsedDocumentCitation = {
   quotes: DocumentQuote[];
 };
 
-type ParsedCaseCitation = {
-  kind: "case";
-  ref: number;
-  cluster_id: number;
-  quotes: {
-    opinionId: number | null;
-    type: string | null;
-    author: string | null;
-    quote: string;
-  }[];
-};
-
-type ParsedCitation = ParsedDocumentCitation | ParsedCaseCitation;
-
-function normalizeCitation(raw: unknown): ParsedCitation | null {
+function normalizeCitation(raw: unknown): ParsedDocumentCitation | null {
   if (!raw || typeof raw !== "object") return null;
   const c = raw as Record<string, unknown>;
   const markerRef =
@@ -53,25 +44,6 @@ function normalizeCitation(raw: unknown): ParsedCitation | null {
         : null;
   if (typeof ref !== "number") return null;
   const quote = typeof c.quote === "string" ? c.quote : c.text;
-
-  const rawClusterId =
-    typeof c.cluster_id === "number"
-      ? c.cluster_id
-      : typeof c.clusterId === "number"
-        ? c.clusterId
-        : typeof c.cluster_id === "string"
-          ? Number.parseInt(c.cluster_id, 10)
-          : typeof c.clusterId === "string"
-            ? Number.parseInt(c.clusterId, 10)
-            : NaN;
-  if (Number.isFinite(rawClusterId) && rawClusterId > 0) {
-    const quotes = normalizeCaseCitationQuotes(c);
-    if (!quotes.length) {
-      if (typeof quote !== "string" || !quote) return null;
-      quotes.push({ opinionId: null, type: null, author: null, quote });
-    }
-    return { kind: "case", ref, cluster_id: Math.floor(rawClusterId), quotes };
-  }
 
   if (typeof c.doc_id !== "string") return null;
   const quotes = normalizeDocumentCitationQuotes(c);
@@ -141,43 +113,10 @@ function normalizeDocumentCitationQuotes(
     .filter((quote): quote is DocumentQuote => !!quote);
 }
 
-function normalizeCaseCitationQuotes(c: Record<string, unknown>) {
-  if (!Array.isArray(c.quotes)) return [];
-  return c.quotes
-    .slice(0, 3)
-    .map((raw) => {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-      const row = raw as Record<string, unknown>;
-      const text = typeof row.quote === "string" ? row.quote : row.text;
-      if (typeof text !== "string" || !text.trim()) return null;
-      const opinionId =
-        typeof row.opinion_id === "number" && Number.isFinite(row.opinion_id)
-          ? Math.floor(row.opinion_id)
-          : typeof row.opinionId === "number" && Number.isFinite(row.opinionId)
-            ? Math.floor(row.opinionId)
-            : null;
-      return {
-        opinionId,
-        type: typeof row.type === "string" ? row.type : null,
-        author: typeof row.author === "string" ? row.author : null,
-        quote: text,
-      };
-    })
-    .filter(
-      (quote): quote is {
-        opinionId: number | null;
-        type: string | null;
-        author: string | null;
-        quote: string;
-      } => !!quote,
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Citation block constants and parsers
 // ---------------------------------------------------------------------------
 
-export const CITATIONS_BLOCK_RE = /<CITATIONS>\s*([\s\S]*?)\s*<\/CITATIONS>/;
 export const CITATIONS_OPEN_TAG = "<CITATIONS>";
 export const CITATIONS_CLOSE_TAG = "</CITATIONS>";
 
@@ -188,14 +127,17 @@ type CitationParseDiagnostics = {
 };
 
 export function parseCitationsWithDiagnostics(text: string): {
-  citations: ParsedCitation[];
+  citations: ParsedDocumentCitation[];
   diagnostics: CitationParseDiagnostics;
 } {
-  const match = text.match(CITATIONS_BLOCK_RE);
-  if (!match) {
+  const raw = extractDelimitedBlock(
+    text,
+    CITATIONS_OPEN_TAG,
+    CITATIONS_CLOSE_TAG,
+  );
+  if (raw === null) {
     return { citations: [], diagnostics: { hasBlock: false, rawLength: 0, error: null } };
   }
-  const raw = match[1] ?? "";
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) {
@@ -205,7 +147,7 @@ export function parseCitationsWithDiagnostics(text: string): {
       };
     }
     return {
-      citations: parsed.map(normalizeCitation).filter((c): c is ParsedCitation => c !== null),
+      citations: parsed.map(normalizeCitation).filter((c): c is ParsedDocumentCitation => c !== null),
       diagnostics: { hasBlock: true, rawLength: raw.length, error: null },
     };
   } catch (error) {
@@ -220,16 +162,16 @@ export function parseCitationsWithDiagnostics(text: string): {
   }
 }
 
-export function parseCitations(text: string): ParsedCitation[] {
+export function parseCitations(text: string): ParsedDocumentCitation[] {
   return parseCitationsWithDiagnostics(text).citations;
 }
 
-export function parsePartialCitationObjects(text: string): ParsedCitation[] {
+export function parsePartialCitationObjects(text: string): ParsedDocumentCitation[] {
   const beforeClose = text.split(CITATIONS_CLOSE_TAG)[0] ?? text;
   const arrayStart = beforeClose.indexOf("[");
   if (arrayStart < 0) return [];
 
-  const parsed: ParsedCitation[] = [];
+  const parsed: ParsedDocumentCitation[] = [];
   let inString = false;
   let escaped = false;
   let depth = 0;
@@ -263,37 +205,41 @@ export function parsePartialCitationObjects(text: string): ParsedCitation[] {
 }
 
 export function createCitation(
-  citation: ParsedCitation,
+  citation: ParsedDocumentCitation,
   docIndex: DocIndex,
+  docStore?: DocStore,
 ) {
-  // Legacy case-shaped entries can still appear from model output that reuses
-  // outdated legal citation formats, so render them with no source data rather
-  // than fabricating metadata.
-  if (citation.kind === "case") {
-    return {
-      type: "citation_data",
-      kind: "case",
-      ref: citation.ref,
-      cluster_id: citation.cluster_id,
-      case_name: null,
-      citation: null,
-      url: null,
-      pdfUrl: null,
-      dateFiled: null,
-      quotes: citation.quotes,
-    };
-  }
-
   const docInfo = resolveDoc(citation.doc_id, docIndex);
+  const requestScopedDocument = docStore?.get(citation.doc_id);
+  const documentId = docInfo?.document_id ?? citation.doc_id;
+  const filename =
+    docInfo?.filename ?? requestScopedDocument?.filename ?? citation.doc_id;
+  const quotes: SourceDocumentQuote[] = citation.quotes.map((quote) => ({
+    quote: quote.quote,
+    target: {
+      page: quote.page,
+      ...(quote.sheet ? { sheet: quote.sheet } : {}),
+      ...(quote.cell ? { cell: quote.cell } : {}),
+    },
+  }));
   return {
     type: "citation_data",
     kind: "document",
     ref: citation.ref,
+    document: {
+      document_id: documentId,
+      title: filename,
+      type: sourceDocumentType(filename),
+      metadata: [],
+      quotes,
+      version_id: docInfo?.version_id ?? null,
+      version_number: docInfo?.version_number ?? null,
+    },
     doc_id: citation.doc_id,
     document_id: docInfo?.document_id,
     version_id: docInfo?.version_id ?? null,
     version_number: docInfo?.version_number ?? null,
-    filename: docInfo?.filename ?? citation.doc_id,
+    filename,
     page: citation.page,
     quote: citation.quote,
     sheet: citation.sheet,

@@ -1,11 +1,12 @@
 import type { RefObject } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
 import remarkGfm from "remark-gfm";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import type { Citation } from "../../shared/types";
-import { RESPONSE_GLASS_ANNOTATION, withoutMarkdownNode } from "./messageStyles";
+import { CitationPillUI } from "@/shared/ui/CitationPillUI";
+import { withoutMarkdownNode } from "./messageStyles";
 import { citationTooltip } from "./CitationSources";
 import {
     citationVerificationAriaLabel,
@@ -15,11 +16,13 @@ import {
 export function MarkdownContent({
     text,
     inlineCitationTargets,
+    activeCitation,
     onCitationClick,
     divRef,
 }: {
     text: string;
     inlineCitationTargets: Citation[];
+    activeCitation?: Citation | null;
     onCitationClick?: (c: Citation) => void;
     divRef?: RefObject<HTMLDivElement | null>;
 }) {
@@ -34,7 +37,6 @@ export function MarkdownContent({
                     remarkGfm,
                 ]}
                 rehypePlugins={[rehypeKatex]}
-                urlTransform={defaultUrlTransform}
                 components={{
                     table: (props) => (
                         <div className="overflow-x-auto my-4 rounded-lg">
@@ -146,7 +148,10 @@ export function MarkdownContent({
                         />
                     ),
                     em: (props) => (
-                        <em className="italic" {...withoutMarkdownNode(props)} />
+                        <em
+                            className="italic"
+                            {...withoutMarkdownNode(props)}
+                        />
                     ),
                     code: (props) => {
                         const { children, ...codeProps } =
@@ -159,21 +164,20 @@ export function MarkdownContent({
                             if (annotation) {
                                 const tooltipText = citationTooltip(annotation);
                                 return (
-                                    <button
+                                    <CitationPillUI
+                                        active={activeCitation === annotation}
                                         onClick={() =>
                                             onCitationClick?.(annotation)
                                         }
                                         data-citation-ref={annotation.ref}
-                                        className={`${RESPONSE_GLASS_ANNOTATION} ${citationVerificationPillClassName(annotation)} mx-0.5 align-super`}
-                                        aria-label={
-                                            citationVerificationAriaLabel(
-                                                annotation,
-                                            )
-                                        }
+                                        className={`${citationVerificationPillClassName(annotation)} mx-0.5 align-super`}
+                                        aria-label={citationVerificationAriaLabel(
+                                            annotation,
+                                        )}
                                         title={tooltipText}
                                     >
                                         {annotation.ref}
-                                    </button>
+                                    </CitationPillUI>
                                 );
                             }
                         }
@@ -195,19 +199,6 @@ export function MarkdownContent({
                     a: (props) => {
                         const { href, children, ...anchorProps } =
                             withoutMarkdownNode(props);
-                        if (href) {
-                            return (
-                                <a
-                                    href={href}
-                                    className="text-blue-600 hover:text-blue-700 underline"
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    {...anchorProps}
-                                >
-                                    {children}
-                                </a>
-                            );
-                        }
                         return (
                             <a
                                 href={href}

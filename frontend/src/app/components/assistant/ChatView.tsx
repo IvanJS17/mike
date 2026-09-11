@@ -10,6 +10,10 @@ import type { ChatInputHandle } from "./ChatInput";
 import { AskInputPopup } from "./AskInputPopup";
 import {
     AssistantSidePanel,
+    assistantSidePanelTabId,
+    reorderAssistantSidePanelTabs,
+    upsertAssistantSidePanelTab,
+    type AssistantTabDropPosition,
     type AssistantSidePanelTab,
 } from "./AssistantSidePanel";
 import { AssistantWorkflowModal } from "./AssistantWorkflowModal";
@@ -19,12 +23,19 @@ import type {
     EditAnnotation,
     Message,
 } from "../shared/types";
+import {
+    panelDocumentFromCitation,
+    panelDocumentType,
+} from "../shared/types";
 import { useSidebar } from "@/app/contexts/SidebarContext";
 import { invalidateDocxBytes } from "@/app/hooks/useFetchDocxBytes";
-import type { ModelRoute } from "@/app/lib/mikeApi";
+import { resolvePanelDocumentVersion } from "./panelDocumentVersion";
+import { LIQUID_GLASS_TRANSLUCENT_ACTION_CLASS } from "@/app/components/ui/liquid-surface";
 
 interface Props {
     chatId?: string | null;
+    chatModel?: string | null;
+    chatReasoningLevel?: NonNullable<Message["reasoning"]> | null;
     messages: Message[];
     isResponseLoading: boolean;
     handleChat: (
@@ -38,7 +49,6 @@ interface Props {
         },
     ) => Promise<string | null>;
     cancel: () => void;
-    route?: ModelRoute | null;
 }
 
 const ASSISTANT_PANEL_TRANSITION_MS = 500;
@@ -56,11 +66,12 @@ function isSmallScreen() {
 
 export function ChatView({
     chatId,
+    chatModel,
+    chatReasoningLevel,
     messages,
     isResponseLoading,
     handleChat,
     cancel,
-    route,
 }: Props) {
     const [tabs, setTabs] = useState<AssistantSidePanelTab[]>([]);
     const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -84,6 +95,9 @@ export function ChatView({
     );
     const { setSidebarOpen } = useSidebar();
     const panelCloseTimerRef = useRef<number | null>(null);
+    const activeTab = tabs.find((tab) => tab.id === activeTabId);
+    const activeCitation =
+        activeTab?.kind === "citation" ? activeTab.citation : null;
 
     useEffect(() => {
         // eslint-disable-next-line react-hooks/set-state-in-effect -- reset per-chat UI state when switching chats
@@ -180,32 +194,35 @@ export function ChatView({
         [activeTabId, hidePanel, unmountPanel],
     );
 
+    const reorderTabs = useCallback(
+        (
+            draggedTabId: string,
+            targetTabId: string,
+            position: AssistantTabDropPosition,
+        ) => {
+            setTabs((current) =>
+                reorderAssistantSidePanelTabs(
+                    current,
+                    draggedTabId,
+                    targetTabId,
+                    position,
+                ),
+            );
+        },
+        [],
+    );
+
     /**
-     * One tab per document. If a tab for `tab.documentId` already exists,
+     * One tab per normalized document version. If a tab already exists,
      * the panel stays mounted and only the header-relevant fields swap
      * (kind, citation/edit, version, filename). Per-tab UI state — the
      * dismissable warning and the saved scroll position — is preserved
      * so switching headers doesn't blow away viewer state. If no tab
-     * exists for the document, a new one is appended.
+     * exists for the version, a new one is appended.
      */
     const upsertTab = useCallback(
         (tab: AssistantSidePanelTab) => {
-            setTabs((prev) => {
-                const idx = prev.findIndex((t) => t.documentId === tab.documentId);
-                if (idx >= 0) {
-                    const existing = prev[idx];
-                    const copy = prev.slice();
-                    copy[idx] =
-                        {
-                            ...tab,
-                            id: existing.id,
-                            warning: existing.warning,
-                            initialScrollTop: existing.initialScrollTop,
-                        };
-                    return copy;
-                }
-                return [...prev, tab];
-            });
+            setTabs((prev) => upsertAssistantSidePanelTab(prev, tab));
             setActiveTabId(tab.id);
             showPanel();
         },
@@ -217,26 +234,24 @@ export function ChatView({
      * AssistantMessage when the user clicks a numbered citation pill.
      */
     const openCitation = useCallback(
-        (citation: Citation, options?: { showQuotes?: boolean }) => {
+        async (citation: Citation, options?: { showQuotes?: boolean }) => {
             const showQuotes = options?.showQuotes ?? true;
+            const document = await resolvePanelDocumentVersion(
+                panelDocumentFromCitation(citation, showQuotes),
+            );
+            if (!document) return;
             if (!showQuotes) {
                 upsertTab({
                     kind: "document",
-                    id: citation.document_id,
-                    documentId: citation.document_id,
-                    filename: citation.filename,
-                    versionId: citation.version_id ?? null,
-                    versionNumber: citation.version_number ?? null,
+                    id: assistantSidePanelTabId(document),
+                    document,
                 });
                 return;
             }
             upsertTab({
                 kind: "citation",
-                id: citation.document_id,
-                documentId: citation.document_id,
-                filename: citation.filename,
-                versionId: citation.version_id ?? null,
-                versionNumber: citation.version_number ?? null,
+                id: assistantSidePanelTabId(document),
+                document,
                 citation,
             });
         },
@@ -249,13 +264,19 @@ export function ChatView({
      */
     const openEditor = useCallback(
         (ann: EditAnnotation, filename: string, changeNumber?: number) => {
+            const document = {
+                document_id: ann.document_id,
+                title: filename,
+                type: panelDocumentType(filename),
+                metadata: [],
+                quotes: [],
+                version_id: ann.version_id ?? null,
+                version_number: ann.version_number ?? null,
+            };
             upsertTab({
                 kind: "edit",
-                id: ann.document_id,
-                documentId: ann.document_id,
-                filename,
-                versionId: ann.version_id ?? null,
-                versionNumber: ann.version_number ?? null,
+                id: assistantSidePanelTabId(document),
+                document,
                 edit: ann,
                 changeNumber,
             });
@@ -268,19 +289,26 @@ export function ChatView({
      * citation/edit — used by the download-card click.
      */
     const openDocument = useCallback(
-        (args: {
+        async (args: {
             documentId: string;
             filename: string;
             versionId: string | null;
             versionNumber: number | null;
         }) => {
+            const document = await resolvePanelDocumentVersion({
+                document_id: args.documentId,
+                title: args.filename,
+                type: panelDocumentType(args.filename),
+                metadata: [],
+                quotes: [],
+                version_id: args.versionId,
+                version_number: args.versionNumber,
+            });
+            if (!document) return;
             upsertTab({
                 kind: "document",
-                id: args.documentId,
-                documentId: args.documentId,
-                filename: args.filename,
-                versionId: args.versionId,
-                versionNumber: args.versionNumber,
+                id: assistantSidePanelTabId(document),
+                document,
             });
         },
         [upsertTab],
@@ -388,7 +416,7 @@ export function ChatView({
             // Surface the warning on every tab tied to this document.
             setTabs((prev) =>
                 prev.map((t) =>
-                    t.documentId === args.documentId
+                    t.document.document_id === args.documentId
                         ? { ...t, warning: args.message }
                         : t,
                 ),
@@ -594,7 +622,7 @@ export function ChatView({
                 {/* Scrollable messages */}
                 <div
                     ref={messagesContainerRef}
-                    className="flex-1 w-full overflow-y-auto"
+                    className="assistant-chat-message-fade flex-1 w-full overflow-y-auto"
                     style={{ scrollbarGutter: "stable both-edges" }}
                 >
                     <div
@@ -605,14 +633,14 @@ export function ChatView({
                             <div className="space-y-6 md:space-y-8 w-full">
                                 <div className="flex justify-end">
                                     <div className="bg-gray-100 rounded-2xl p-4 w-2/5">
-                                        <div className="h-4 bg-gradient-to-r from-gray-200 via-gray-300 to-gray-200 bg-[length:200%_100%] animate-[shimmer_2s_ease-in-out_infinite] rounded w-full" />
+                                        <div className="theme-shimmer h-4 bg-[length:200%_100%] animate-[shimmer_2s_ease-in-out_infinite] rounded w-full" />
                                     </div>
                                 </div>
                                 <div className="space-y-3">
                                     {[1, 2, 3, 4].map((i) => (
                                         <div
                                             key={i}
-                                            className={`h-4 bg-gradient-to-r from-gray-200 via-gray-300 to-gray-200 bg-[length:200%_100%] animate-[shimmer_2s_ease-in-out_infinite] rounded ${i === 3 ? "w-5/6" : i === 4 ? "w-4/6" : "w-full"}`}
+                                            className={`theme-shimmer h-4 bg-[length:200%_100%] animate-[shimmer_2s_ease-in-out_infinite] rounded ${i === 3 ? "w-5/6" : i === 4 ? "w-4/6" : "w-full"}`}
                                         />
                                     ))}
                                 </div>
@@ -631,7 +659,7 @@ export function ChatView({
                                     .lastIndexOf("assistant");
                                 return messages.map((msg, i) => (
                                     <div
-                                        key={i}
+                                        key={msg.id ?? i}
                                         ref={
                                             i === lastUserIndex
                                                 ? latestUserMessageRef
@@ -643,6 +671,22 @@ export function ChatView({
                                                 content={msg.content ?? ""}
                                                 files={msg.files}
                                                 workflow={msg.workflow}
+                                                onFileClick={(file) => {
+                                                    if (!file.document_id)
+                                                        return;
+                                                    openDocument({
+                                                        documentId:
+                                                            file.document_id,
+                                                        filename:
+                                                            file.filename,
+                                                        versionId:
+                                                            file.version_id ??
+                                                            null,
+                                                        versionNumber:
+                                                            file.version_number ??
+                                                            null,
+                                                    });
+                                                }}
                                             />
                                         ) : (
                                             <AssistantMessage
@@ -662,15 +706,21 @@ export function ChatView({
                                                 citationStatus={
                                                     msg.citationStatus
                                                 }
+                                                activeCitation={
+                                                    activeCitation
+                                                }
                                                 onCitationClick={(citation) =>
-                                                    openCitation(citation)
+                                                    void openCitation(citation)
                                                 }
                                                 onOpenCitationSource={(
                                                     citation,
                                                 ) =>
-                                                    openCitation(citation, {
-                                                        showQuotes: false,
-                                                    })
+                                                    void openCitation(
+                                                        citation,
+                                                        {
+                                                            showQuotes: false,
+                                                        },
+                                                    )
                                                 }
                                                 minHeight={
                                                     i === lastAssistantIndex
@@ -724,7 +774,7 @@ export function ChatView({
                     >
                         <button
                             onClick={scrollToBottom}
-                            className="rounded-full p-2 cursor-pointer transition-all bg-white/30 shadow-[0_5px_16px_rgba(15,23,42,0.13),inset_0_1px_0_rgba(255,255,255,0.75),inset_0_-8px_18px_rgba(255,255,255,0.26)] backdrop-blur-xl hover:bg-white/45 hover:shadow-[0_7px_20px_rgba(15,23,42,0.16),inset_0_1px_0_rgba(255,255,255,0.85),inset_0_-8px_18px_rgba(255,255,255,0.32)]"
+                            className={`cursor-pointer rounded-full p-2 transition-all ${LIQUID_GLASS_TRANSLUCENT_ACTION_CLASS}`}
                         >
                             <ArrowDown className="h-6 w-6 text-gray-500" />
                         </button>
@@ -735,7 +785,7 @@ export function ChatView({
                 <div className="absolute bottom-3 left-0 right-0 w-full z-30">
                     <div className="pointer-events-none absolute -bottom-3 left-0 right-0 z-0">
                         <div className="mx-auto h-7 w-full max-w-4xl px-4 md:px-6">
-                            <div className="h-full rounded-t-[20px] bg-white/50 backdrop-blur-[1px]" />
+                            <div className="h-full rounded-t-[20px] bg-app-background" />
                         </div>
                     </div>
                     <div
@@ -775,7 +825,21 @@ export function ChatView({
                                     onSubmit={handleChat}
                                     onCancel={cancel}
                                     isLoading={isResponseLoading}
-                                    route={route}
+                                    chatKey={chatId}
+                                    chatModel={chatModel}
+                                    chatReasoningLevel={chatReasoningLevel}
+                                    onDocumentClick={(document) =>
+                                        openDocument({
+                                            documentId: document.id,
+                                            filename: document.filename,
+                                            versionId:
+                                                document.current_version_id ??
+                                                null,
+                                            versionNumber:
+                                                document.active_version_number ??
+                                                null,
+                                        })
+                                    }
                                 />
                             )}
                         </div>
@@ -800,6 +864,7 @@ export function ChatView({
                         onActivateTab={setActiveTabId}
                         onCloseTab={closeTab}
                         onCloseAll={closeAllTabs}
+                        onReorderTabs={reorderTabs}
                         isEditorReloading={(documentId) =>
                             reloadingDocIds.has(documentId)
                         }

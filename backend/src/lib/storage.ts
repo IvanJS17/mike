@@ -74,35 +74,6 @@ export async function uploadFile(
   );
 }
 
-/** Upload to an explicit bucket (used by the W1.14 audit-export job). */
-export async function uploadFileToBucket(
-  bucket: string,
-  key: string,
-  content: ArrayBuffer | Buffer,
-  contentType: string,
-): Promise<void> {
-  requireStorageConfig();
-  const client = getClient();
-  await client.send(
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      Body: Buffer.isBuffer(content) ? content : Buffer.from(content),
-      ContentType: contentType,
-    }),
-  );
-}
-
-/** Delete an object in an explicit bucket (W1.14 audit-export retention). */
-export async function deleteFileFromBucket(
-  bucket: string,
-  key: string,
-): Promise<void> {
-  if (!storageEnabled) return;
-  const client = getClient();
-  await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
-}
-
 // ---------------------------------------------------------------------------
 // Download
 // ---------------------------------------------------------------------------
@@ -117,8 +88,48 @@ export async function downloadFile(key: string): Promise<ArrayBuffer | null> {
     if (!response.Body) return null;
     const bytes = await response.Body.transformToByteArray();
     return bytes.buffer as ArrayBuffer;
-  } catch {
+  } catch (error) {
+    console.error("[storage] downloadFile failed", {
+      key,
+      error: error,
+    });
     return null;
+  }
+}
+
+// Approved artifacts need create-only writes and a read that does not turn
+// dependency failures into absence. Ordinary mutable-document helpers below
+// retain their separate semantics.
+export async function uploadFileIfAbsent(
+  key: string,
+  bytes: Uint8Array,
+  contentType: string,
+): Promise<"created" | "exists"> {
+  requireStorageConfig();
+  const body = Buffer.from(bytes);
+  try {
+    await getClient().send(new PutObjectCommand({
+      Bucket: BUCKET, Key: key, Body: body, ContentType: contentType,
+      IfNoneMatch: "*",
+    }));
+    return "created";
+  } catch (error) {
+    if ((error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode === 412)
+      return "exists";
+    throw new Error("Artifact storage write failed");
+  }
+}
+
+export async function downloadFileStrict(key: string): Promise<Uint8Array | null> {
+  requireStorageConfig();
+  try {
+    const response = await getClient().send(new S3Commands.GetObjectCommand({ Bucket: BUCKET, Key: key }));
+    if (!response.Body) throw new Error("Missing object body");
+    return new Uint8Array(await response.Body.transformToByteArray());
+  } catch (error) {
+    if ((error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode === 404)
+      return null;
+    throw new Error("Artifact storage read failed");
   }
 }
 
@@ -131,31 +142,6 @@ export async function listFiles(prefix: string): Promise<string[]> {
     const response = await client.send(
       new ListObjectsV2Command({
         Bucket: BUCKET,
-        Prefix: prefix,
-        ContinuationToken,
-      }),
-    );
-    for (const item of response.Contents ?? []) {
-      if (item.Key) keys.push(item.Key);
-    }
-    ContinuationToken = response.NextContinuationToken;
-  } while (ContinuationToken);
-  return keys;
-}
-
-/** List objects in an explicit bucket (W1.14 audit-export retention). */
-export async function listFilesFromBucket(
-  bucket: string,
-  prefix: string,
-): Promise<string[]> {
-  if (!storageEnabled) return [];
-  const client = getClient();
-  const keys: string[] = [];
-  let ContinuationToken: string | undefined;
-  do {
-    const response = await client.send(
-      new ListObjectsV2Command({
-        Bucket: bucket,
         Prefix: prefix,
         ContinuationToken,
       }),
@@ -203,7 +189,11 @@ export async function getSignedUrl(
       ResponseContentDisposition: responseContentDisposition,
     }) as any;
     return await awsGetSignedUrl(client, command, { expiresIn });
-  } catch {
+  } catch (error) {
+    console.error("[storage] getSignedUrl failed", {
+      key,
+      error: error,
+    });
     return null;
   }
 }
@@ -270,6 +260,16 @@ export function versionStorageKey(
   filename: string,
 ): string {
   return `documents/${userId}/${docId}/versions/${versionSlug}${storageExtension(filename, ".bin")}`;
+}
+
+export function workflowReferenceKey(
+  userId: string,
+  workflowId: string,
+  referenceId: string,
+  contentHash: string,
+  filename: string,
+): string {
+  return `workflow-references/${userId}/${workflowId}/${referenceId}/${contentHash}${storageExtension(filename, ".bin")}`;
 }
 
 function storageExtension(filename: string, fallback: string): string {

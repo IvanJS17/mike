@@ -1,13 +1,14 @@
 "use client";
 
 import { useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { CheckSquare } from "@/app/components/ui/check-square";
 import { SearchBar } from "@/app/components/ui/search-bar";
 import { ClosedProjectSvgIcon } from "@/app/components/shared/FolderSvgIcon";
 import type { Project } from "../shared/types";
 import { Modal } from "./Modal";
 import {
-    APP_SURFACE_ACTIVE_CLASS,
-    APP_SURFACE_HOVER_CLASS,
+    LIQUID_GLASS_MODAL_ROW_HOVER_CLASS,
+    LIQUID_GLASS_MODAL_ROW_SELECTED_CLASS,
 } from "@/app/components/ui/liquid-surface";
 
 type PrimaryAction = Omit<
@@ -105,15 +106,15 @@ export function ProjectPickerModal({
                                                 isSelected ? null : project.id,
                                             )
                                         }
-                                        className={`w-full flex rounded-md items-center gap-2 px-2 py-2 text-xs transition-all text-left ${isSelected ? APP_SURFACE_ACTIVE_CLASS : APP_SURFACE_HOVER_CLASS}`}
+                                        className={`w-full flex rounded-md items-center gap-2 px-2 py-2 text-xs transition-all text-left ${isSelected ? LIQUID_GLASS_MODAL_ROW_SELECTED_CLASS : LIQUID_GLASS_MODAL_ROW_HOVER_CLASS}`}
                                     >
-                                        <span
-                                            className={`shrink-0 h-3.5 w-3.5 rounded border flex items-center justify-center ${isSelected ? "bg-gray-900 border-gray-900" : "border-gray-300"}`}
-                                        >
-                                            {isSelected && (
-                                                <span className="h-1.5 w-1.5 rounded-sm bg-white" />
-                                            )}
-                                        </span>
+                                        <CheckSquare
+                                            state={
+                                                isSelected
+                                                    ? "checked"
+                                                    : "unchecked"
+                                            }
+                                        />
                                         <ClosedProjectSvgIcon className="h-3.5 w-3.5 shrink-0" />
                                         <span
                                             className={`flex-1 truncate ${isSelected ? "text-gray-900" : "text-gray-700"}`}
