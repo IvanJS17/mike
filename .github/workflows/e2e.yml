@@ -43,9 +43,9 @@ jobs:
       # Explicitly keyless even if a repository secret exists.
       ANTHROPIC_API_KEY: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -105,7 +105,7 @@ jobs:
       # repository's own fresh-database schema — exactly what the README tells a
       # human to run on a new database (backend/schema.sql).
       - name: Start local Supabase
-        uses: supabase/setup-cli@v1
+        uses: supabase/setup-cli@v3
         with:
           # Keep CI reproducible and avoid the GitHub API call needed to resolve
           # `latest`, which can fail when the shared runner hits its rate limit.
@@ -210,7 +210,7 @@ jobs:
 
       # always() (not !cancelled()) so the report still uploads when the job is
       # cancelled by the timeout — that's exactly when you most need the traces.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: playwright-report

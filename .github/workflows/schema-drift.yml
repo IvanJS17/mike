@@ -24,10 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -47,7 +47,7 @@ jobs:
           RUN_RECOVERY_CORE_CONVERGENCE_RUNTIME=1 RUN_RECOVERY_DRIVE_UPGRADE_RUNTIME=1 npm test -- src/__tests__/integration/recoveryCoreConvergence.runtime.test.ts src/__tests__/integration/recoveryDriveUpgrade.runtime.test.ts --no-file-parallelism 2>&1 | tee recovery-schema-proof.log
       - name: Preserve the actual verification log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: recovery-schema-proof
           path: backend/recovery-schema-proof.log
