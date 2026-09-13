@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import {
+    Brain,
     CornerDownRight,
     Loader2,
     Pencil,
@@ -358,6 +359,7 @@ export function ProjectPageHeader({
     onBackToProjects,
     onProjectRoot,
     onOpenDetails,
+    onOpenMemory,
     onDeleteProject,
     onSearchChange,
     onOpenPeople,
@@ -375,6 +377,7 @@ export function ProjectPageHeader({
     onBackToProjects: () => void;
     onProjectRoot: () => void;
     onOpenDetails: () => void;
+    onOpenMemory: () => void;
     onDeleteProject: () => void;
     onSearchChange: (search: string) => void;
     onOpenPeople: () => void;
@@ -470,6 +473,12 @@ export function ProjectPageHeader({
                                             : "View details",
                                         icon: Pencil,
                                         onSelect: onOpenDetails,
+                                    },
+                                    {
+                                        label: "Memory",
+                                        icon: Brain,
+                                        onSelect: onOpenMemory,
+                                        disabled: !project,
                                     },
                                     {
                                         label: "Delete",

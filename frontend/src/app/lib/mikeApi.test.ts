@@ -37,6 +37,7 @@ import {
     createWorkflow,
     deleteAccount,
     deleteAllChats,
+    deleteAllMemories,
     deleteAllProjects,
     deleteAllTabularReviews,
     deleteChat,
@@ -55,6 +56,7 @@ import {
     exportAccountData,
     exportAuditHistory,
     exportChatData,
+    exportMemoryData,
     exportTabularReviewsData,
     generateChatTitle,
     generateTabularColumnPrompt,
@@ -78,11 +80,13 @@ import {
     getProject,
     getProjectDirectoryLevel,
     getProjectFilterOptions,
+    getProjectMemory,
     getProjectPeople,
     getTabularChatMessages,
     getTabularChats,
     getTabularReview,
     getTabularReviewPeople,
+    getUserMemory,
     getUserProfile,
     getWorkflow,
     getWorkflowAddon,
@@ -136,6 +140,8 @@ import {
     searchProjectDirectory,
     searchLibraryDocuments,
     setMcpToolEnabled,
+    setProjectMemoryEnabled,
+    setUserMemoryEnabled,
     shareWorkflow,
     startMcpConnectorOAuth,
     streamChat,
@@ -148,12 +154,14 @@ import {
     unhideWorkflow,
     updateMcpConnector,
     updateProject,
+    updateProjectMemory,
     updateChatModel,
     updateChatReasoningLevel,
     updateLastSelectedChatSettings,
     updateTabularChatModel,
     updateTabularChatReasoningLevel,
     updateTabularReview,
+    updateUserMemory,
     updateUserMfaOnLogin,
     updateUserProfile,
     updateWorkflow,
@@ -2603,6 +2611,115 @@ describe("thin endpoint wrappers", () => {
             expect(init.credentials).toBe("include");
         },
     );
+});
+
+describe("memory API", () => {
+    type MemoryCase = {
+        name: string;
+        call: () => Promise<unknown>;
+        url: string;
+        method?: string; // defaults to GET (fetch's default when unset)
+        body?: unknown; // absent means the request must not carry a body
+    };
+
+    const cases: MemoryCase[] = [
+        {
+            name: "deleteAllMemories",
+            call: () => deleteAllMemories(),
+            url: "/user/memories",
+            method: "DELETE",
+        },
+        {
+            name: "getUserMemory",
+            call: () => getUserMemory(),
+            url: "/user/memory",
+        },
+        {
+            name: "updateUserMemory",
+            call: () => updateUserMemory("remember this", 3),
+            url: "/user/memory",
+            method: "PUT",
+            body: { content: "remember this", expected_revision: 3 },
+        },
+        {
+            name: "setUserMemoryEnabled",
+            call: () => setUserMemoryEnabled(false),
+            url: "/user/memory/settings",
+            method: "PATCH",
+            body: { enabled: false },
+        },
+        {
+            // The project id is encoded into the path, so slashes survive.
+            name: "getProjectMemory",
+            call: () => getProjectMemory("proj/1"),
+            url: "/projects/proj%2F1/memory",
+        },
+        {
+            name: "updateProjectMemory",
+            call: () => updateProjectMemory("proj/1", "case context", 7),
+            url: "/projects/proj%2F1/memory",
+            method: "PUT",
+            body: { content: "case context", expected_revision: 7 },
+        },
+        {
+            name: "setProjectMemoryEnabled",
+            call: () => setProjectMemoryEnabled("proj/1", true),
+            url: "/projects/proj%2F1/memory/settings",
+            method: "PATCH",
+            body: { enabled: true },
+        },
+    ];
+
+    it.each(cases)(
+        "$name → $method $url",
+        async ({ call, url, method, body }) => {
+            fetchMock.mockResolvedValue(jsonResponse({}));
+
+            await call();
+
+            const { url: actualUrl, init } = lastFetchCall();
+            expect(actualUrl).toBe(`/api${url}`);
+            expect(init.method ?? "GET").toBe(method ?? "GET");
+            if (body !== undefined) {
+                expect(JSON.parse(init.body as string)).toEqual(body);
+                expect(init.headers).toMatchObject({
+                    "Content-Type": "application/json",
+                });
+            } else {
+                expect(init.body).toBeUndefined();
+            }
+            expect(init.credentials).toBe("include");
+        },
+    );
+
+    it("forwards the abort signal to the read wrappers", async () => {
+        fetchMock.mockImplementation(() => Promise.resolve(jsonResponse({})));
+        const userController = new AbortController();
+        const projectController = new AbortController();
+
+        await getUserMemory(userController.signal);
+        expect(lastFetchCall().init.signal).toBe(userController.signal);
+
+        await getProjectMemory("p1", projectController.signal);
+        expect(lastFetchCall().init.signal).toBe(projectController.signal);
+    });
+
+    it("exportMemoryData hits the memory export route", async () => {
+        fetchMock.mockResolvedValue(
+            new Response("memory-bytes", {
+                status: 200,
+                headers: {
+                    "content-disposition": 'attachment; filename="memory.zip"',
+                },
+            }),
+        );
+
+        const { blob, filename } = await exportMemoryData();
+
+        expect(lastFetchCall().url).toBe("/api/user/memory/export");
+        expect(filename).toBe("memory.zip");
+        expect(await readBlobText(blob)).toBe("memory-bytes");
+    });
 });
 
 // ---------------------------------------------------------------------------

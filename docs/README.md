@@ -12,6 +12,8 @@
 
 ## Features and clients
 
+- [Scoped memory](memory.md) — app and project Markdown memory, permissions,
+  asynchronous learning, deletion, and operations
 - [Microsoft Word add-in](../word-addin/README.md) — concise setup and command
   reference
 - [Word add-in development and deployment](word-addin-development.md) — manual

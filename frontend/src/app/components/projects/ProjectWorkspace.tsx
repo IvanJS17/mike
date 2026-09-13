@@ -35,6 +35,7 @@ import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
 import { useAuth } from "@/app/contexts/AuthContext";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
 import { ProjectDetailsModal } from "./ProjectDetailsModal";
+import { ProjectMemoryModal } from "./ProjectMemoryModal";
 import {
     ProjectPageHeader,
     type ProjectWorkspaceSection,
@@ -115,6 +116,7 @@ export function ProjectWorkspaceProvider({
     const [projectChatsLoading, setProjectChatsLoading] = useState(false);
     const [peopleModalOpen, setPeopleModalOpen] = useState(false);
     const [projectDetailsOpen, setProjectDetailsOpen] = useState(false);
+    const [projectMemoryOpen, setProjectMemoryOpen] = useState(false);
     const [ownerOnlyAction, setOwnerOnlyAction] = useState<string | null>(null);
     const [deleteProjectConfirmOpen, setDeleteProjectConfirmOpen] =
         useState(false);
@@ -220,6 +222,14 @@ export function ProjectWorkspaceProvider({
     const prefetchProjectSections = useCallback(() => {
         void ensureProjectChats();
     }, [ensureProjectChats]);
+
+    // The memory dialog owns its own reads and writes; this keeps the loaded
+    // project row agreeing with them.
+    const syncProjectMemoryEnabled = useCallback((enabled: boolean) => {
+        setProject((current) =>
+            current ? { ...current, memory_enabled: enabled } : current,
+        );
+    }, []);
 
     const createChat = useCallback(async () => {
         setCreatingChat(true);
@@ -397,6 +407,7 @@ export function ProjectWorkspaceProvider({
                     onBackToProjects={() => router.push("/projects")}
                     onProjectRoot={openProjectRoot}
                     onOpenDetails={() => setProjectDetailsOpen(true)}
+                    onOpenMemory={() => setProjectMemoryOpen(true)}
                     onDeleteProject={requestProjectDelete}
                     onSearchChange={setSearch}
                     onOpenPeople={() => setPeopleModalOpen(true)}
@@ -427,6 +438,22 @@ export function ProjectWorkspaceProvider({
                     open={!!ownerOnlyAction}
                     action={ownerOnlyAction ?? undefined}
                     onClose={() => setOwnerOnlyAction(null)}
+                />
+
+                {/* LiTT has no `canDo` capability check (upstream granted
+                    content.edit / access.manage). The only signal available
+                    is `is_owner`, so both editing memory and toggling it are
+                    degraded to owner-only. */}
+                <ProjectMemoryModal
+                    key={projectId}
+                    open={projectMemoryOpen}
+                    onClose={() => setProjectMemoryOpen(false)}
+                    projectId={projectId}
+                    projectName={project?.name ?? null}
+                    projectLoading={projectLoading}
+                    canEdit={project?.is_owner !== false}
+                    canManage={project?.is_owner !== false}
+                    onMemoryEnabledChange={syncProjectMemoryEnabled}
                 />
 
                 <ProjectDetailsModal

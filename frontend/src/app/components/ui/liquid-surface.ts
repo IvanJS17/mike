@@ -7,6 +7,8 @@ import {
 export const LIQUID_TABLE_SURFACE_CLASS =
     `rounded-2xl ${LIQUID_GLASS_FLAT_CLASS}`;
 
+export const EDITOR_SURFACE_CLASS = `rounded-2xl ${LIQUID_GLASS_FLAT_CLASS}`;
+
 export const LIQUID_FLOAT_PANEL_SURFACE_CLASS =
     `rounded-2xl ${LIQUID_GLASS_FLOAT_CLASS} backdrop-blur-2xl`;
 
