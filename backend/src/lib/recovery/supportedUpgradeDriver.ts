@@ -197,6 +197,39 @@ export const KNOWN_SUPPORTED_MIGRATIONS: Readonly<
         "begin;\n",
     ),
   },
+  "20260910_06_recovery_scoped_memory_files.sql": {
+    sha256: "1f2063397e1c71d435642ce3f3c72f770d2a1863bdb4bfa894df7de38528b86d",
+    envelope: wrapped(
+        "-- LiTT sync S5 port of upstream 20260905_01_scoped_memory_files.sql; renamed to the merge-time stem 20260910_06 (recovery series).\n" +
+        "-- ADAPTED to LiTT invariants; deviations from upstream are marked \"LITT:\":\n" +
+        "--   * LITT: memory is opt-in. Every default upstream ships as true is false\n" +
+        "--     here: user_profiles.project_memory_default, memory_files.enabled, the\n" +
+        "--     backfill of existing accounts/projects, the new-user trigger and the\n" +
+        "--     scheduler auto-provision (which upstream would otherwise flip on).\n" +
+        "--     Creators enable a project explicitly; users enable their own scope.\n" +
+        "--   * LITT: claim_db_jobs/claim_db_job adopt upstream's leak-safe variant — a\n" +
+        "--     storage.cleanup pointer is never abandoned and failed cleanup jobs are\n" +
+        "--     re-claimed, matching the runner's retry-until-success policy.\n" +
+        "--   * LITT: begin/commit envelope with notify pgrst inside the transaction\n" +
+        "--     (recovery-series driver convention).\n" +
+        "-- Migration date: 2026-09-05\n" +
+        "\n" +
+        "begin;\n",
+    ),
+  },
+  "20260910_07_recovery_memory_safety_boundaries.sql": {
+    sha256: "20095e3aadc9129de90b555f9281f1cf27f4e4559f1f2d6953ca7c2479280c86",
+    envelope: wrapped(
+        "-- LiTT sync S5 port of upstream 20260909_01_memory_safety_boundaries.sql; renamed to the merge-time stem 20260910_07 (recovery series).\n" +
+        "-- ADAPTED to LiTT invariants; deviations from upstream are marked \"LITT:\":\n" +
+        "--   * LITT: delete_user_private_memories re-seeds the user scope disabled —\n" +
+        "--     wiping private memories must never re-enable the feature.\n" +
+        "--   * LITT: begin/commit envelope (notify pgrst already sits inside the body).\n" +
+        "-- Migration date: 2026-09-09\n" +
+        "\n" +
+        "begin;\n",
+    ),
+  },
 };
 
 function sha256(source: string): string {
