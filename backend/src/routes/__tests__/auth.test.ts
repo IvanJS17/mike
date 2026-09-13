@@ -16,6 +16,7 @@ const {
       signInWithPassword: vi.fn(),
       signUp: vi.fn(),
       signInWithOAuth: vi.fn(),
+      signInWithSSO: vi.fn(),
       exchangeCodeForSession: vi.fn(),
       resetPasswordForEmail: vi.fn(),
       signOut: vi.fn(),
@@ -79,6 +80,8 @@ describe("auth routes", () => {
     process.env.FRONTEND_URL = origin;
     process.env.NODE_ENV = "production";
     delete process.env.WORD_ADDIN_URL;
+    for (const key of ["SSO_ENABLED", "SSO_ALLOWED_DOMAINS"])
+      delete process.env[key];
     createRequestSupabase.mockReset().mockReturnValue(authClient);
     clearRequestAuthCookies.mockReset();
     issueAuthHandoff.mockReset();
@@ -150,6 +153,163 @@ describe("auth routes", () => {
         skipBrowserRedirect: true,
       },
     });
+  });
+
+  it("disables SSO initiation by default", async () => {
+    const response = await request(app)
+      .post("/auth/oauth")
+      .set("Origin", origin)
+      .send({ provider: "sso", email: "lawyer@example.com" });
+    expect(response.status).toBe(403);
+    expect(createRequestSupabase).not.toHaveBeenCalled();
+  });
+
+  it("extracts a normalized email domain and uses the shared callback", async () => {
+    process.env.SSO_ENABLED = "true";
+    process.env.SSO_ALLOWED_DOMAINS = "example.com, other.example";
+    authClient.auth.signInWithSSO.mockResolvedValue({
+      data: { url: "https://idp.example/saml" },
+      error: null,
+    });
+    const response = await request(app)
+      .post("/auth/oauth")
+      .set("Origin", origin)
+      .send({
+        provider: "sso",
+        email: " Lawyer@Example.COM ",
+        next: "//attacker.example",
+        callbackPath: "https://attacker.example",
+      });
+    expect(response.body).toEqual({ url: "https://idp.example/saml" });
+    expect(authClient.auth.signInWithSSO).toHaveBeenCalledWith({
+      domain: "example.com",
+      options: {
+        redirectTo: `${origin}/auth/callback?next=%2Fonboarding%2Fprofile`,
+        skipBrowserRedirect: true,
+      },
+    });
+  });
+
+  it("requires a company email and permits an allowed email domain", async () => {
+    process.env.SSO_ENABLED = "true";
+    const missing = await request(app)
+      .post("/auth/oauth")
+      .set("Origin", origin)
+      .send({ provider: "sso" });
+    expect(missing.body.code).toBe("invalid_request");
+    process.env.SSO_ALLOWED_DOMAINS = "default.example,other.example";
+    authClient.auth.signInWithSSO.mockResolvedValue({
+      data: { url: "https://idp.example/saml" },
+      error: null,
+    });
+    const response = await request(app)
+      .post("/auth/oauth")
+      .set("Origin", origin)
+      .send({
+        provider: "sso",
+        email: " Lawyer@OTHER.EXAMPLE ",
+        next: "/projects",
+      });
+    expect(response.status).toBe(200);
+    expect(authClient.auth.signInWithSSO).toHaveBeenCalledWith(
+      expect.objectContaining({
+        domain: "other.example",
+        options: expect.objectContaining({
+          redirectTo: `${origin}/auth/callback?next=%2Fprojects`,
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    "",
+    "example.com",
+    "https://example.com",
+    "*.example.com",
+    "user@example.com:443",
+    "user@-bad.example",
+    "user@example..com",
+    123,
+    null,
+    `user@${"a".repeat(64)}.com`,
+  ])("rejects invalid SSO email %s", async (email) => {
+    process.env.SSO_ENABLED = "true";
+    const response = await request(app)
+      .post("/auth/oauth")
+      .set("Origin", origin)
+      .send({ provider: "sso", email });
+    expect(response.status).toBe(400);
+    expect(createRequestSupabase).not.toHaveBeenCalled();
+  });
+
+  it("enforces exact domain allowlisting and trusted origins", async () => {
+    process.env.SSO_ENABLED = "true";
+    process.env.SSO_ALLOWED_DOMAINS = "example.com";
+    for (const email of [
+      "lawyer@other.example",
+      "lawyer@sub.example.com",
+      "lawyer@example.com.evil.test",
+    ]) {
+      const response = await request(app)
+        .post("/auth/oauth")
+        .set("Origin", origin)
+        .send({ provider: "sso", email });
+      expect(response.body.code).toBe("sso_domain_not_allowed");
+    }
+    const response = await request(app)
+      .post("/auth/oauth")
+      .set("Origin", "https://attacker.example")
+      .send({ provider: "sso", email: "lawyer@example.com" });
+    expect(response.status).toBe(403);
+    expect(createRequestSupabase).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for an invalid domain allowlist", async () => {
+    process.env.SSO_ENABLED = "true";
+    process.env.SSO_ALLOWED_DOMAINS = "example.com,,other.example";
+    const response = await request(app)
+      .post("/auth/oauth")
+      .set("Origin", origin)
+      .send({ provider: "sso", email: "lawyer@example.com" });
+    expect(response.status).toBe(500);
+    expect(response.body.code).toBe("internal_error");
+    expect(createRequestSupabase).not.toHaveBeenCalled();
+  });
+
+  it.each([400, 404, 429, 500])(
+    "sanitizes provider errors (%s)",
+    async (status) => {
+      process.env.SSO_ENABLED = "true";
+      authClient.auth.signInWithSSO.mockResolvedValue({
+        data: null,
+        error: { status, message: "private provider diagnostics" },
+      });
+      const response = await request(app)
+        .post("/auth/oauth")
+        .set("Origin", origin)
+        .send({ provider: "sso", email: "lawyer@example.com" });
+      expect(response.status).toBe(status < 500 ? 400 : 500);
+      expect(response.text).not.toContain("private provider diagnostics");
+    },
+  );
+
+  it("sanitizes thrown failures and missing redirects", async () => {
+    process.env.SSO_ENABLED = "true";
+    authClient.auth.signInWithSSO.mockRejectedValueOnce(
+      new Error("private diagnostics"),
+    );
+    authClient.auth.signInWithSSO.mockResolvedValueOnce({
+      data: {},
+      error: null,
+    });
+    for (let i = 0; i < 2; i++) {
+      const response = await request(app)
+        .post("/auth/oauth")
+        .set("Origin", origin)
+        .send({ provider: "sso", email: "lawyer@example.com" });
+      expect(response.status).toBe(500);
+      expect(response.text).not.toContain("private diagnostics");
+    }
   });
 
   it("does not reveal whether a password-reset email exists", async () => {
