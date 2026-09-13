@@ -41,6 +41,10 @@ import {
   contentTypeForDocumentType,
   shouldConvertToPdf,
 } from "../lib/documentTypes";
+import {
+  uniqueArchiveFilename,
+  zipExportLimitDetail,
+} from "../lib/zipExport";
 
 export const documentsRouter = Router();
 const isDev = process.env.NODE_ENV !== "production";
@@ -210,25 +214,174 @@ documentsRouter.get("/:documentId/display", requireAuth, async (req, res) => {
   }
 });
 
+export function collectFolderDescendantIds(
+  roots: Array<{ id: unknown }>,
+  allFolders: Array<{ id: unknown; parent_folder_id: unknown }>,
+) {
+  const selected = new Set(roots.map((folder) => String(folder.id)));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const folder of allFolders) {
+      const id = String(folder.id);
+      const parentId = folder.parent_folder_id
+        ? String(folder.parent_folder_id)
+        : null;
+      if (!parentId || !selected.has(parentId) || selected.has(id)) continue;
+      selected.add(id);
+      changed = true;
+    }
+  }
+  return [...selected];
+}
+
 // POST /single-documents/download-zip
+// Synchronous zip, kept for small selections (instant download, no polling).
+// Selections beyond the zipExport bounds are rejected here; the durable
+// "documents-zip" job handler exists for a future enqueue path.
 documentsRouter.post("/download-zip", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
   const userEmail = res.locals.userEmail as string | undefined;
-  const { document_ids } = req.body as { document_ids?: string[] };
+  const { document_ids, folder_ids } = req.body as {
+    document_ids?: string[];
+    folder_ids?: string[];
+  };
+  const documentIds = Array.isArray(document_ids)
+    ? [...new Set(document_ids.filter((id) => typeof id === "string"))]
+    : [];
+  const folderIds = Array.isArray(folder_ids)
+    ? [...new Set(folder_ids.filter((id) => typeof id === "string"))]
+    : [];
 
-  if (!Array.isArray(document_ids) || document_ids.length === 0)
-    return void res.status(400).json({ detail: "document_ids is required" });
-
+  if (documentIds.length === 0 && folderIds.length === 0)
+    return void res
+      .status(400)
+      .json({ detail: "document_ids or folder_ids is required" });
+  const requestedCountLimit = zipExportLimitDetail(documentIds.length, 0);
+  if (requestedCountLimit) {
+    return void res.status(413).json({ detail: requestedCountLimit });
+  }
   const db = createServerSupabase();
-  const { data: rawDocs, error } = await db
-    .from("documents")
-    .select("id, current_version_id, user_id, project_id")
-    .in("id", document_ids);
+  type DownloadDocumentRow = {
+    id: string;
+    current_version_id?: string | null;
+    user_id: string;
+    project_id: string | null;
+    storage_path?: string | null;
+    filename?: string | null;
+    source?: string | null;
+    active_version_number?: number | null;
+  };
+  const rawDocsById = new Map<string, DownloadDocumentRow>();
 
-  if (error) return void sendInternalError(res, error);
+  if (documentIds.length > 0) {
+    const { data, error } = await db
+      .from("documents")
+      .select("id, current_version_id, user_id, project_id, org_id")
+      .in("id", documentIds);
+    if (error) return void sendInternalError(res, error);
+    for (const doc of data ?? [])
+      rawDocsById.set(doc.id as string, doc as DownloadDocumentRow);
+  }
+
+  if (folderIds.length > 0) {
+    const [projectRootsResult, libraryRootsResult] = await Promise.all([
+      db
+        .from("project_subfolders")
+        .select("id, project_id, parent_folder_id")
+        .in("id", folderIds),
+      db
+        .from("library_folders")
+        .select("id, user_id, library_kind, parent_folder_id")
+        .in("id", folderIds)
+        .eq("user_id", userId),
+    ]);
+    if (projectRootsResult.error)
+      return void sendInternalError(res, projectRootsResult.error);
+    if (libraryRootsResult.error)
+      return void sendInternalError(res, libraryRootsResult.error);
+
+    const projectRoots = projectRootsResult.data ?? [];
+    const projectIds = [
+      ...new Set(projectRoots.map((folder) => folder.project_id as string)),
+    ];
+    const accessibleProjectIds = (
+      await Promise.all(
+        projectIds.map(async (projectId) => ({
+          projectId,
+          access: await checkProjectAccess(projectId, userId, userEmail, db),
+        })),
+      )
+    )
+      .filter((result) => result.access.ok)
+      .map((result) => result.projectId);
+
+    const accessibleProjectRoots = projectRoots.filter((folder) =>
+      accessibleProjectIds.includes(folder.project_id as string),
+    );
+    const libraryRoots = libraryRootsResult.data ?? [];
+    const libraryKinds = [
+      ...new Set(libraryRoots.map((folder) => folder.library_kind as string)),
+    ];
+
+    const [projectFoldersResult, libraryFoldersResult] = await Promise.all([
+      accessibleProjectIds.length > 0
+        ? db
+            .from("project_subfolders")
+            .select("id, project_id, parent_folder_id")
+            .in("project_id", accessibleProjectIds)
+        : Promise.resolve({ data: [], error: null }),
+      libraryKinds.length > 0
+        ? db
+            .from("library_folders")
+            .select("id, user_id, library_kind, parent_folder_id")
+            .eq("user_id", userId)
+            .in("library_kind", libraryKinds)
+        : Promise.resolve({ data: [], error: null }),
+    ]);
+    if (projectFoldersResult.error)
+      return void sendInternalError(res, projectFoldersResult.error);
+    if (libraryFoldersResult.error)
+      return void sendInternalError(res, libraryFoldersResult.error);
+
+    const projectFolderIds = collectFolderDescendantIds(
+      accessibleProjectRoots,
+      projectFoldersResult.data ?? [],
+    );
+    const libraryFolderIds = collectFolderDescendantIds(
+      libraryRoots,
+      libraryFoldersResult.data ?? [],
+    );
+
+    const folderDocumentResults = await Promise.all([
+      projectFolderIds.length > 0
+        ? db
+            .from("documents")
+            .select("id, current_version_id, user_id, project_id")
+            .in("folder_id", projectFolderIds)
+        : Promise.resolve({ data: [], error: null }),
+      libraryFolderIds.length > 0
+        ? db
+            .from("documents")
+            .select("id, current_version_id, user_id, project_id")
+            .in("library_folder_id", libraryFolderIds)
+        : Promise.resolve({ data: [], error: null }),
+    ]);
+    for (const result of folderDocumentResults) {
+      if (result.error) return void sendInternalError(res, result.error);
+      for (const doc of result.data ?? [])
+        rawDocsById.set(doc.id as string, doc as DownloadDocumentRow);
+    }
+  }
+
+  const resolvedCountLimit = zipExportLimitDetail(rawDocsById.size, 0);
+  if (resolvedCountLimit) {
+    return void res.status(413).json({ detail: resolvedCountLimit });
+  }
+
   // Filter to docs the user actually has access to (own + shared-project).
   const accessChecks = await Promise.all(
-    (rawDocs ?? []).map(async (d) => ({
+    [...rawDocsById.values()].map(async (d) => ({
       doc: d,
       access: await ensureDocAccess(
         d as { user_id: string; project_id: string | null },
@@ -238,36 +391,90 @@ documentsRouter.post("/download-zip", requireAuth, async (req, res) => {
       ),
     })),
   );
-  const docs = accessChecks
-    .filter((x) => x.access.ok)
-    .map((x) => x.doc as { id: string });
+  const docs = accessChecks.filter((x) => x.access.ok).map((x) => x.doc);
   if (!docs || docs.length === 0)
     return void res.status(404).json({ detail: "No documents found" });
 
+  await attachActiveVersionPaths(db, docs);
+  const activeDocs = docs.filter(
+    (
+      doc,
+    ): doc is DownloadDocumentRow & {
+      storage_path: string;
+    } => typeof doc.storage_path === "string" && doc.storage_path.length > 0,
+  );
+  if (activeDocs.length === 0)
+    return void res.status(404).json({ detail: "No files available" });
+
+  let exportEntries: Array<{
+    doc: (typeof activeDocs)[number];
+    size: number;
+  }>;
+  try {
+    exportEntries = (
+      await mapWithConcurrency(activeDocs, 5, async (doc) => ({
+        doc,
+        metadata: await headFile(doc.storage_path),
+      }))
+    )
+      .filter(
+        (
+          entry,
+        ): entry is {
+          doc: (typeof activeDocs)[number];
+          metadata: NonNullable<Awaited<ReturnType<typeof headFile>>>;
+        } => entry.metadata != null,
+      )
+      .map(({ doc, metadata }) => ({ doc, size: metadata.size }));
+  } catch (error) {
+    return void sendInternalError(res, error);
+  }
+  if (exportEntries.length === 0)
+    return void res.status(404).json({ detail: "No files available" });
+
+  const sizeLimit = zipExportLimitDetail(
+    exportEntries.length,
+    exportEntries.reduce((total, entry) => total + entry.size, 0),
+  );
+  if (sizeLimit) {
+    return void res.status(413).json({ detail: sizeLimit });
+  }
+
   const JSZip = (await import("jszip")).default;
   const zip = new JSZip();
-
-  await Promise.all(
-    docs.map(async (doc) => {
-      const active = await loadActiveVersion(doc.id, db);
-      if (!active) return;
-      const raw = await downloadFile(active.storage_path);
-      if (!raw) return;
-      zip.file(
+  const usedNames = new Set<string>();
+  const fileStreams = exportEntries.map(({ doc }) => {
+    const stream = createFileReadStream(doc.storage_path);
+    zip.file(
+      uniqueArchiveFilename(
         downloadFilenameForVersion(
-          active.filename,
-          active.version_number,
-          active.source === "assistant_edit",
+          doc.filename,
+          doc.active_version_number ?? null,
+          doc.source === "assistant_edit",
         ),
-        Buffer.from(raw),
-      );
-    }),
-  );
+        usedNames,
+      ),
+      stream,
+      { compression: "STORE" },
+    );
+    return stream;
+  });
 
-  const content = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
   res.setHeader("Content-Type", "application/zip");
   res.setHeader("Content-Disposition", 'attachment; filename="documents.zip"');
-  res.send(content);
+  const archiveStream = zip.generateNodeStream({
+    type: "nodebuffer",
+    streamFiles: true,
+    compression: "STORE",
+  }) as Readable;
+  try {
+    await pipeline(archiveStream, res);
+  } catch (error) {
+    for (const stream of fileStreams) stream.destroy();
+    if (!res.headersSent && !res.destroyed) {
+      return void sendInternalError(res, error);
+    }
+  }
 });
 
 // GET /single-documents/:documentId/url
