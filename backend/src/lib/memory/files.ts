@@ -115,7 +115,10 @@ export async function ensureMemoryFile(
       {
         scope,
         [ownerColumn]: ownerId,
-        enabled: true,
+        // LITT (S5b): memory is opt-in — a row materialized by a first read
+        // starts disabled and the owner enables the scope explicitly.
+        // Upstream creates this row enabled (migration 20260910_06 header).
+        enabled: false,
       },
       { onConflict: ownerColumn, ignoreDuplicates: true },
     )

@@ -164,7 +164,7 @@ describe("scoped memory routes", () => {
     expect(mocks.wipeMemoryFile).not.toHaveBeenCalled();
   });
 
-  it("opens a project's first memory file opted out (LiTT default OFF)", async () => {
+  it("reads a project's first memory file through ensureMemoryFile + getMemoryCurrent", async () => {
     mocks.checkProjectAccess.mockResolvedValue({
       ok: true,
       projectRole: "viewer",
@@ -173,9 +173,11 @@ describe("scoped memory routes", () => {
 
     await request(testApp()).get(`/projects/${projectId}/memory`).expect(200);
 
-    // LiTT keeps memory opt-in: the first read may materialize the row, but
-    // it is created disabled — no learning happens until the creator turns
-    // it on explicitly (S5a default-OFF migration).
+    // The memory module is mocked here, so this case only pins the route
+    // wiring: every project read goes through ensureMemoryFile and
+    // getMemoryCurrent. The created-disabled invariant (LiTT opt-in) lives
+    // inside ensureMemoryFile and is asserted in
+    // lib/memory/__tests__/files.test.ts.
     expect(mocks.ensureMemoryFile).toHaveBeenCalledWith(
       { marker: "db" },
       "project",
