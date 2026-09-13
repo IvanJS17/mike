@@ -796,8 +796,7 @@ workflowsRouter.delete(
     const { data: referenceDocuments } = await db
       .from("workflow_reference_documents")
       .select("storage_path")
-      .eq("workflow_id", workflowId)
-      .eq("user_id", userId);
+      .eq("workflow_id", workflowId);
     const { data: deleted, error } = await db
       .from("workflows")
       .delete()

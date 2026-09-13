@@ -1412,9 +1412,10 @@ projectsRouter.patch(
 
 // GET /projects/:projectId/chats — every assistant chat under this project
 // (any author with project access). Used by the project page's chat tab so
-// it doesn't have to filter the global GET /chat list. Since 20260902_05 the
-// global list shows these too (its predicate matches ensureChatAccess), so
-// this endpoint is a convenience scoping, not the only way to find them.
+// it doesn't have to filter the global GET /chat list.
+// NOTE (LiTT): the org-aware chats overview that upstream shipped alongside
+// this endpoint (20260902_05) belongs to the deferred S3.2 overview RPCs, so
+// the global list may still be owner-scoped here.
 projectsRouter.get("/:projectId/chats", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
   const userEmail = res.locals.userEmail as string | undefined;
