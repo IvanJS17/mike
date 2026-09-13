@@ -79,9 +79,14 @@ async function validateAccessibleProjectId(
     | { ok: false; status: number; detail: string }
 > {
     if (!projectId) return { ok: true, projectRole: null, orgId: null };
+    // Creating a chat under a project contributes content to it: editor+
+    // (content.edit). A caller without that verdict gets the same 404 a
+    // missing project returns — existence is not confirmed to someone who
+    // cannot contribute to it (upstream parity).
     const access = await checkProjectAccess(projectId, userId, userEmail, db);
-    if (!access.ok)
+    if (!access.ok || !can(access.projectRole, "content.edit")) {
         return { ok: false, status: 404, detail: "Project not found" };
+    }
     return {
         ok: true,
         projectRole: access.projectRole,
@@ -366,6 +371,25 @@ chatRouter.patch("/:chatId", requireAuth, async (req, res) => {
     if (!chat || (hasTitle && chat.user_id !== userId)) {
         return void res.status(404).json({ detail: "Chat not found" });
     }
+    // Model/reasoning live on the chat row, so changing them writes into the
+    // project's content (content.edit). Title edits stay author-scoped above;
+    // standalone chats keep their author-only behaviour.
+    if (chat.project_id && (hasModel || hasReasoning)) {
+        const projectAccess = await checkProjectAccess(
+            chat.project_id,
+            userId,
+            userEmail,
+            db,
+        );
+        if (
+            !projectAccess.ok ||
+            !can(projectAccess.projectRole, "content.edit")
+        ) {
+            return void res.status(403).json({
+                detail: "You do not have permission to modify this chat",
+            });
+        }
+    }
 
     let selectedModel: string | undefined;
     const selectedReasoningLevel =
@@ -454,6 +478,25 @@ chatRouter.post("/:chatId/generate-title", requireAuth, async (req, res) => {
     const db = createServerSupabase();
     const chat = await getAccessibleChat(chatId, userId, userEmail, db);
     if (!chat) return void res.status(404).json({ detail: "Chat not found" });
+    // Generating a title UPDATEs the chat row — a write, so being able to
+    // see the chat is not enough. Project chats require editor+ (content.edit);
+    // standalone chats stay author-scoped.
+    if (chat.project_id) {
+        const projectAccess = await checkProjectAccess(
+            chat.project_id,
+            userId,
+            userEmail,
+            db,
+        );
+        if (
+            !projectAccess.ok ||
+            !can(projectAccess.projectRole, "content.edit")
+        ) {
+            return void res.status(403).json({
+                detail: "You do not have permission to modify this chat",
+            });
+        }
+    }
 
     try {
         const settings = await getUserModelSettings(userId, db);
@@ -586,11 +629,12 @@ chatRouter.post("/", requireAuth, async (req, res) => {
                 db,
             );
             // Appending messages (and triggering LLM generation) writes to the
-            // chat: member+ only, mirroring the new-chat path below. A project
-            // viewer can read this chat (GET) but must not be able to add to
-            // it. A project verdict that went missing between the two reads
-            // (access revoked mid-request) fails the same way rather than
-            // falling back to its author's private audience.
+            // chat: editor+ only — the same content.edit verdict
+            // validateAccessibleProjectId enforces on the new-chat path below.
+            // A project viewer can read this chat (GET) but must not be able
+            // to add to it. A project verdict that went missing between the
+            // two reads (access revoked mid-request) fails the same way
+            // rather than falling back to its author's private audience.
             if (
                 !projectAccess.ok ||
                 !can(projectAccess.projectRole, "content.edit")
@@ -653,8 +697,9 @@ chatRouter.post("/", requireAuth, async (req, res) => {
     }
 
     if (!chatId) {
-        // If creating a chat tied to a project, the user must have access
-        // to the project (own or shared).
+        // If creating a chat tied to a project, the user must be able to
+        // contribute content to it (access + content.edit) — the verdict
+        // validateAccessibleProjectId resolves.
         const projectAccess = await validateAccessibleProjectId(
             resolvedProjectId,
             userId,

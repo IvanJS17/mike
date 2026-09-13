@@ -321,6 +321,16 @@ vi.mock("../../lib/userSettings", () => ({
     getUserApiKeys: vi.fn(async () => ({})),
 }));
 
+// The title generator reaches an LLM provider; the access tests only need to
+// prove WHEN that write path is (not) entered. The default mirrors the suite's
+// environment (no usable title model, so the route keeps its fallback path);
+// the generate-title suite queues a resolved value per request.
+vi.mock("../../lib/chatTitle", () => ({
+    generateAssistantChatTitle: vi.fn(async () => {
+        throw new Error("title model unavailable in tests");
+    }),
+}));
+
 import { app } from "../../app";
 
 const VALID_BODY = {
@@ -1238,6 +1248,41 @@ describe("POST /chat — streaming endpoint", () => {
         ).toBe(false);
     });
 
+    it("blocks a project viewer from opening a new chat in a project", async () => {
+        // POST /chat without a chat_id creates the conversation first. A
+        // viewer can read the project (project.view) but creating a chat
+        // contributes content to it (content.edit) — the verdict
+        // validateAccessibleProjectId enforces, 404 without leaking project
+        // existence (upstream parity).
+        dbControl.projectOwnerId = "u2";
+        dbControl.projectGrantRole = "viewer";
+
+        const denied = await request(app)
+            .post("/chat")
+            .set("Authorization", "Bearer test")
+            .send({ ...VALID_BODY, project_id: "p1" });
+
+        expect(denied.status).toBe(404);
+        expect(denied.body.detail).toBe("Project not found");
+        expect(dbInserts).toHaveLength(0);
+        expect(dbUpdates).toHaveLength(0);
+        expect(runLLMStream).not.toHaveBeenCalled();
+
+        // The project editor keeps the documented new-chat flow.
+        dbControl.projectGrantRole = "editor";
+        const allowed = await request(app)
+            .post("/chat")
+            .set("Authorization", "Bearer test")
+            .send({ ...VALID_BODY, project_id: "p1" });
+
+        expect(allowed.status).toBe(200);
+        expect(dbInserts).toContainEqual({
+            table: "chats",
+            value: expect.objectContaining({ project_id: "p1", user_id: "u1" }),
+        });
+        expect(runLLMStream).toHaveBeenCalledTimes(1);
+    });
+
     it("blocks a project viewer from writing to an existing project chat", async () => {
         // A viewer can read a project conversation (GET) but POST /chat writes
         // a user message and triggers generation, so it requires content.edit —
@@ -1267,6 +1312,7 @@ describe("POST /chat — streaming endpoint", () => {
         expect(dbInserts.some(({ table }) => table === "chat_messages")).toBe(
             false,
         );
+        expect(dbUpdates).toHaveLength(0);
 
         // The same request from an editor on the project is admitted.
         dbControl.projectGrantRole = "editor";
@@ -1297,10 +1343,69 @@ describe("POST /chat — streaming endpoint", () => {
     });
 });
 
+describe("POST /chat/create — the «New chat» door", () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        dbInserts.length = 0;
+        dbControl.chatRow = null;
+        dbControl.projectMissing = false;
+        dbControl.projectOwnerId = null;
+        dbControl.projectGrantRole = null;
+    });
+
+    it("blocks a project viewer from creating a project chat", async () => {
+        // Creating the row before streaming into it is the «New chat» path
+        // (the workspace saves the chat with project_id). Same verdict as
+        // POST /chat: content.edit, via validateAccessibleProjectId.
+        dbControl.projectOwnerId = "u2";
+        dbControl.projectGrantRole = "viewer";
+
+        const denied = await request(app)
+            .post("/chat/create")
+            .set("Authorization", "Bearer test")
+            .send({ project_id: "p1" });
+
+        expect(denied.status).toBe(404);
+        expect(denied.body.detail).toBe("Project not found");
+        expect(dbInserts).toHaveLength(0);
+
+        // An editor on the project is admitted.
+        dbControl.projectGrantRole = "editor";
+        const allowed = await request(app)
+            .post("/chat/create")
+            .set("Authorization", "Bearer test")
+            .send({ project_id: "p1" });
+
+        expect(allowed.status).toBe(200);
+        expect(allowed.body).toEqual({ id: "chat-1" });
+        expect(dbInserts).toContainEqual({
+            table: "chats",
+            value: { user_id: "u1", project_id: "p1" },
+        });
+    });
+
+    it("keeps a standalone chat outside project verdicts", async () => {
+        const res = await request(app)
+            .post("/chat/create")
+            .set("Authorization", "Bearer test")
+            .send({});
+
+        expect(res.status).toBe(200);
+        expect(dbInserts).toContainEqual({
+            table: "chats",
+            value: { user_id: "u1", project_id: null },
+        });
+    });
+});
+
 describe("PATCH /chat/:chatId", () => {
     beforeEach(() => {
         vi.clearAllMocks();
         dbUpdates.length = 0;
+        dbControl.chatRow = null;
+        dbControl.projectMissing = false;
+        dbControl.projectOwnerId = null;
+        dbControl.projectGrantRole = null;
     });
 
     it("returns 400 when no supported update is provided", async () => {
@@ -1351,6 +1456,132 @@ describe("PATCH /chat/:chatId", () => {
         expect(
             userSettings.persistLastSelectedReasoningLevel,
         ).toHaveBeenCalledWith("u1", "xhigh", expect.anything());
+    });
+
+    it("blocks a project viewer from changing model or reasoning on a project chat", async () => {
+        // Model/reasoning live on the chat row, so changing them is a write
+        // into project content (content.edit); the title stays author-scoped.
+        dbControl.chatRow = {
+            id: "chat-1",
+            title: "Read-only thread",
+            model: null,
+            reasoning_level: null,
+            user_id: "u2",
+            project_id: "p1",
+        };
+        dbControl.projectOwnerId = "u2";
+        dbControl.projectGrantRole = "viewer";
+
+        const deniedModel = await request(app)
+            .patch("/chat/chat-1")
+            .set("Authorization", "Bearer test")
+            .send({ model: "gemini-3-flash-preview" });
+
+        expect(deniedModel.status).toBe(403);
+        expect(deniedModel.body.detail).toBe(
+            "You do not have permission to modify this chat",
+        );
+        expect(dbUpdates).toHaveLength(0);
+
+        const deniedReasoning = await request(app)
+            .patch("/chat/chat-1")
+            .set("Authorization", "Bearer test")
+            .send({ reasoningLevel: "xhigh" });
+
+        expect(deniedReasoning.status).toBe(403);
+        expect(dbUpdates).toHaveLength(0);
+
+        // An editor on the project keeps the current behaviour.
+        dbControl.projectGrantRole = "editor";
+        const allowed = await request(app)
+            .patch("/chat/chat-1")
+            .set("Authorization", "Bearer test")
+            .send({ model: "gemini-3-flash-preview" });
+
+        expect(allowed.status).toBe(200);
+        expect(dbUpdates).toContainEqual({
+            table: "chats",
+            value: { model: "gemini-3-flash-preview" },
+            filters: [{ column: "id", value: "chat-1" }],
+        });
+    });
+});
+
+describe("POST /chat/:chatId/generate-title", () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        dbUpdates.length = 0;
+        dbControl.chatRow = null;
+        dbControl.projectMissing = false;
+        dbControl.projectOwnerId = null;
+        dbControl.projectGrantRole = null;
+    });
+
+    it("blocks a project viewer before the title write or the LLM call", async () => {
+        // generate-title UPDATEs chats.title and calls the title model: a
+        // write into a project chat, so seeing the chat is not enough.
+        dbControl.chatRow = {
+            id: "chat-1",
+            title: "Read-only thread",
+            model: null,
+            reasoning_level: null,
+            user_id: "u2",
+            project_id: "p1",
+        };
+        dbControl.projectOwnerId = "u2";
+        dbControl.projectGrantRole = "viewer";
+        const titleLib = await import("../../lib/chatTitle");
+
+        const denied = await request(app)
+            .post("/chat/chat-1/generate-title")
+            .set("Authorization", "Bearer test")
+            .send({ message: "hello", model: "gemini-3-flash-preview" });
+
+        expect(denied.status).toBe(403);
+        expect(denied.body.detail).toBe(
+            "You do not have permission to modify this chat",
+        );
+        expect(dbUpdates).toHaveLength(0);
+        expect(titleLib.generateAssistantChatTitle).not.toHaveBeenCalled();
+
+        // An editor on the project keeps generating titles.
+        vi.mocked(titleLib.generateAssistantChatTitle).mockResolvedValueOnce(
+            "Mocked Title",
+        );
+        dbControl.projectGrantRole = "editor";
+        const allowed = await request(app)
+            .post("/chat/chat-1/generate-title")
+            .set("Authorization", "Bearer test")
+            .send({ message: "hello", model: "gemini-3-flash-preview" });
+
+        expect(allowed.status).toBe(200);
+        expect(allowed.body).toEqual({ title: "Mocked Title" });
+        expect(titleLib.generateAssistantChatTitle).toHaveBeenCalledTimes(1);
+        expect(dbUpdates).toContainEqual({
+            table: "chats",
+            value: { title: "Mocked Title" },
+            filters: [{ column: "id", value: "chat-1" }],
+        });
+    });
+
+    it("keeps title generation unchanged for a standalone chat", async () => {
+        const titleLib = await import("../../lib/chatTitle");
+        vi.mocked(titleLib.generateAssistantChatTitle).mockResolvedValueOnce(
+            "Mocked Title",
+        );
+        const res = await request(app)
+            .post("/chat/chat-1/generate-title")
+            .set("Authorization", "Bearer test")
+            .send({ message: "hello", model: "gemini-3-flash-preview" });
+
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ title: "Mocked Title" });
+        expect(titleLib.generateAssistantChatTitle).toHaveBeenCalledTimes(1);
+        expect(dbUpdates).toContainEqual({
+            table: "chats",
+            value: { title: "Mocked Title" },
+            filters: [{ column: "id", value: "chat-1" }],
+        });
     });
 });
 
