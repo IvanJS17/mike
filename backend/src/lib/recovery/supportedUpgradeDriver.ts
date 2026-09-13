@@ -144,6 +144,40 @@ export const KNOWN_SUPPORTED_MIGRATIONS: Readonly<
     sha256: "4d615b6b8e016c34c443b10ddd41b95fc59e2a74f70276c867558696f8dfd4fd",
     envelope: { kind: "bare" },
   },
+  "20260910_03_recovery_upstream_organization_access.sql": {
+    sha256: "48da784260c1e4a6b75d5dfafd3643466ac7a9dfea62ff0aa5f2b6306b326901",
+    envelope: wrapped(
+        "-- LiTT sync S3 port of upstream 20260904_01_organization_access.sql; renamed to the merge-time stem 20260910_03 (recovery series).\n" +
+        "-- ADAPTED to LiTT invariants; deviations from upstream are marked \"LITT:\" and specified in\n" +
+        "-- forensics/upstream-sync-plan-20260912/S3-DESIGN.md (§1 recortes, §2 decisiones):\n" +
+        "--   * org_members is NOT adopted: every reference maps to organization_memberships\n" +
+        "--     (closed role vocab, status='active', authorization_epoch).\n" +
+        "--   * No role defaults on grants or invitations (explicit roles only).\n" +
+        "--   * No implicit org-role -> content grants: membership alone grants NOTHING over content;\n" +
+        "--     only explicit project_org_access_overrides / workflow_org_access_overrides grant roles.\n" +
+        "--     (Upstream's admin->owner and member->editor mapping is rejected.)\n" +
+        "--   * LITT: last-org_owner guard added (organization_memberships_protect_last_owner).\n" +
+        "--   * user_id stays NOT NULL and user_id FKs are unchanged (no DROP NOT NULL, no FK re-adds).\n" +
+        "--   * Org-aware overview RPCs are deferred (S3.2); this file does not touch them.\n" +
+        "--   * Legacy shared_with / allow_edit columns are preserved (backfill-only in 20260910_04).\n" +
+        "-- Migration date: 2026-09-04\n" +
+        "\n" +
+        "begin;\n",
+    ),
+  },
+  "20260910_04_recovery_upstream_migrate_legacy_sharing.sql": {
+    sha256: "743a5dc381b3e6bd507f1c6db380f724391601fa56d222bc4f6740d4a6791e8e",
+    envelope: wrapped(
+        "-- LiTT sync S3 port of upstream 20260904_02_migrate_legacy_sharing.sql; renamed to the merge-time stem 20260910_04 (recovery series).\n" +
+        "-- ADAPTED: the column drops from upstream are deferred (recorte LiTT #7 in S3-DESIGN.md):\n" +
+        "-- projects.shared_with, tabular_reviews.shared_with and workflow_shares.allow_edit are\n" +
+        "-- preserved; this file only backfills the new grant tables / role column from them.\n" +
+        "-- Legacy columns are written by nothing after S3; runtime reads the grants.\n" +
+        "-- Migration date: 2026-09-04\n" +
+        "\n" +
+        "begin;\n",
+    ),
+  },
 };
 
 function sha256(source: string): string {

@@ -4,7 +4,6 @@ import {
   type Request,
   type Response,
 } from "express";
-import crypto from "crypto";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
 import {
@@ -14,7 +13,10 @@ import {
   listActiveCatalogWorkflows,
   type LegacyCatalogWorkflow,
 } from "../lib/workflowCatalog";
-import { findMissingUserEmails } from "../lib/userLookup";
+import {
+  findMissingUserEmails,
+  loadProfileUsersByEmail,
+} from "../lib/userLookup";
 import { workflowNameFromSkillMd } from "../lib/workflowName";
 import { parsePaginationQuery } from "../lib/pagination";
 import { normalizeSearchTerm } from "../lib/search";
@@ -24,20 +26,22 @@ import {
   buildWorkflowsOverviewRpcArgs,
   parseWorkflowScope,
 } from "../lib/workflowsOverview";
-import { singleFileUpload } from "../lib/upload";
-import {
-  ALLOWED_DOCUMENT_TYPES,
-  ALLOWED_DOCUMENT_TYPES_LABEL,
-  contentTypeForDocumentType,
-} from "../lib/documentTypes";
-import { contentSha256 } from "../lib/documentVersions";
 import { sendInternalError } from "../lib/httpError";
 import {
-  deleteFile,
-  getSignedUrl,
-  uploadFile,
-  workflowReferenceKey,
-} from "../lib/storage";
+  checkWorkflowAccess,
+  ensureDocAccess,
+  getOrgRole,
+} from "../lib/access";
+import { can, type ProjectRole } from "../lib/permissions";
+import {
+  deleteOrgAccessOverride,
+  findOrgMemberByEmail,
+  isOrgAssignableRole,
+  listOrgAccessPeople,
+  setOrgAccessOverride,
+} from "../lib/orgAccessOverrides";
+import { enqueueStorageCleanup } from "../lib/dbq/enqueue";
+import { deleteFile, getSignedUrl } from "../lib/storage";
 
 export const workflowsRouter = Router();
 
@@ -50,6 +54,10 @@ const devLog = (...args: Parameters<typeof console.log>) => {
 type WorkflowRecord = {
   id: string;
   user_id: string | null;
+  org_id?: string | null;
+  access_scope?: "private" | "shared" | "organization";
+  organization_name?: string | null;
+  direct_grant_count?: number;
   is_system?: boolean;
   title?: string;
   type?: string;
@@ -121,6 +129,7 @@ const WORKFLOW_CONTRIBUTIONS_ENABLED =
 
 type WorkflowAccess = {
   workflow: WorkflowRecord;
+  role: ProjectRole;
   allowEdit: boolean;
   isOwner: boolean;
 } | null;
@@ -150,6 +159,7 @@ async function ensureDefaultsForRequest(
 function withWorkflowAccess<T extends object>(
   workflow: T,
   access: {
+    role: ProjectRole;
     allowEdit: boolean;
     isOwner: boolean;
     sharedByName?: string | null;
@@ -157,6 +167,7 @@ function withWorkflowAccess<T extends object>(
 ) {
   return {
     ...workflow,
+    access_role: access.role,
     allow_edit: access.allowEdit,
     is_owner: access.isOwner,
     shared_by_name: access.sharedByName ?? null,
@@ -175,6 +186,7 @@ function withOpenSourceSubmission<T extends object>(
 
 function withSystemWorkflowAccess(workflow: LegacyCatalogWorkflow) {
   return withWorkflowAccess(workflow, {
+    role: "viewer",
     allowEdit: false,
     isOwner: false,
   });
@@ -324,27 +336,28 @@ async function resolveWorkflowAccess(
     .eq("id", workflowId)
     .single();
   if (!workflow) return null;
-  const workflowRecord = workflow as WorkflowRecord;
-  if (workflowRecord.user_id === userId) {
-    return { workflow: workflowRecord, allowEdit: true, isOwner: true };
-  }
-
-  const normalizedUserEmail = (userEmail ?? "").trim().toLowerCase();
-  if (!normalizedUserEmail) return null;
-
-  const { data: share } = await db
-    .from("workflow_shares")
-    .select("allow_edit")
-    .eq("workflow_id", workflowId)
-    .eq("shared_with_email", normalizedUserEmail)
-    .maybeSingle();
-  if (!share) return null;
-
+  const verdict = await checkWorkflowAccess(workflowId, userId, userEmail, db);
+  if (!verdict.ok) return null;
   return {
-    workflow: workflowRecord,
-    allowEdit: !!share.allow_edit,
-    isOwner: false,
+    workflow: workflow as WorkflowRecord,
+    role: verdict.projectRole,
+    allowEdit: can(verdict.projectRole, "content.edit"),
+    isOwner: can(verdict.projectRole, "access.manage"),
   };
+}
+
+// Owner-scoped workflow operations use the same effective resource role as
+// the rest of the application. The creator is always an Owner, an org Admin
+// defaults to Owner, and explicit organization overrides may assign another
+// member Owner access.
+async function resolveCreatorScopedWorkflow(
+  workflowId: string,
+  userId: string,
+  userEmail: string | null | undefined,
+  db: Db,
+): Promise<WorkflowRecord | null> {
+  const access = await resolveWorkflowAccess(workflowId, userId, userEmail, db);
+  return access?.isOwner ? access.workflow : null;
 }
 
 function toOpenSourceSubmissionSummary(
@@ -494,9 +507,7 @@ workflowsRouter.get(
       type: workflowType,
     });
     res.json(
-      catalog
-        .map(catalogWorkflowToLegacy)
-        .map(withSystemWorkflowAccess),
+      catalog.map(catalogWorkflowToLegacy).map(withSystemWorkflowAccess),
     );
   }),
 );
@@ -594,10 +605,11 @@ workflowsRouter.post(
   requireAuth,
   asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
-    const { metadata, skill_md, columns_config } = req.body as {
+    const { metadata, skill_md, columns_config, org_id } = req.body as {
       metadata?: Partial<WorkflowMetadata>;
       skill_md?: string;
       columns_config?: unknown;
+      org_id?: unknown;
     };
     const title = metadata?.title;
     const type = metadata?.type;
@@ -611,6 +623,24 @@ workflowsRouter.post(
         .json({ detail: "metadata.type must be 'assistant' or 'tabular'" });
 
     const db = createServerSupabase();
+    // Tenant assignment, exactly as POST /projects does it: an explicit
+    // org_id must be one the caller belongs to, and its absence means
+    // personal (org_id stays NULL, which IS the representation of personal
+    // now that hidden personal orgs are gone). Workflows have no project to
+    // inherit from, so an explicit id is the only context available.
+    let orgId: string | null = null;
+    if (org_id != null) {
+      if (typeof org_id !== "string" || !org_id.trim())
+        return void res
+          .status(400)
+          .json({ detail: "org_id must be a non-empty string" });
+      const role = await getOrgRole(userId, org_id, db);
+      if (!role)
+        return void res
+          .status(400)
+          .json({ detail: "You are not a member of that organization." });
+      orgId = org_id;
+    }
     devLog("[workflows/create] request", {
       userId,
       title: title.trim(),
@@ -642,6 +672,7 @@ workflowsRouter.post(
         jurisdictions:
           normalizeJurisdictions(metadata?.jurisdictions) ??
           DEFAULT_WORKFLOW_JURISDICTIONS,
+        org_id: orgId,
       })
       .select("*")
       .single();
@@ -663,7 +694,20 @@ workflowsRouter.post(
       title: data?.title,
       type: data?.type,
     });
-    res.status(201).json(withDatabaseWorkflow(data as WorkflowRecord));
+    res.status(201).json(
+      withWorkflowAccess(
+        withDatabaseWorkflow({
+          ...(data as WorkflowRecord),
+          access_scope: orgId ? "organization" : "private",
+          organization_name: null,
+        }),
+        {
+          role: "owner",
+          allowEdit: true,
+          isOwner: true,
+        },
+      ),
+    );
   }),
 );
 
@@ -703,6 +747,7 @@ async function handleWorkflowUpdate(req: Request, res: Response) {
       .json({ detail: "Workflow not found or not editable" });
   res.json(
     withWorkflowAccess(withDatabaseWorkflow(data as WorkflowRecord), {
+      role: access.role,
       allowEdit: access.allowEdit,
       isOwner: access.isOwner,
     }),
@@ -729,6 +774,7 @@ workflowsRouter.delete(
   requireAuth,
   asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
     const { workflowId } = req.params;
     const db = createServerSupabase();
     const catalogWorkflow = await findCatalogWorkflow(workflowId, db);
@@ -738,23 +784,31 @@ workflowsRouter.delete(
       );
     }
 
+    const workflow = await resolveCreatorScopedWorkflow(
+      workflowId,
+      userId,
+      userEmail,
+      db,
+    );
+    if (!workflow)
+      return void res.status(404).json({ detail: "Workflow not found" });
+
     const { data: referenceDocuments } = await db
       .from("workflow_reference_documents")
       .select("storage_path")
-      .eq("workflow_id", workflowId)
-      .eq("user_id", userId);
+      .eq("workflow_id", workflowId);
     const { data: deleted, error } = await db
       .from("workflows")
       .delete()
       .eq("id", workflowId)
-      .eq("user_id", userId)
       .select("id");
     if (error) return void sendInternalError(res, error);
     if ((deleted ?? []).length > 0) {
-      await Promise.all(
-        (referenceDocuments ?? []).map((reference) =>
-          deleteFile(reference.storage_path).catch(() => {}),
-        ),
+      // Durable storage.cleanup job — previously fire-and-forget deletes
+      // that leaked the files on any storage hiccup.
+      await enqueueStorageCleanup(
+        db,
+        (referenceDocuments ?? []).map((reference) => reference.storage_path),
       );
     }
     res.status(204).send();
@@ -979,82 +1033,6 @@ workflowsRouter.get(
   }),
 );
 
-// POST /workflows/:workflowId/reference-files
-workflowsRouter.post(
-  "/:workflowId/reference-files",
-  requireAuth,
-  singleFileUpload("file"),
-  asyncRoute(async (req, res) => {
-    const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
-    const db = createServerSupabase();
-    const access = await resolveWorkflowAccess(
-      req.params.workflowId,
-      userId,
-      userEmail,
-      db,
-    );
-    if (!access || !access.allowEdit) {
-      return void res
-        .status(404)
-        .json({ detail: "Workflow not found or not editable" });
-    }
-    if (rejectReferenceFilesForTabularWorkflow(access, res)) return;
-    const file = req.file;
-    if (!file) return void res.status(400).json({ detail: "file is required" });
-    const fileType = file.originalname.includes(".")
-      ? file.originalname.split(".").pop()!.toLowerCase()
-      : "";
-    if (!ALLOWED_DOCUMENT_TYPES.has(fileType)) {
-      return void res.status(400).json({
-        detail: `Unsupported file type: ${fileType}. Allowed: ${ALLOWED_DOCUMENT_TYPES_LABEL}`,
-      });
-    }
-    const referenceId = crypto.randomUUID();
-    const contentHash = contentSha256(file.buffer);
-    const ownerId = access.workflow.user_id ?? userId;
-    const storagePath = workflowReferenceKey(
-      ownerId,
-      req.params.workflowId,
-      referenceId,
-      contentHash,
-      file.originalname,
-    );
-    await uploadFile(
-      storagePath,
-      file.buffer.buffer.slice(
-        file.buffer.byteOffset,
-        file.buffer.byteOffset + file.buffer.byteLength,
-      ) as ArrayBuffer,
-      contentTypeForDocumentType(fileType),
-    );
-    const { data, error } = await db
-      .from("workflow_reference_documents")
-      .insert({
-        id: referenceId,
-        workflow_id: req.params.workflowId,
-        user_id: ownerId,
-        filename: file.originalname,
-        file_type: fileType,
-        storage_path: storagePath,
-        size_bytes: file.buffer.byteLength,
-        content_hash: contentHash,
-      })
-      .select(
-        "id, workflow_id, filename, file_type, size_bytes, created_at, updated_at",
-      )
-      .single();
-    if (error || !data) {
-      await deleteFile(storagePath).catch(() => {});
-      return void sendInternalError(
-        res,
-        error ?? new Error("Reference upload returned no data"),
-      );
-    }
-    res.status(201).json(data);
-  }),
-);
-
 // GET /workflows/:workflowId/reference-files/:referenceId/url
 workflowsRouter.get(
   "/:workflowId/reference-files/:referenceId/url",
@@ -1088,90 +1066,6 @@ workflowsRouter.get(
     if (!url)
       return void res.status(503).json({ detail: "Storage not configured" });
     res.json({ url, filename: reference.filename });
-  }),
-);
-
-// PUT /workflows/:workflowId/reference-files/:referenceId
-workflowsRouter.put(
-  "/:workflowId/reference-files/:referenceId",
-  requireAuth,
-  singleFileUpload("file"),
-  asyncRoute(async (req, res) => {
-    const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
-    const db = createServerSupabase();
-    const access = await resolveWorkflowAccess(
-      req.params.workflowId,
-      userId,
-      userEmail,
-      db,
-    );
-    if (!access || !access.allowEdit) {
-      return void res
-        .status(404)
-        .json({ detail: "Workflow not found or not editable" });
-    }
-    if (rejectReferenceFilesForTabularWorkflow(access, res)) return;
-    const file = req.file;
-    if (!file) return void res.status(400).json({ detail: "file is required" });
-    const fileType = file.originalname.includes(".")
-      ? file.originalname.split(".").pop()!.toLowerCase()
-      : "";
-    if (!ALLOWED_DOCUMENT_TYPES.has(fileType)) {
-      return void res.status(400).json({
-        detail: `Unsupported file type: ${fileType}. Allowed: ${ALLOWED_DOCUMENT_TYPES_LABEL}`,
-      });
-    }
-    const { data: current } = await db
-      .from("workflow_reference_documents")
-      .select("id, user_id, storage_path")
-      .eq("id", req.params.referenceId)
-      .eq("workflow_id", req.params.workflowId)
-      .maybeSingle();
-    if (!current)
-      return void res.status(404).json({ detail: "Reference file not found" });
-    const contentHash = contentSha256(file.buffer);
-    const storagePath = workflowReferenceKey(
-      current.user_id,
-      req.params.workflowId,
-      current.id,
-      contentHash,
-      file.originalname,
-    );
-    await uploadFile(
-      storagePath,
-      file.buffer.buffer.slice(
-        file.buffer.byteOffset,
-        file.buffer.byteOffset + file.buffer.byteLength,
-      ) as ArrayBuffer,
-      contentTypeForDocumentType(fileType),
-    );
-    const { data, error } = await db
-      .from("workflow_reference_documents")
-      .update({
-        filename: file.originalname,
-        file_type: fileType,
-        storage_path: storagePath,
-        size_bytes: file.buffer.byteLength,
-        content_hash: contentHash,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", current.id)
-      .select(
-        "id, workflow_id, filename, file_type, size_bytes, created_at, updated_at",
-      )
-      .single();
-    if (error || !data) {
-      await deleteFile(storagePath).catch(() => {});
-      return void sendInternalError(
-        res,
-        error ?? new Error("Reference replacement returned no data"),
-      );
-    }
-    if (current.storage_path !== storagePath) {
-      await deleteFile(current.storage_path).catch(() => {});
-    }
-    res.json(data);
   }),
 );
 
@@ -1252,6 +1146,7 @@ workflowsRouter.get(
     res.json({
       ...withOpenSourceSubmission(
         withWorkflowAccess(withDatabaseWorkflow(access.workflow), {
+          role: access.role,
           allowEdit: access.allowEdit,
           isOwner: access.isOwner,
         }),
@@ -1264,27 +1159,132 @@ workflowsRouter.get(
 
 // GET /workflows/:workflowId/shares
 workflowsRouter.get(
+  "/:workflowId/people",
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const { workflowId } = req.params;
+    const db = createServerSupabase();
+    const access = await resolveWorkflowAccess(
+      workflowId,
+      userId,
+      userEmail,
+      db,
+    );
+    if (!access)
+      return void res.status(404).json({ detail: "Workflow not found" });
+
+    const orgId =
+      (access.workflow as { org_id?: string | null }).org_id ?? null;
+    if (orgId) {
+      const listed = await listOrgAccessPeople(db, {
+        kind: "workflow",
+        resourceId: workflowId,
+        orgId,
+        creatorId: access.workflow.user_id,
+      });
+      if (!listed.ok) return void sendInternalError(res, listed.detail);
+      const creator = listed.people.find(
+        (person) => person.user_id === access.workflow.user_id,
+      );
+      return void res.json({
+        scope: "organization",
+        owner: creator
+          ? {
+              user_id: creator.user_id,
+              email: creator.email,
+              display_name: creator.display_name,
+              role: "owner",
+            }
+          : null,
+        members: listed.people.filter(
+          (person) => person.user_id !== access.workflow.user_id,
+        ),
+      });
+    }
+
+    const { data: shares, error } = await db
+      .from("workflow_shares")
+      .select("shared_with_email, role")
+      .eq("workflow_id", workflowId);
+    if (error) return void sendInternalError(res, error);
+    const { userByEmail, userById } = await loadProfileUsersByEmail(db);
+    const creator = access.workflow.user_id
+      ? userById.get(access.workflow.user_id)
+      : undefined;
+    res.json({
+      scope: "direct",
+      owner: access.workflow.user_id
+        ? {
+            user_id: access.workflow.user_id,
+            email: creator?.email ?? null,
+            display_name: creator?.display_name ?? null,
+            role: "owner",
+          }
+        : null,
+      members: (
+        (shares ?? []) as {
+          shared_with_email: string;
+          role: ProjectRole;
+        }[]
+      ).map((share) => ({
+        email: share.shared_with_email,
+        display_name:
+          userByEmail.get(share.shared_with_email)?.display_name ?? null,
+        role: share.role,
+      })),
+    });
+  }),
+);
+
+workflowsRouter.get(
   "/:workflowId/shares",
   requireAuth,
   asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
     const { workflowId } = req.params;
     const db = createServerSupabase();
 
-    const { data: wf } = await db
-      .from("workflows")
-      .select("id")
-      .eq("id", workflowId)
-      .eq("user_id", userId)
-      .single();
+    const wf = await resolveCreatorScopedWorkflow(
+      workflowId,
+      userId,
+      userEmail,
+      db,
+    );
     if (!wf)
       return void res
         .status(404)
         .json({ detail: "Workflow not found or not editable" });
 
+    const orgId = (wf as { org_id?: string | null }).org_id ?? null;
+    if (orgId) {
+      const listed = await listOrgAccessPeople(db, {
+        kind: "workflow",
+        resourceId: workflowId,
+        orgId,
+        creatorId: wf.user_id,
+      });
+      if (!listed.ok) return void sendInternalError(res, listed.detail);
+      return void res.json(
+        listed.people
+          .filter(
+            (person) => person.user_id !== wf.user_id && person.has_override,
+          )
+          .map((person) => ({
+            id: person.user_id,
+            user_id: person.user_id,
+            shared_with_email: person.email,
+            display_name: person.display_name,
+            role: person.role,
+          })),
+      );
+    }
+
     const { data: shares, error } = await db
       .from("workflow_shares")
-      .select("id, shared_with_email, allow_edit, created_at")
+      .select("id, shared_with_email, role, created_at")
       .eq("workflow_id", workflowId)
       .order("created_at", { ascending: true });
     if (error) return void sendInternalError(res, error);
@@ -1299,22 +1299,33 @@ workflowsRouter.delete(
   requireAuth,
   asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
     const { workflowId, shareId } = req.params;
     const db = createServerSupabase();
 
-    const { data: wf } = await db
-      .from("workflows")
-      .select("id")
-      .eq("id", workflowId)
-      .eq("user_id", userId)
-      .single();
+    const wf = await resolveCreatorScopedWorkflow(
+      workflowId,
+      userId,
+      userEmail,
+      db,
+    );
     if (!wf) return void res.status(404).json({ detail: "Workflow not found" });
 
-    await db
-      .from("workflow_shares")
-      .delete()
-      .eq("id", shareId)
-      .eq("workflow_id", workflowId);
+    const orgId = (wf as { org_id?: string | null }).org_id ?? null;
+    if (orgId) {
+      const result = await deleteOrgAccessOverride(db, {
+        kind: "workflow",
+        resourceId: workflowId,
+        userId: shareId,
+      });
+      if (!result.ok) return void sendInternalError(res, result.detail);
+    } else {
+      await db
+        .from("workflow_shares")
+        .delete()
+        .eq("id", shareId)
+        .eq("workflow_id", workflowId);
+    }
     res.status(204).send();
   }),
 );
@@ -1327,9 +1338,9 @@ workflowsRouter.post(
     const userId = res.locals.userId as string;
     const userEmail = res.locals.userEmail as string | undefined;
     const { workflowId } = req.params;
-    const { emails, allow_edit } = req.body as {
+    const { emails, role } = req.body as {
       emails: string[];
-      allow_edit: boolean;
+      role: unknown;
     };
 
     if (!emails?.length)
@@ -1350,33 +1361,72 @@ workflowsRouter.post(
     }
 
     const db = createServerSupabase();
-    const missingSharedUsers = await findMissingUserEmails(
-      db,
-      normalizedEmails,
-    );
-    if (missingSharedUsers.length > 0) {
-      return void res.status(400).json({
-        detail: `${missingSharedUsers[0]} does not belong to a Mike user.`,
-      });
-    }
 
-    // Verify ownership
-    const { data: wf } = await db
-      .from("workflows")
-      .select("id")
-      .eq("id", workflowId)
-      .eq("user_id", userId)
-      .single();
+    // Any effective Owner may manage access. Personal grants are stored by
+    // normalized email and may only target an existing user; organization
+    // overrides require a current organization member.
+    const wf = await resolveCreatorScopedWorkflow(
+      workflowId,
+      userId,
+      userEmail,
+      db,
+    );
     if (!wf)
       return void res
         .status(404)
         .json({ detail: "Workflow not found or not editable" });
 
+    const orgId = (wf as { org_id?: string | null }).org_id ?? null;
+    if (orgId) {
+      if (!isOrgAssignableRole(role))
+        return void res.status(400).json({
+          detail: "role must be owner, editor, viewer or deny",
+        });
+      for (const email of normalizedEmails) {
+        const target = await findOrgMemberByEmail(db, orgId, email);
+        if (!target.ok) {
+          if (target.kind === "not_found")
+            return void res.status(400).json({ detail: target.detail });
+          return void sendInternalError(res, target.detail);
+        }
+        if (target.member.userId === wf.user_id)
+          return void res
+            .status(400)
+            .json({ detail: "The creator is always an owner" });
+        const result = await setOrgAccessOverride(db, {
+          kind: "workflow",
+          resourceId: workflowId,
+          orgId,
+          userId: target.member.userId,
+          role,
+          assignedBy: userId,
+        });
+        if (!result.ok) return void sendInternalError(res, result.detail);
+      }
+      return void res.status(204).send();
+    }
+
+    if (role !== "owner" && role !== "editor" && role !== "viewer")
+      return void res.status(400).json({
+        detail: "role must be owner, editor or viewer",
+      });
+
+    let missingEmails: string[];
+    try {
+      missingEmails = await findMissingUserEmails(db, normalizedEmails);
+    } catch (error) {
+      return void sendInternalError(res, error);
+    }
+    if (missingEmails.length > 0)
+      return void res.status(400).json({
+        detail: `${missingEmails[0]} does not belong to a Mike user.`,
+      });
+
     const rows = normalizedEmails.map((email: string) => ({
       workflow_id: workflowId,
       shared_by_user_id: userId,
       shared_with_email: email,
-      allow_edit: allow_edit ?? false,
+      role,
     }));
     // Upsert on (workflow_id, shared_with_email) so re-sharing to the same
     // person updates the existing row instead of stacking duplicates.

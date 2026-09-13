@@ -4,9 +4,9 @@ import request from "supertest";
 // ---------------------------------------------------------------------------
 // Hoisted mock fns we want to reconfigure per-test.
 // ---------------------------------------------------------------------------
-const { checkProjectAccess, deleteUserProjects } = vi.hoisted(() => ({
+const { checkProjectAccess, deleteProjectsByIds } = vi.hoisted(() => ({
     checkProjectAccess: vi.fn(),
-    deleteUserProjects: vi.fn(),
+    deleteProjectsByIds: vi.fn(),
 }));
 
 // ---------------------------------------------------------------------------
@@ -106,15 +106,30 @@ vi.mock("../../middleware/auth", () => ({
 // downloads, tabular) import from it at app load.
 vi.mock("../../lib/access", () => ({
     checkProjectAccess: (...args: unknown[]) => checkProjectAccess(...args),
-    ensureDocAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
-    ensureReviewAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
+    ensureDocAccess: vi.fn(async () => ({ ok: true, isCreator: true, orgRole: null, projectRole: "owner" })),
+    ensureReviewAccess: vi.fn(async () => ({ ok: true, isCreator: true, orgRole: null, projectRole: "owner" })),
     filterAccessibleDocumentIds: vi.fn(async (ids: string[]) => ids),
     listAccessibleProjectIds: vi.fn(async () => []),
+    getOrgRole: vi.fn(async () => null),
+    listUserOrgIds: vi.fn(async () => []),
+    getProjectGrantRole: vi.fn(async () => null),
+    resolveContentOrgId: vi.fn(async () => ({ ok: true, orgId: null })),
+    projectHasSharedAudience: vi.fn(async () => false),
+    creatorScopedAllowed: vi.fn(() => true),
+    checkWorkflowAccess: vi.fn(async () => ({ ok: false })),
+    ensureChatAccess: vi.fn(async () => ({ ok: true, isCreator: true, orgRole: null, projectRole: "owner" })),
+    normalizeEmail: (email: unknown) =>
+        typeof email === "string" && email.trim() ? email.trim().toLowerCase() : null,
+    isOrgRole: vi.fn(() => false),
+    isOrgAdmin: vi.fn(() => false),
+    can: vi.fn(() => true),
+    isProjectRole: vi.fn(() => true),
+    ORG_ROLES: ["org_owner", "workspace_admin", "editor", "viewer", "technical_operator"],
 }));
 
 // user router imports all four cleanup helpers at module load.
 vi.mock("../../lib/userDataCleanup", () => ({
-    deleteUserProjects: (...args: unknown[]) => deleteUserProjects(...args),
+    deleteProjectsByIds: (...args: unknown[]) => deleteProjectsByIds(...args),
     deleteAllUserChats: vi.fn(async () => {}),
     deleteAllUserTabularReviews: vi.fn(async () => {}),
     deleteUserAccountData: vi.fn(async () => {}),
@@ -165,10 +180,12 @@ describe("projects.routes", () => {
         resetSupabaseState();
         checkProjectAccess.mockResolvedValue({
             ok: true,
-            isOwner: true,
-            project: { id: "p1", user_id: "u1", shared_with: null },
+            isCreator: true,
+            orgRole: null,
+            projectRole: "owner",
+            project: { id: "p1", user_id: "u1" },
         });
-        deleteUserProjects.mockResolvedValue(1);
+        deleteProjectsByIds.mockResolvedValue(1);
     });
 
     // ── GET /projects (overview) ──────────────────────────────────────────
@@ -540,8 +557,10 @@ describe("projects.routes", () => {
     it("returns project folder conflicts without replacement permissions", async () => {
       checkProjectAccess.mockResolvedValue({
         ok: true,
-        isOwner: false,
-        project: { id: "p1", user_id: "u2", shared_with: ["u1@test.local"] },
+        isCreator: false,
+        orgRole: null,
+        projectRole: "editor",
+        project: { id: "p1", user_id: "u2" },
       });
       supabaseState.rpc = {
         data: {
@@ -650,32 +669,24 @@ describe("projects.routes", () => {
             expect(res.body.detail).toBe("name is required");
         });
 
-        it("returns 400 when sharing the project with yourself", async () => {
-            // The authed user's email is u1@test.local; supplying it (in any
-            // case) must be rejected.
+        it("rejects the retired shared_with input", async () => {
             const res = await request(app)
                 .post("/projects")
                 .set(...AUTH)
                 .send({ name: "Beta", shared_with: ["U1@Test.Local"] });
 
             expect(res.status).toBe(400);
-      expect(res.body.detail).toBe("You cannot share a project with yourself.");
+            expect(res.body.detail).toBe(
+                "shared_with is no longer supported; use the project access endpoints.",
+            );
         });
 
-        it("creates the project (201) and normalises shared_with", async () => {
-            // Sharing requires each recipient to have a mirrored user_profiles
-            // row (findMissingUserEmails); seed both emails so validation
-            // passes and the create path proceeds.
-            supabaseState.tables.user_profiles = {
-                data: [{ email: "a@x.com" }, { email: "b@x.com" }],
-                error: null,
-            };
+        it("creates the project (201)", async () => {
             supabaseState.tables.projects = {
                 data: {
                     id: "p9",
                     name: "Gamma",
                     user_id: "u1",
-                    shared_with: ["a@x.com", "b@x.com"],
                 },
                 error: null,
             };
@@ -683,38 +694,14 @@ describe("projects.routes", () => {
             const res = await request(app)
                 .post("/projects")
                 .set(...AUTH)
-                .send({
-                    name: "  Gamma  ",
-                    shared_with: ["A@x.com", "a@x.com", "B@X.com", "", "  "],
-                });
+                .send({ name: "  Gamma  " });
 
             expect(res.status).toBe(201);
             expect(res.body).toMatchObject({ id: "p9", documents: [] });
 
-            // The insert payload should be lowercased, deduped, trimmed and
-            // the name trimmed.
-      const insert = supabaseState.inserts.find((i) => i.table === "projects");
-            expect(insert?.payload).toMatchObject({
-                name: "Gamma",
-                shared_with: ["a@x.com", "b@x.com"],
-            });
-        });
-
-        it("returns 400 when a shared_with recipient is not a Mike user", async () => {
-            // No user_profiles rows seeded → findMissingUserEmails reports the
-            // recipient as unknown and the create is rejected before insert.
-            const res = await request(app)
-                .post("/projects")
-                .set(...AUTH)
-                .send({ name: "Gamma", shared_with: ["ghost@x.com"] });
-
-            expect(res.status).toBe(400);
-            expect(res.body.detail).toBe(
-                "ghost@x.com does not belong to a Mike user.",
-            );
-            expect(
-                supabaseState.inserts.find((i) => i.table === "projects"),
-            ).toBeUndefined();
+            // The insert payload should carry the trimmed name.
+            const insert = supabaseState.inserts.find((i) => i.table === "projects");
+            expect(insert?.payload).toMatchObject({ name: "Gamma" });
         });
 
         it("returns 500 when the insert errors", async () => {
@@ -766,11 +753,12 @@ describe("projects.routes", () => {
         it("delegates mixed-case shared access to the case-insensitive helper", async () => {
             checkProjectAccess.mockResolvedValue({
                 ok: true,
-                isOwner: false,
+                isCreator: false,
+                orgRole: null,
+                projectRole: "editor",
                 project: {
                     id: "p1",
                     user_id: "someone-else",
-                    shared_with: ["U1@Test.Local"],
                 },
             });
             supabaseState.tables.projects = {
@@ -853,14 +841,16 @@ describe("projects.routes", () => {
 
     // ── PATCH /projects/:projectId (sharing normalisation) ────────────────
     describe("PATCH /projects/:projectId", () => {
-        it("returns 400 when sharing the project with yourself", async () => {
+        it("rejects the retired shared_with input", async () => {
             const res = await request(app)
                 .patch("/projects/p1")
                 .set(...AUTH)
                 .send({ shared_with: ["u1@test.local"] });
 
             expect(res.status).toBe(400);
-      expect(res.body.detail).toBe("You cannot share a project with yourself.");
+            expect(res.body.detail).toBe(
+                "shared_with is no longer supported; use the project access endpoints.",
+            );
         });
 
         it("returns 404 when the update matches no owned project", async () => {
@@ -879,7 +869,7 @@ describe("projects.routes", () => {
     // ── DELETE /projects/:projectId ───────────────────────────────────────
     describe("DELETE /projects/:projectId", () => {
         it("returns 404 when nothing was deleted", async () => {
-            deleteUserProjects.mockResolvedValue(0);
+            deleteProjectsByIds.mockResolvedValue(0);
 
       const res = await request(app)
         .delete("/projects/p1")
@@ -890,21 +880,21 @@ describe("projects.routes", () => {
         });
 
         it("returns 204 when the project is deleted", async () => {
-            deleteUserProjects.mockResolvedValue(1);
+            deleteProjectsByIds.mockResolvedValue(1);
 
       const res = await request(app)
         .delete("/projects/p1")
         .set(...AUTH);
 
             expect(res.status).toBe(204);
-            // Signature is deleteUserProjects(db, userId, [projectId]).
-      expect(deleteUserProjects).toHaveBeenCalledWith(expect.anything(), "u1", [
-        "p1",
-      ]);
+            // Signature is deleteProjectsByIds(db, [projectId]).
+            expect(deleteProjectsByIds).toHaveBeenCalledWith(expect.anything(), [
+                "p1",
+            ]);
         });
 
         it("returns 500 when deletion throws", async () => {
-            deleteUserProjects.mockRejectedValue(new Error("cascade failed"));
+            deleteProjectsByIds.mockRejectedValue(new Error("cascade failed"));
 
       const res = await request(app)
         .delete("/projects/p1")

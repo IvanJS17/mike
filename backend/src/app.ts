@@ -7,6 +7,7 @@ import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { chatRouter } from "./routes/chat";
 import { wordChatRouter } from "./routes/wordChat";
 import { projectsRouter } from "./routes/projects";
+import { orgsRouter } from "./routes/orgs";
 import { projectChatRouter } from "./routes/projectChat";
 import { documentsRouter } from "./routes/documents";
 import { libraryRouter } from "./routes/library";
@@ -18,10 +19,12 @@ import { userRouter } from "./routes/user";
 import { modelsRouter } from "./routes/models";
 import { downloadsRouter } from "./routes/downloads";
 import { auditRouter } from "./routes/audit";
+import { uploadSessionsRouter } from "./routes/uploadSessions";
 import { aiRecoveryRouter } from "./routes/aiRecovery";
 import { matterSettingsRouter } from "./routes/matterSettings";
 import { authRouter } from "./routes/auth";
 import { manifestPublicKey } from "./lib/manifestSigning";
+import { envInt } from "./lib/runtimeConfig";
 import {
   handleUnhandledError,
   protectInternalErrorResponses,
@@ -31,16 +34,9 @@ import { configuredAllowedOrigins } from "./lib/origins";
 export const app = express();
 const isProduction = process.env.NODE_ENV === "production";
 
-// Ceiling for JSON API requests. File uploads use multipart handling and
-// are governed by separate upload limits.
+// Ceiling for JSON API requests. File bytes upload directly to object storage;
+// only small upload-session manifests and control requests reach Express.
 const JSON_BODY_LIMIT = "50mb";
-
-function envInt(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
 
 function minutes(value: number): number {
   return value * 60 * 1000;
@@ -81,7 +77,12 @@ const TOOL_RESULT_PATH = "/word-chat/tool-result";
 const generalLimiter = makeLimiter({
   windowMs: minutes(envInt("RATE_LIMIT_GENERAL_WINDOW_MINUTES", 15)),
   max: envInt("RATE_LIMIT_GENERAL_MAX", 300),
-  skip: (req) => req.path === TOOL_RESULT_PATH,
+  // Upload status polling has its own authenticated per-user limiter. Keep it
+  // and the dedicated Word tool-result lane out of the shared IP budget.
+  skip: (req) =>
+    req.path === TOOL_RESULT_PATH ||
+    req.path === "/upload-sessions" ||
+    req.path.startsWith("/upload-sessions/"),
 });
 
 const toolResultLimiter = makeLimiter({
@@ -101,10 +102,10 @@ const chatCreateLimiter = makeLimiter({
   max: envInt("RATE_LIMIT_CHAT_CREATE_MAX", 60),
 });
 
-const uploadLimiter = makeLimiter({
+const workflowImportLimiter = makeLimiter({
   windowMs: hours(envInt("RATE_LIMIT_UPLOAD_WINDOW_HOURS", 1)),
   max: envInt("RATE_LIMIT_UPLOAD_MAX", 50),
-  message: "Too many upload requests. Please try again later.",
+  message: "Too many workflow imports. Please try again later.",
 });
 
 const exportLimiter = makeLimiter({
@@ -239,17 +240,30 @@ app.post("/tabular-review/:reviewId/chat", chatLimiter);
 app.post("/tabular-review/:reviewId/generate", chatLimiter);
 app.post("/chat/create", chatCreateLimiter);
 app.post("/chat/:chatId/generate-title", chatCreateLimiter);
-app.post("/single-documents", uploadLimiter);
-app.post("/library/:kind/documents", uploadLimiter);
-app.post("/single-documents/:documentId/versions", uploadLimiter);
-app.post("/workflows/:workflowId/reference-files", uploadLimiter);
-app.post("/workflow-addons/:addonId/import", uploadLimiter);
-app.put("/workflows/:workflowId/reference-files/:referenceId", uploadLimiter);
+app.post("/workflow-addons/:addonId/import", workflowImportLimiter);
+const legacyUploadRemoved = (_req: express.Request, res: express.Response) => {
+  res.status(410).json({
+    code: "upload_session_required",
+    detail: "This upload endpoint has been replaced by /upload-sessions.",
+  });
+};
+
+// Reject the former multipart endpoints before any body parser or route-level
+// body-reading middleware can consume file bytes. Browser clients use the
+// direct object-storage upload-session protocol instead.
+app.post("/single-documents", legacyUploadRemoved);
+app.post("/library/:kind/documents", legacyUploadRemoved);
+app.post("/single-documents/:documentId/versions", legacyUploadRemoved);
+app.post("/workflows/:workflowId/reference-files", legacyUploadRemoved);
+app.put(
+  "/workflows/:workflowId/reference-files/:referenceId",
+  legacyUploadRemoved,
+);
 app.put(
   "/single-documents/:documentId/versions/:versionId/file",
-  uploadLimiter,
+  legacyUploadRemoved,
 );
-app.post("/projects/:projectId/documents", uploadLimiter);
+app.post("/projects/:projectId/documents", legacyUploadRemoved);
 app.get("/projects/:projectId/export", exportLimiter);
 app.get("/user/export", exportLimiter);
 app.get("/user/chats/export", exportLimiter);
@@ -273,6 +287,7 @@ app.use("/models", modelsRouter);
 app.use("/projects/:projectId/ai-executions", aiRecoveryRouter);
 app.use("/projects/:projectId/matters", matterSettingsRouter);
 app.use("/projects", projectsRouter);
+app.use("/orgs", orgsRouter);
 app.use("/projects/:projectId/chat", projectChatRouter);
 app.use("/single-documents", documentsRouter);
 app.use("/library", libraryRouter);
@@ -284,6 +299,7 @@ app.use("/user", userRouter);
 app.use("/users", userRouter);
 app.use("/download", downloadsRouter);
 app.use("/audit", auditRouter);
+app.use("/upload-sessions", uploadSessionsRouter);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 

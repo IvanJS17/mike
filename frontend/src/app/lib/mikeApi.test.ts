@@ -1,6 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistantEvent, Chat } from "@/app/components/shared/types";
 
+// The upload wrappers are thin adapters over the shared session client. Mocking
+// only its core lets these tests assert the manifest each wrapper sends without
+// re-implementing the whole direct-upload protocol in the web-app test file.
+vi.mock("@/shared/api/uploadSessionClient", async (importOriginal) => {
+    const actual =
+        await importOriginal<
+            typeof import("@/shared/api/uploadSessionClient")
+        >();
+    return {
+        ...actual,
+        uploadFilesWithSessionCore: vi.fn(),
+    };
+});
+
+import {
+    uploadFilesWithSessionCore,
+    type UploadOutcome,
+} from "@/shared/api/uploadSessionClient";
+
 import {
     MikeApiError,
     addDocumentToProject,
@@ -41,6 +60,7 @@ import {
     getApiKeyStatus,
     getChat,
     getAuditHistory,
+    getDocument,
     getDocumentUrl,
     getLibrary,
     getLibraryLevels,
@@ -65,6 +85,7 @@ import {
     getWorkflowAddon,
     getWorkflowFilterOptions,
     getWorkflowReferenceUrl,
+    grantProjectAccess,
     hideWorkflow,
     isMfaRequiredError,
     listChats,
@@ -138,6 +159,7 @@ import {
     importWorkflowAddon,
     listQuickActions,
     replaceWorkflowReferenceFile,
+    uploadFilesWithSession,
     uploadWorkflowReferenceFile,
     uploadDocumentVersion,
     uploadLibraryDocument,
@@ -1446,11 +1468,171 @@ describe("tabular review CRUD", () => {
     });
 });
 
+describe("upload session wrappers", () => {
+    const file = new File(["pdf-bytes"], "a.pdf", {
+        type: "application/pdf",
+    });
+
+    const outcome = (overrides: Partial<UploadOutcome> = {}): UploadOutcome => ({
+        clientId: "client-1",
+        filename: "a.pdf",
+        status: "completed",
+        result: { id: "new-doc" },
+        errorCode: null,
+        ...overrides,
+    });
+
+    const lastManifest = () =>
+        vi.mocked(uploadFilesWithSessionCore).mock.calls.at(-1)?.[0] as {
+            purpose: string;
+            destination: Record<string, unknown>;
+            files: Array<{ file: File; folderId?: string | null }>;
+        };
+
+    it("classifies transport errors for the session retry policy", async () => {
+        vi.mocked(uploadFilesWithSessionCore).mockResolvedValue([]);
+
+        await uploadFilesWithSession({
+            purpose: "document_create",
+            destination: { scope: "standalone" },
+            files: [],
+        });
+
+        const transport = (
+            vi.mocked(uploadFilesWithSessionCore).mock.calls.at(-1)?.[0] as {
+                transport: {
+                    fetchStorage: typeof fetch;
+                    shouldRetryControlRequest: (error: unknown) => boolean;
+                };
+            }
+        ).transport;
+
+        // The storage transport forwards straight to the global fetch.
+        fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
+        await transport.fetchStorage("/storage/key", { method: "PUT" });
+        expect(fetchMock).toHaveBeenCalledWith("/storage/key", {
+            method: "PUT",
+        });
+
+        // A typed API error with a non-retryable status stops the loop …
+        expect(
+            transport.shouldRetryControlRequest(
+                new MikeApiError({ message: "invalid", status: 400 }),
+            ),
+        ).toBe(false);
+        // … while an unrecognized error is treated as a transport failure.
+        expect(transport.shouldRetryControlRequest(new Error("socket"))).toBe(
+            true,
+        );
+    });
+
+    it("uploads a project document through a document_create session", async () => {
+        vi.mocked(uploadFilesWithSessionCore).mockResolvedValue([
+            outcome(),
+        ]);
+
+        const doc = await uploadProjectDocument("p1", file, "project-folder");
+
+        expect(doc).toEqual({ id: "new-doc" });
+        expect(lastManifest()).toMatchObject({
+            purpose: "document_create",
+            destination: { scope: "project", project_id: "p1" },
+            files: [{ file, folderId: "project-folder" }],
+        });
+    });
+
+    it("maps the library kind and folder into a library session", async () => {
+        vi.mocked(uploadFilesWithSessionCore).mockResolvedValue([outcome()]);
+
+        const doc = await uploadLibraryDocument(
+            "templates",
+            file,
+            "library-folder",
+        );
+
+        expect(doc).toEqual({ id: "new-doc" });
+        expect(lastManifest()).toMatchObject({
+            purpose: "document_create",
+            destination: { scope: "library", library_kind: "template" },
+            files: [{ file, folderId: "library-folder" }],
+        });
+    });
+
+    it("uses a standalone session when there is no project", async () => {
+        vi.mocked(uploadFilesWithSessionCore).mockResolvedValue([outcome()]);
+
+        await uploadStandaloneDocument(file);
+
+        expect(lastManifest()).toMatchObject({
+            purpose: "document_create",
+            destination: { scope: "standalone" },
+        });
+    });
+
+    it("uses the version purposes for create and replace", async () => {
+        vi.mocked(uploadFilesWithSessionCore).mockResolvedValue([outcome()]);
+
+        await uploadDocumentVersion("d1", file, "renamed.pdf");
+        expect(lastManifest()).toMatchObject({
+            purpose: "document_version_create",
+            destination: { document_id: "d1", filename: "renamed.pdf" },
+        });
+
+        await replaceDocumentVersionFile("d1", "v1", file);
+        expect(lastManifest()).toMatchObject({
+            purpose: "document_version_replace",
+            destination: { document_id: "d1", version_id: "v1" },
+        });
+    });
+
+    it("renames the file when replacing a document version", async () => {
+        vi.mocked(uploadFilesWithSessionCore).mockResolvedValue([outcome()]);
+
+        await replaceDocumentVersionFile("d1", "v1", file, "renamed.pdf");
+
+        const manifest = lastManifest();
+        expect(manifest.files[0]!.file.name).toBe("renamed.pdf");
+    });
+
+    it("uses the workflow reference purposes", async () => {
+        vi.mocked(uploadFilesWithSessionCore).mockResolvedValue([outcome()]);
+
+        await uploadWorkflowReferenceFile("w1", file);
+        expect(lastManifest()).toMatchObject({
+            purpose: "workflow_reference_create",
+            destination: { workflow_id: "w1" },
+        });
+
+        await replaceWorkflowReferenceFile("w1", "ref-1", file);
+        expect(lastManifest()).toMatchObject({
+            purpose: "workflow_reference_replace",
+            destination: { workflow_id: "w1", reference_id: "ref-1" },
+        });
+    });
+
+    it("propagates a control-plane failure", async () => {
+        vi.mocked(uploadFilesWithSessionCore).mockRejectedValue(
+            new Error("session unavailable"),
+        );
+
+        await expect(uploadStandaloneDocument(file)).rejects.toThrow(
+            "session unavailable",
+        );
+    });
+});
+
 describe("uploadReviewDocument", () => {
-    it("uploads into the project then appends the new id to the review", async () => {
-        fetchMock
-            .mockResolvedValueOnce(jsonResponse({ id: "new-doc" }))
-            .mockResolvedValueOnce(jsonResponse({ id: "r1" }));
+    it("appends a session-uploaded project document to the review", async () => {
+        vi.mocked(uploadFilesWithSessionCore).mockResolvedValue([
+            {
+                clientId: "client-1",
+                filename: "a.pdf",
+                status: "completed",
+                result: { id: "new-doc" },
+                errorCode: null,
+            },
+        ]);
+        fetchMock.mockResolvedValue(jsonResponse({ id: "r1" }));
         const file = new File(["x"], "a.pdf");
 
         const uploaded = await uploadReviewDocument("r1", file, {
@@ -1460,33 +1642,37 @@ describe("uploadReviewDocument", () => {
         });
 
         expect(uploaded).toEqual({ id: "new-doc" });
-        const [uploadCall, patchCall] = fetchMock.mock.calls;
-        expect(uploadCall[0]).toBe("/api/projects/p1/documents");
-        expect((uploadCall[1] as RequestInit).body).toBeInstanceOf(FormData);
-        expect(patchCall[0]).toBe("/api/tabular-review/r1");
+        const patchCall = lastFetchCall();
+        expect(patchCall.url).toBe("/api/tabular-review/r1");
         // Existing ids must be preserved — the review would otherwise shrink
         // to just the newly uploaded document.
-        expect(
-            JSON.parse((patchCall[1] as RequestInit).body as string),
-        ).toEqual({
+        expect(JSON.parse(patchCall.init.body as string)).toEqual({
             columns_config: [{ index: 0, name: "Term", prompt: "p" }],
             document_ids: ["d1", "new-doc"],
         });
     });
 
     it("falls back to a standalone upload when the review has no project", async () => {
-        fetchMock
-            .mockResolvedValueOnce(jsonResponse({ id: "new-doc" }))
-            .mockResolvedValueOnce(jsonResponse({ id: "r1" }));
+        vi.mocked(uploadFilesWithSessionCore).mockResolvedValue([
+            {
+                clientId: "client-1",
+                filename: "a.pdf",
+                status: "completed",
+                result: { id: "new-doc" },
+                errorCode: null,
+            },
+        ]);
+        fetchMock.mockResolvedValue(jsonResponse({ id: "r1" }));
 
         await uploadReviewDocument("r1", new File(["x"], "a.pdf"));
 
-        const [uploadCall, patchCall] = fetchMock.mock.calls;
-        expect(uploadCall[0]).toBe("/api/single-documents");
+        const manifest = vi.mocked(uploadFilesWithSessionCore).mock
+            .calls.at(-1)?.[0] as {
+            destination: Record<string, unknown>;
+        };
+        expect(manifest.destination).toEqual({ scope: "standalone" });
         // With no prior ids the review ends up with exactly the new document.
-        expect(
-            JSON.parse((patchCall[1] as RequestInit).body as string),
-        ).toEqual({
+        expect(JSON.parse(lastFetchCall().init.body as string)).toEqual({
             document_ids: ["new-doc"],
         });
     });
@@ -1597,159 +1783,6 @@ describe("tabular cell operations", () => {
         expect(JSON.parse(init.body as string)).toEqual({
             row_ids: ["row-1", "row-2"],
         });
-    });
-});
-
-// ---------------------------------------------------------------------------
-// Multipart uploads. These bypass apiRequest (FormData must not get a JSON
-// content type) and therefore have their own, weaker error contract: a plain
-// Error carrying the raw response text instead of MikeApiError.
-// ---------------------------------------------------------------------------
-
-describe("multipart upload endpoints", () => {
-    const file = new File(["pdf-bytes"], "a.pdf", { type: "application/pdf" });
-
-    it("uploadLibraryDocument posts FormData with auth and no JSON content type", async () => {
-        fetchMock.mockResolvedValue(jsonResponse({ id: "d1" }));
-
-        const doc = await uploadLibraryDocument("templates", file);
-
-        expect(doc).toEqual({ id: "d1" });
-        const { url, init } = lastFetchCall();
-        expect(url).toBe("/api/library/templates/documents");
-        expect(init.method).toBe("POST");
-        expect(init.body).toBeInstanceOf(FormData);
-        expect((init.body as FormData).get("file")).toBeInstanceOf(File);
-        // Setting Content-Type manually would break the multipart boundary.
-        expect(init.headers).toBeUndefined();
-        expect(init.credentials).toBe("include");
-    });
-
-    it("includes the destination folder in project and library uploads", async () => {
-        fetchMock.mockImplementation(() =>
-            Promise.resolve(jsonResponse({ id: "d1" })),
-        );
-
-        await uploadProjectDocument("p1", file, "project-folder");
-        let body = lastFetchCall().init.body as FormData;
-        expect(body.get("folder_id")).toBe("project-folder");
-
-        await uploadLibraryDocument("files", file, "library-folder");
-        body = lastFetchCall().init.body as FormData;
-        expect(body.get("folder_id")).toBe("library-folder");
-    });
-
-    it("multipart upload failures use the sanitized API error contract", async () => {
-        fetchMock.mockImplementation(() =>
-            Promise.resolve(new Response("file too large", { status: 413 })),
-        );
-
-        const error = await uploadProjectDocument("p1", file).catch(
-            (e: unknown) => e,
-        );
-
-        expect(error).toBeInstanceOf(MikeApiError);
-        expect(error).toMatchObject({
-            status: 413,
-            message: "The request could not be completed. Please try again.",
-        });
-
-        await expect(uploadStandaloneDocument(file)).rejects.toThrow(
-            "The request could not be completed. Please try again.",
-        );
-        await expect(uploadLibraryDocument("files", file)).rejects.toThrow(
-            "The request could not be completed. Please try again.",
-        );
-    });
-
-    it("uploadDocumentVersion appends the filename field only when given", async () => {
-        fetchMock.mockImplementation(() =>
-            Promise.resolve(jsonResponse({ id: "v1" })),
-        );
-
-        await uploadDocumentVersion("d1", file, "renamed.pdf");
-        let body = lastFetchCall().init.body as FormData;
-        expect(lastFetchCall().url).toBe("/api/single-documents/d1/versions");
-        expect(body.get("filename")).toBe("renamed.pdf");
-
-        await uploadDocumentVersion("d1", file);
-        body = lastFetchCall().init.body as FormData;
-        expect(body.get("filename")).toBeNull();
-    });
-
-    it("uploadDocumentVersion uses the sanitized API error contract", async () => {
-        fetchMock.mockResolvedValue(
-            new Response("database connection failed", { status: 500 }),
-        );
-
-        await expect(uploadDocumentVersion("d1", file)).rejects.toMatchObject({
-            status: 500,
-            message: "Something went wrong. Please try again.",
-        });
-    });
-
-    it("replaceDocumentVersionFile PUTs to the version file route and surfaces errors", async () => {
-        fetchMock.mockResolvedValue(jsonResponse({ id: "v1" }));
-
-        await replaceDocumentVersionFile("d1", "v1", file, "renamed.pdf");
-
-        const { url, init } = lastFetchCall();
-        expect(url).toBe("/api/single-documents/d1/versions/v1/file");
-        expect(init.method).toBe("PUT");
-        expect((init.body as FormData).get("filename")).toBe("renamed.pdf");
-
-        fetchMock.mockResolvedValue(new Response("nope", { status: 409 }));
-        await expect(
-            replaceDocumentVersionFile("d1", "v1", file),
-        ).rejects.toThrow(
-            "The request could not be completed. Please try again.",
-        );
-    });
-
-    it("uploads workflow reference files as authenticated multipart data", async () => {
-        fetchMock.mockResolvedValue(jsonResponse({ id: "ref-1" }));
-
-        await expect(uploadWorkflowReferenceFile("w1", file)).resolves.toEqual({
-            id: "ref-1",
-        });
-
-        const { url, init } = lastFetchCall();
-        expect(url).toBe("/api/workflows/w1/reference-files");
-        expect(init.method).toBe("POST");
-        expect(init.headers).toBeUndefined();
-        expect(init.credentials).toBe("include");
-        expect(init.body).toBeInstanceOf(FormData);
-        expect((init.body as FormData).get("file")).toBeInstanceOf(File);
-
-        fetchMock.mockResolvedValue(
-            jsonResponse({ detail: "Unsupported file" }, { status: 415 }),
-        );
-        await expect(
-            uploadWorkflowReferenceFile("w1", file),
-        ).rejects.toBeInstanceOf(MikeApiError);
-    });
-
-    it("replaces workflow reference files as authenticated multipart data", async () => {
-        fetchMock.mockResolvedValue(jsonResponse({ id: "ref-1" }));
-
-        await expect(
-            replaceWorkflowReferenceFile("w1", "ref-1", file),
-        ).resolves.toEqual({ id: "ref-1" });
-
-        const { url, init } = lastFetchCall();
-        expect(url).toBe("/api/workflows/w1/reference-files/ref-1");
-        expect(init.method).toBe("PUT");
-        expect(init.headers).toBeUndefined();
-        expect(init.credentials).toBe("include");
-        expect(init.body).toBeInstanceOf(FormData);
-        expect((init.body as FormData).get("file")).toBeInstanceOf(File);
-
-        fetchMock.mockResolvedValue(
-            jsonResponse({ detail: "Reference not found" }, { status: 404 }),
-        );
-        await expect(
-            replaceWorkflowReferenceFile("w1", "missing", file),
-        ).rejects.toBeInstanceOf(MikeApiError);
     });
 });
 
@@ -1925,18 +1958,21 @@ describe("thin endpoint wrappers", () => {
         // Account & profile
         {
             name: "createProject",
-            call: () =>
-                createProject("Acme v. Zenith", "CM-42", "litigation", [
-                    "a@b.c",
-                ]),
+            call: () => createProject("Acme v. Zenith", "CM-42", "litigation"),
             url: "/projects",
             method: "POST",
             body: {
                 name: "Acme v. Zenith",
                 cm_number: "CM-42",
                 practice: "litigation",
-                shared_with: ["a@b.c"],
             },
+        },
+        {
+            name: "grantProjectAccess",
+            call: () => grantProjectAccess("p1", "a@b.c"),
+            url: "/projects/p1/access",
+            method: "POST",
+            body: { email: "a@b.c", role: "editor" },
         },
         {
             name: "deleteAccount",
@@ -2222,6 +2258,11 @@ describe("thin endpoint wrappers", () => {
             call: () => deleteDocument("d1"),
             url: "/single-documents/d1",
             method: "DELETE",
+        },
+        {
+            name: "getDocument",
+            call: () => getDocument("d1"),
+            url: "/single-documents/d1",
         },
         {
             name: "resolveDocumentEdit",

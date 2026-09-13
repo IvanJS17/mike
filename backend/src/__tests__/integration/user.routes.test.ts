@@ -182,6 +182,7 @@ vi.mock("../../lib/userDataCleanup", () => ({
     deleteUserAccountData: (...args: unknown[]) =>
         deleteUserAccountData(...args),
     deleteUserProjects: (...args: unknown[]) => deleteUserProjects(...args),
+    deleteProjectsByIds: vi.fn(async () => 1),
 }));
 
 vi.mock("../../lib/userDataExport", () => ({

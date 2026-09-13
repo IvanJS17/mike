@@ -102,14 +102,30 @@ vi.mock("../../middleware/auth", () => ({
 
 vi.mock("../../lib/access", () => ({
     checkProjectAccess: (...args: unknown[]) => checkProjectAccess(...args),
-    ensureDocAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
-    ensureReviewAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
+    ensureDocAccess: vi.fn(async () => ({ ok: true, isCreator: true, orgRole: null, projectRole: "owner" })),
+    ensureReviewAccess: vi.fn(async () => ({ ok: true, isCreator: true, orgRole: null, projectRole: "owner" })),
     filterAccessibleDocumentIds: vi.fn(async (ids: string[]) => ids),
     listAccessibleProjectIds: vi.fn(async () => []),
+    getOrgRole: vi.fn(async () => null),
+    listUserOrgIds: vi.fn(async () => []),
+    getProjectGrantRole: vi.fn(async () => null),
+    resolveContentOrgId: vi.fn(async () => ({ ok: true, orgId: null })),
+    projectHasSharedAudience: vi.fn(async () => false),
+    creatorScopedAllowed: vi.fn(() => true),
+    checkWorkflowAccess: vi.fn(async () => ({ ok: false })),
+    ensureChatAccess: vi.fn(async () => ({ ok: true, isCreator: true, orgRole: null, projectRole: "owner" })),
+    normalizeEmail: (email: unknown) =>
+        typeof email === "string" && email.trim() ? email.trim().toLowerCase() : null,
+    isOrgRole: vi.fn(() => false),
+    isOrgAdmin: vi.fn(() => false),
+    can: vi.fn(() => true),
+    isProjectRole: vi.fn(() => true),
+    ORG_ROLES: ["org_owner", "workspace_admin", "editor", "viewer", "technical_operator"],
 }));
 
 vi.mock("../../lib/userDataCleanup", () => ({
     deleteUserProjects: (...args: unknown[]) => deleteUserProjects(...args),
+    deleteProjectsByIds: vi.fn(async () => 1),
     deleteAllUserChats: vi.fn(async () => {}),
     deleteAllUserTabularReviews: vi.fn(async () => {}),
     deleteUserAccountData: vi.fn(async () => {}),
