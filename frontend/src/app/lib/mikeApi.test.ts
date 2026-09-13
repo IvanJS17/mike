@@ -60,6 +60,7 @@ import {
     getApiKeyStatus,
     getChat,
     getAuditHistory,
+    getDocument,
     getDocumentUrl,
     getLibrary,
     getLibraryLevels,
@@ -157,6 +158,7 @@ import {
     importWorkflowAddon,
     listQuickActions,
     replaceWorkflowReferenceFile,
+    uploadFilesWithSession,
     uploadWorkflowReferenceFile,
     uploadDocumentVersion,
     uploadLibraryDocument,
@@ -1486,6 +1488,35 @@ describe("upload session wrappers", () => {
             files: Array<{ file: File; folderId?: string | null }>;
         };
 
+    it("classifies transport errors for the session retry policy", async () => {
+        vi.mocked(uploadFilesWithSessionCore).mockResolvedValue([]);
+
+        await uploadFilesWithSession({
+            purpose: "document_create",
+            destination: { scope: "standalone" },
+            files: [],
+        });
+
+        const transport = (
+            vi.mocked(uploadFilesWithSessionCore).mock.calls.at(-1)?.[0] as {
+                transport: {
+                    shouldRetryControlRequest: (error: unknown) => boolean;
+                };
+            }
+        ).transport;
+
+        // A typed API error with a non-retryable status stops the loop …
+        expect(
+            transport.shouldRetryControlRequest(
+                new MikeApiError({ message: "invalid", status: 400 }),
+            ),
+        ).toBe(false);
+        // … while an unrecognized error is treated as a transport failure.
+        expect(transport.shouldRetryControlRequest(new Error("socket"))).toBe(
+            true,
+        );
+    });
+
     it("uploads a project document through a document_create session", async () => {
         vi.mocked(uploadFilesWithSessionCore).mockResolvedValue([
             outcome(),
@@ -2215,6 +2246,11 @@ describe("thin endpoint wrappers", () => {
             call: () => deleteDocument("d1"),
             url: "/single-documents/d1",
             method: "DELETE",
+        },
+        {
+            name: "getDocument",
+            call: () => getDocument("d1"),
+            url: "/single-documents/d1",
         },
         {
             name: "resolveDocumentEdit",

@@ -93,4 +93,8 @@ describe("DocTable document drag payload", () => {
             }),
         ).toEqual([]);
     });
+
+    it("returns nothing when the drop carries no payload", () => {
+        expect(readDocumentDragPayload({ getData: () => "" })).toEqual([]);
+    });
 });
