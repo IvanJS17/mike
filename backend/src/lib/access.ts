@@ -453,9 +453,8 @@ export async function checkWorkflowAccess(
 /**
  * Check whether the current user can access a document the caller has
  * already loaded (saves a round-trip vs. having the helper re-fetch).
- * Project documents inherit their container role exactly. Workflow-document
- * support arrives with the workflow-assets slice (LiTT documents carry no
- * `workflow_id` yet).
+ * Project documents inherit their container role exactly; workflow assets
+ * inherit the workflow's access (the `workflow_id` branch below).
  * `isCreator` remains row provenance: a project Owner is not the creator of a
  * colleague's document, while that colleague does not gain extra permissions
  * beyond the inherited container role.
@@ -464,6 +463,7 @@ export async function ensureDocAccess(
     doc: {
         user_id: string | null;
         project_id: string | null;
+        workflow_id?: string | null;
         org_id?: string | null;
     },
     userId: string,
@@ -473,6 +473,21 @@ export async function ensureDocAccess(
     if (doc.project_id) {
         const access = await checkProjectAccess(
             doc.project_id,
+            userId,
+            userEmail,
+            db,
+        );
+        return access.ok
+            ? resourceAccessFor(
+                  access.projectRole,
+                  access.orgRole,
+                  !!doc.user_id && doc.user_id === userId,
+              )
+            : { ok: false };
+    }
+    if (doc.workflow_id) {
+        const access = await checkWorkflowAccess(
+            doc.workflow_id,
             userId,
             userEmail,
             db,
