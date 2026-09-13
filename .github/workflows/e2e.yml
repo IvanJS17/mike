@@ -80,10 +80,13 @@ jobs:
       # must create the bucket after the server is healthy.
       - name: Start MinIO (object storage)
         run: |
+          # docker.io/minio/minio was withdrawn (pull denied since 2026-09-12).
+          # quay.io serves the byte-identical release: same tag, same digest
+          # sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e.
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
           for i in $(seq 1 30); do
             if curl -sf http://localhost:9000/minio/health/ready >/dev/null; then
               echo "MinIO ready"; break
