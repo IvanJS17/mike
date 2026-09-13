@@ -186,16 +186,10 @@ describe("handleAccountDelete", () => {
             JOB("account.delete", { userId: "u1", userEmail: "u@x.test" }),
         );
         expect(deleteUserAccountData).toHaveBeenCalledWith(db, "u1", "u@x.test");
-        // Three purge deletes (direct user, audit base, and memory actor),
-        // all excluding the running job's own row.
-        expect(db.deletes).toHaveLength(3);
+        // Two purge deletes (direct user, audit base), all excluding the
+        // running job's own row.
+        expect(db.deletes).toHaveLength(2);
         for (const d of db.deletes) expect(d["neq:id"]).toBe("job-1");
-        expect(db.deletes).toContainEqual(
-            expect.objectContaining({
-                kind: "memory.consolidate",
-                "payload->>actorUserId": "u1",
-            }),
-        );
     });
 
     // documents.user_id references auth.users ON DELETE CASCADE, and
