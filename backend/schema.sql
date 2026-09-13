@@ -8138,3 +8138,627 @@ revoke execute on function public.cancel_db_jobs(text[])
 grant execute on function public.cancel_db_jobs(text[])
   to service_role;
 
+
+-- ---------------------------------------------------------------------------
+-- S3 sync: organization access & sharing (ported from upstream 7e3607e7;
+-- state after 20260910_03/04). LiTT adaptations: organization_memberships
+-- instead of org_members, no role defaults on grants or invitations, no
+-- implicit org-role content grants (membership alone grants nothing; explicit
+-- overrides only), last-org_owner guard, user_id NOT NULL preserved, legacy
+-- shared_with/allow_edit columns preserved (backfill-only).
+-- ---------------------------------------------------------------------------
+
+create or replace function public.chat_access_role(p_chat_id uuid, p_chat_user_id uuid, p_project_id uuid, p_org_id uuid, p_user_id text, p_user_email text)
+returns text
+language sql
+stable
+set search_path = public
+as $$
+  select case
+    when p_project_id is not null then (
+      select public.project_access_role(
+        p.id, p.user_id, p.org_id, p_user_id, p_user_email
+      ) from public.projects p where p.id = p_project_id
+    )
+    when p_chat_user_id::text = p_user_id then 'owner'
+    else (
+      select g.role from public.chat_access_grants g
+      where g.chat_id = p_chat_id
+        and coalesce(p_user_email, '') <> ''
+        and g.email = lower(p_user_email)
+      limit 1
+    )
+  end;
+$$;
+revoke all on function public.chat_access_role(uuid, uuid, uuid, uuid, text, text) from public, anon, authenticated;
+grant execute on function public.chat_access_role(uuid, uuid, uuid, uuid, text, text) to service_role;
+
+create or replace function public.cleanup_inherited_direct_grants()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if tg_table_name = 'projects' then
+    if new.org_id is not null then
+      delete from public.project_access_grants where project_id = new.id;
+    end if;
+    delete from public.project_org_access_overrides
+    where project_id = new.id and org_id is distinct from new.org_id;
+  elsif tg_table_name = 'chats' then
+    if new.project_id is not null then
+      delete from public.chat_access_grants where chat_id = new.id;
+    end if;
+  elsif tg_table_name = 'tabular_reviews' then
+    if new.project_id is not null then
+      delete from public.tabular_review_access_grants where tabular_review_id = new.id;
+    end if;
+  elsif tg_table_name = 'workflows' then
+    if new.org_id is not null then
+      delete from public.workflow_shares where workflow_id = new.id;
+    end if;
+    delete from public.workflow_org_access_overrides
+    where workflow_id = new.id and org_id is distinct from new.org_id;
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.cleanup_inherited_direct_grants() from public, anon, authenticated;
+
+create or replace function public.cleanup_removed_org_member_overrides()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if tg_op = 'DELETE' or new.status is distinct from 'active' then
+    delete from public.project_org_access_overrides
+    where org_id = old.organization_id and user_id = old.user_id;
+    delete from public.workflow_org_access_overrides
+    where org_id = old.organization_id and user_id = old.user_id;
+  end if;
+  return coalesce(new, old);
+end;
+$$;
+revoke all on function public.cleanup_removed_org_member_overrides() from public, anon, authenticated;
+
+create or replace function public.project_access_role(p_project_id uuid, p_project_user_id uuid, p_org_id uuid, p_user_id text, p_user_email text)
+returns text
+language sql
+stable
+set search_path = public
+as $$
+  select case
+    when p_org_id is not null then (
+      select case
+        when p_project_user_id::text = p_user_id then 'owner'
+        when o.role = 'deny' then null
+        when o.role in ('owner', 'editor', 'viewer') then o.role
+        else null
+      end
+      from public.organization_memberships m
+      left join public.project_org_access_overrides o
+        on o.project_id = p_project_id
+       and o.org_id = p_org_id
+       and o.user_id = m.user_id
+      where m.organization_id = p_org_id
+        and m.user_id::text = p_user_id
+        and m.status = 'active'
+    )
+    when p_project_user_id::text = p_user_id then 'owner'
+    else (
+      select g.role from public.project_access_grants g
+      where g.project_id = p_project_id
+        and coalesce(p_user_email, '') <> ''
+        and g.email = lower(p_user_email)
+      limit 1
+    )
+  end;
+$$;
+revoke all on function public.project_access_role(uuid, uuid, uuid, text, text) from public, anon, authenticated;
+grant execute on function public.project_access_role(uuid, uuid, uuid, text, text) to service_role;
+
+create or replace function public.review_access_role(p_review_id uuid, p_review_user_id uuid, p_project_id uuid, p_org_id uuid, p_user_id text, p_user_email text)
+returns text
+language sql
+stable
+set search_path = public
+as $$
+  select case
+    when p_project_id is not null then (
+      select public.project_access_role(
+        p.id, p.user_id, p.org_id, p_user_id, p_user_email
+      ) from public.projects p where p.id = p_project_id
+    )
+    when p_review_user_id::text = p_user_id then 'owner'
+    else (
+      select g.role from public.tabular_review_access_grants g
+      where g.tabular_review_id = p_review_id
+        and coalesce(p_user_email, '') <> ''
+        and g.email = lower(p_user_email)
+      limit 1
+    )
+  end;
+$$;
+revoke all on function public.review_access_role(uuid, uuid, uuid, uuid, text, text) from public, anon, authenticated;
+grant execute on function public.review_access_role(uuid, uuid, uuid, uuid, text, text) to service_role;
+
+create or replace function public.sync_project_child_org_id()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare parent_org_id uuid;
+begin
+  if new.project_id is null then return new; end if;
+  select p.org_id into parent_org_id
+  from public.projects p where p.id = new.project_id for key share;
+  if not found then
+    raise exception 'Project not found' using errcode = '23503';
+  end if;
+  new.org_id := parent_org_id;
+  return new;
+end;
+$$;
+revoke all on function public.sync_project_child_org_id() from public, anon, authenticated;
+
+create or replace function public.validate_direct_access_scope()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare invalid_scope boolean;
+begin
+  case tg_table_name
+    when 'project_access_grants' then
+      select p.org_id is not null into invalid_scope
+      from public.projects p where p.id = new.project_id for update;
+    when 'chat_access_grants' then
+      select c.project_id is not null into invalid_scope
+      from public.chats c where c.id = new.chat_id for update;
+    when 'tabular_review_access_grants' then
+      select tr.project_id is not null into invalid_scope
+      from public.tabular_reviews tr where tr.id = new.tabular_review_id for update;
+    when 'workflow_shares' then
+      select w.org_id is not null into invalid_scope
+      from public.workflows w where w.id = new.workflow_id for update;
+    else
+      raise exception 'Unsupported direct access table';
+  end case;
+  if coalesce(invalid_scope, true) then
+    raise exception 'Direct grants are not allowed for organization or inherited content'
+      using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.validate_direct_access_scope() from public, anon, authenticated;
+
+create or replace function public.validate_org_access_override()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare resource_org_id uuid;
+declare resource_creator_id uuid;
+begin
+  case tg_table_name
+    when 'project_org_access_overrides' then
+      select p.org_id, p.user_id into resource_org_id, resource_creator_id
+      from public.projects p where p.id = new.project_id for update;
+    when 'workflow_org_access_overrides' then
+      select w.org_id, w.user_id into resource_org_id, resource_creator_id
+      from public.workflows w where w.id = new.workflow_id for update;
+    else
+      raise exception 'Unsupported organization override table';
+  end case;
+
+  if resource_org_id is null or resource_org_id is distinct from new.org_id then
+    raise exception 'Organization override does not match the resource organization'
+      using errcode = '23514';
+  end if;
+  if resource_creator_id = new.user_id then
+    raise exception 'The creator is always an owner'
+      using errcode = '23514';
+  end if;
+  perform 1
+  from public.organization_memberships m
+  where m.organization_id = new.org_id and m.user_id = new.user_id and m.status = 'active'
+  for key share;
+  if not found then
+    raise exception 'Organization access overrides require active membership'
+      using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.validate_org_access_override() from public, anon, authenticated;
+
+create or replace function public.organization_memberships_protect_last_owner()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare remaining_owners integer;
+begin
+  if old.role = 'org_owner' and old.status = 'active' then
+    if tg_op = 'DELETE' or new.role <> 'org_owner' or new.status <> 'active' then
+      if tg_op = 'DELETE' then
+        if not exists (select 1 from public.organizations where id = old.organization_id) then
+          return old; -- organization teardown cascade; nothing left to protect
+        end if;
+      end if;
+      select count(*) into remaining_owners
+      from public.organization_memberships
+      where organization_id = old.organization_id
+        and role = 'org_owner'
+        and status = 'active'
+        and user_id <> old.user_id;
+      if remaining_owners = 0 then
+        raise exception 'An organization must keep at least one owner'
+          using errcode = '23514';
+      end if;
+    end if;
+  end if;
+  return coalesce(new, old);
+end;
+$$;
+revoke all on function public.organization_memberships_protect_last_owner() from public, anon, authenticated;
+
+create or replace function public.workflow_access_role(p_workflow_id uuid, p_workflow_user_id uuid, p_org_id uuid, p_user_id text, p_user_email text)
+returns text
+language sql
+stable
+set search_path = public
+as $$
+  select case
+    when p_org_id is not null then (
+      select case
+        when p_workflow_user_id::text = p_user_id then 'owner'
+        when o.role = 'deny' then null
+        when o.role in ('owner', 'editor', 'viewer') then o.role
+        else null
+      end
+      from public.organization_memberships m
+      left join public.workflow_org_access_overrides o
+        on o.workflow_id = p_workflow_id
+       and o.org_id = p_org_id
+       and o.user_id = m.user_id
+      where m.organization_id = p_org_id
+        and m.user_id::text = p_user_id
+        and m.status = 'active'
+    )
+    when p_workflow_user_id::text = p_user_id then 'owner'
+    else (
+      select s.role from public.workflow_shares s
+      where s.workflow_id = p_workflow_id
+        and coalesce(p_user_email, '') <> ''
+        and s.shared_with_email = lower(p_user_email)
+      limit 1
+    )
+  end;
+$$;
+revoke all on function public.workflow_access_role(uuid, uuid, uuid, text, text) from public, anon, authenticated;
+grant execute on function public.workflow_access_role(uuid, uuid, uuid, text, text) to service_role;
+
+create table if not exists public.chat_access_grants (
+  id uuid primary key default gen_random_uuid(),
+  chat_id uuid not null references public.chats(id) on delete cascade,
+  email text not null,
+  role text not null,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint chat_access_grants_chat_id_email_key unique (chat_id, email),
+  constraint chat_access_grants_email_lowercase check (email = lower(email)),
+  constraint chat_access_grants_role_check check (role in ('owner', 'editor', 'viewer'))
+);
+alter table public.chat_access_grants enable row level security;
+create index if not exists idx_chat_access_grants_email on public.chat_access_grants(email);
+create index if not exists idx_chat_access_grants_chat on public.chat_access_grants(chat_id);
+drop trigger if exists chat_access_grants_scope_guard on public.chat_access_grants;
+create trigger chat_access_grants_scope_guard
+  before insert or update on public.chat_access_grants
+  for each row execute function public.validate_direct_access_scope();
+revoke all on public.chat_access_grants from anon;
+revoke all on public.chat_access_grants from authenticated;
+grant delete, insert, select, update on public.chat_access_grants to service_role;
+
+create table if not exists public.project_access_grants (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects(id) on delete cascade,
+  email text not null,
+  role text not null,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint project_access_grants_project_id_email_key unique (project_id, email),
+  constraint project_access_grants_email_lowercase check (email = lower(email)),
+  constraint project_access_grants_role_check check (role in ('owner', 'editor', 'viewer'))
+);
+alter table public.project_access_grants enable row level security;
+create index if not exists idx_project_access_grants_email on public.project_access_grants(email);
+create index if not exists idx_project_access_grants_project on public.project_access_grants(project_id);
+drop trigger if exists project_access_grants_scope_guard on public.project_access_grants;
+create trigger project_access_grants_scope_guard
+  before insert or update on public.project_access_grants
+  for each row execute function public.validate_direct_access_scope();
+revoke all on public.project_access_grants from anon;
+revoke all on public.project_access_grants from authenticated;
+grant delete, insert, select, update on public.project_access_grants to service_role;
+
+create table if not exists public.tabular_review_access_grants (
+  id uuid primary key default gen_random_uuid(),
+  tabular_review_id uuid not null references public.tabular_reviews(id) on delete cascade,
+  email text not null,
+  role text not null,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint tabular_review_access_grants_tabular_review_id_email_key unique (tabular_review_id, email),
+  constraint tabular_review_access_grants_email_lowercase check (email = lower(email)),
+  constraint tabular_review_access_grants_role_check check (role in ('owner', 'editor', 'viewer'))
+);
+alter table public.tabular_review_access_grants enable row level security;
+create index if not exists idx_tabular_review_access_grants_review on public.tabular_review_access_grants(tabular_review_id);
+create index if not exists idx_tabular_review_access_grants_email on public.tabular_review_access_grants(email);
+drop trigger if exists tabular_review_access_grants_scope_guard on public.tabular_review_access_grants;
+create trigger tabular_review_access_grants_scope_guard
+  before insert or update on public.tabular_review_access_grants
+  for each row execute function public.validate_direct_access_scope();
+revoke all on public.tabular_review_access_grants from anon;
+revoke all on public.tabular_review_access_grants from authenticated;
+grant delete, insert, select, update on public.tabular_review_access_grants to service_role;
+
+create table if not exists public.project_org_access_overrides (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects(id) on delete cascade,
+  org_id uuid not null references public.organizations(id) on delete cascade,
+  user_id uuid not null,
+  role text not null,
+  assigned_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint project_org_access_overrides_org_id_user_id_fkey
+    foreign key (org_id, user_id)
+    references public.organization_memberships(organization_id, user_id) on delete cascade,
+  constraint project_org_access_overrides_project_id_user_id_key unique (project_id, user_id),
+  constraint project_org_access_overrides_role_check check (role in ('owner', 'editor', 'viewer', 'deny'))
+);
+alter table public.project_org_access_overrides enable row level security;
+create index if not exists idx_project_org_access_overrides_user on public.project_org_access_overrides(user_id);
+drop trigger if exists project_org_access_overrides_guard on public.project_org_access_overrides;
+create trigger project_org_access_overrides_guard
+  before insert or update on public.project_org_access_overrides
+  for each row execute function public.validate_org_access_override();
+revoke all on public.project_org_access_overrides from anon;
+revoke all on public.project_org_access_overrides from authenticated;
+grant delete, insert, select, update on public.project_org_access_overrides to service_role;
+
+create table if not exists public.workflow_org_access_overrides (
+  id uuid primary key default gen_random_uuid(),
+  workflow_id uuid not null references public.workflows(id) on delete cascade,
+  org_id uuid not null references public.organizations(id) on delete cascade,
+  user_id uuid not null,
+  role text not null,
+  assigned_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint workflow_org_access_overrides_org_id_user_id_fkey
+    foreign key (org_id, user_id)
+    references public.organization_memberships(organization_id, user_id) on delete cascade,
+  constraint workflow_org_access_overrides_workflow_id_user_id_key unique (workflow_id, user_id),
+  constraint workflow_org_access_overrides_role_check check (role in ('owner', 'editor', 'viewer', 'deny'))
+);
+alter table public.workflow_org_access_overrides enable row level security;
+create index if not exists idx_workflow_org_access_overrides_user on public.workflow_org_access_overrides(user_id);
+drop trigger if exists workflow_org_access_overrides_guard on public.workflow_org_access_overrides;
+create trigger workflow_org_access_overrides_guard
+  before insert or update on public.workflow_org_access_overrides
+  for each row execute function public.validate_org_access_override();
+revoke all on public.workflow_org_access_overrides from anon;
+revoke all on public.workflow_org_access_overrides from authenticated;
+grant delete, insert, select, update on public.workflow_org_access_overrides to service_role;
+
+create table if not exists public.org_invitations (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references public.organizations(id) on delete cascade,
+  email text not null,
+  role text not null,
+  invited_by uuid references auth.users(id) on delete set null,
+  status text not null default 'pending',
+  expires_at timestamptz not null default (now() + '14 days'::interval),
+  created_at timestamptz not null default now(),
+  accepted_at timestamptz,
+  declined_at timestamptz,
+  cancelled_at timestamptz,
+  constraint org_invitations_email_lowercase check (email = lower(email)),
+  constraint org_invitations_role_check check (role in ('org_owner', 'workspace_admin', 'editor', 'viewer', 'technical_operator')),
+  constraint org_invitations_status_check check (status in ('pending', 'accepted', 'declined', 'cancelled', 'expired'))
+);
+alter table public.org_invitations enable row level security;
+create index if not exists idx_org_invitations_org on public.org_invitations(org_id);
+create index if not exists idx_org_invitations_email on public.org_invitations(email) where status = 'pending';
+create unique index if not exists org_invitations_active_unique on public.org_invitations(org_id, email) where status = 'pending';
+revoke all on public.org_invitations from anon;
+revoke all on public.org_invitations from authenticated;
+grant delete, insert, select, update on public.org_invitations to service_role;
+
+alter table public.chats
+  add column if not exists org_id uuid;
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'chats_org_requires_project'
+      and conrelid = 'public.chats'::regclass
+  ) then
+    alter table public.chats
+      add constraint chats_org_requires_project
+      check (org_id is null or project_id is not null);
+  end if;
+end;
+$$;
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'chats_org_id_fkey'
+      and conrelid = 'public.chats'::regclass
+  ) then
+    alter table public.chats
+      add constraint chats_org_id_fkey
+      foreign key (org_id) references public.organizations(id) on delete restrict;
+  end if;
+end;
+$$;
+create index if not exists idx_chats_org on public.chats(org_id);
+drop trigger if exists chats_cleanup_direct_grants on public.chats;
+create trigger chats_cleanup_direct_grants
+  after insert or update of project_id, org_id on public.chats
+  for each row execute function public.cleanup_inherited_direct_grants();
+drop trigger if exists chats_sync_project_org on public.chats;
+create trigger chats_sync_project_org
+  before insert or update of project_id, org_id on public.chats
+  for each row execute function public.sync_project_child_org_id();
+
+alter table public.documents
+  add column if not exists org_id uuid;
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'documents_org_id_fkey'
+      and conrelid = 'public.documents'::regclass
+  ) then
+    alter table public.documents
+      add constraint documents_org_id_fkey
+      foreign key (org_id) references public.organizations(id) on delete restrict;
+  end if;
+end;
+$$;
+create index if not exists idx_documents_org on public.documents(org_id);
+drop trigger if exists documents_sync_project_org on public.documents;
+create trigger documents_sync_project_org
+  before insert or update of project_id, org_id on public.documents
+  for each row execute function public.sync_project_child_org_id();
+
+alter table public.projects
+  add column if not exists org_id uuid;
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'projects_org_id_fkey'
+      and conrelid = 'public.projects'::regclass
+  ) then
+    alter table public.projects
+      add constraint projects_org_id_fkey
+      foreign key (org_id) references public.organizations(id) on delete restrict;
+  end if;
+end;
+$$;
+create index if not exists idx_projects_org on public.projects(org_id);
+drop trigger if exists projects_cleanup_direct_grants on public.projects;
+create trigger projects_cleanup_direct_grants
+  after insert or update of org_id on public.projects
+  for each row execute function public.cleanup_inherited_direct_grants();
+
+alter table public.tabular_reviews
+  add column if not exists org_id uuid;
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'tabular_reviews_org_id_fkey'
+      and conrelid = 'public.tabular_reviews'::regclass
+  ) then
+    alter table public.tabular_reviews
+      add constraint tabular_reviews_org_id_fkey
+      foreign key (org_id) references public.organizations(id) on delete restrict;
+  end if;
+end;
+$$;
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'tabular_reviews_org_requires_project'
+      and conrelid = 'public.tabular_reviews'::regclass
+  ) then
+    alter table public.tabular_reviews
+      add constraint tabular_reviews_org_requires_project
+      check (org_id is null or project_id is not null);
+  end if;
+end;
+$$;
+create index if not exists idx_tabular_reviews_org on public.tabular_reviews(org_id);
+drop trigger if exists tabular_reviews_cleanup_direct_grants on public.tabular_reviews;
+create trigger tabular_reviews_cleanup_direct_grants
+  after insert or update of project_id, org_id on public.tabular_reviews
+  for each row execute function public.cleanup_inherited_direct_grants();
+drop trigger if exists tabular_reviews_sync_project_org on public.tabular_reviews;
+create trigger tabular_reviews_sync_project_org
+  before insert or update of project_id, org_id on public.tabular_reviews
+  for each row execute function public.sync_project_child_org_id();
+
+alter table public.workflows
+  add column if not exists org_id uuid;
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'workflows_org_id_fkey'
+      and conrelid = 'public.workflows'::regclass
+  ) then
+    alter table public.workflows
+      add constraint workflows_org_id_fkey
+      foreign key (org_id) references public.organizations(id) on delete restrict;
+  end if;
+end;
+$$;
+create index if not exists idx_workflows_org on public.workflows(org_id);
+drop trigger if exists workflows_cleanup_direct_grants on public.workflows;
+create trigger workflows_cleanup_direct_grants
+  after insert or update of org_id on public.workflows
+  for each row execute function public.cleanup_inherited_direct_grants();
+
+alter table public.workflow_shares
+  add column if not exists role text not null default 'viewer';
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'workflow_shares_role_check'
+      and conrelid = 'public.workflow_shares'::regclass
+  ) then
+    alter table public.workflow_shares
+      add constraint workflow_shares_role_check
+      check (role in ('owner', 'editor', 'viewer'));
+  end if;
+end;
+$$;
+drop trigger if exists workflow_shares_scope_guard on public.workflow_shares;
+create trigger workflow_shares_scope_guard
+  before insert or update on public.workflow_shares
+  for each row execute function public.validate_direct_access_scope();
+
+drop trigger if exists organization_memberships_cleanup_access_overrides
+  on public.organization_memberships;
+create trigger organization_memberships_cleanup_access_overrides
+  after update of status or delete on public.organization_memberships
+  for each row execute function public.cleanup_removed_org_member_overrides();
+
+drop trigger if exists organization_memberships_last_owner_guard
+  on public.organization_memberships;
+create trigger organization_memberships_last_owner_guard
+  before update of role, status or delete on public.organization_memberships
+  for each row execute function public.organization_memberships_protect_last_owner();

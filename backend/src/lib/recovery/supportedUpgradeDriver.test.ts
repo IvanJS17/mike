@@ -24,6 +24,8 @@ describe("supported populated legacy Drive upgrade manifest", () => {
       "20260909_03_recovery_remove_us_research_preference.sql",
       "20260910_01_recovery_upstream_upload_sessions.sql",
       "20260910_02_recovery_upstream_db_jobs.sql",
+      "20260910_03_recovery_upstream_organization_access.sql",
+      "20260910_04_recovery_upstream_migrate_legacy_sharing.sql",
     ]);
   });
 
