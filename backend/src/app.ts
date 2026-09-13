@@ -18,10 +18,12 @@ import { userRouter } from "./routes/user";
 import { modelsRouter } from "./routes/models";
 import { downloadsRouter } from "./routes/downloads";
 import { auditRouter } from "./routes/audit";
+import { uploadSessionsRouter } from "./routes/uploadSessions";
 import { aiRecoveryRouter } from "./routes/aiRecovery";
 import { matterSettingsRouter } from "./routes/matterSettings";
 import { authRouter } from "./routes/auth";
 import { manifestPublicKey } from "./lib/manifestSigning";
+import { envInt } from "./lib/runtimeConfig";
 import {
   handleUnhandledError,
   protectInternalErrorResponses,
@@ -34,13 +36,6 @@ const isProduction = process.env.NODE_ENV === "production";
 // Ceiling for JSON API requests. File uploads use multipart handling and
 // are governed by separate upload limits.
 const JSON_BODY_LIMIT = "50mb";
-
-function envInt(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
 
 function minutes(value: number): number {
   return value * 60 * 1000;
@@ -81,7 +76,12 @@ const TOOL_RESULT_PATH = "/word-chat/tool-result";
 const generalLimiter = makeLimiter({
   windowMs: minutes(envInt("RATE_LIMIT_GENERAL_WINDOW_MINUTES", 15)),
   max: envInt("RATE_LIMIT_GENERAL_MAX", 300),
-  skip: (req) => req.path === TOOL_RESULT_PATH,
+  // Upload status polling has its own authenticated per-user limiter. Keep it
+  // and the dedicated Word tool-result lane out of the shared IP budget.
+  skip: (req) =>
+    req.path === TOOL_RESULT_PATH ||
+    req.path === "/upload-sessions" ||
+    req.path.startsWith("/upload-sessions/"),
 });
 
 const toolResultLimiter = makeLimiter({
@@ -284,6 +284,7 @@ app.use("/user", userRouter);
 app.use("/users", userRouter);
 app.use("/download", downloadsRouter);
 app.use("/audit", auditRouter);
+app.use("/upload-sessions", uploadSessionsRouter);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
