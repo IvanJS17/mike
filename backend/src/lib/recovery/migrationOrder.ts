@@ -51,6 +51,8 @@ export const SUPPORTED_RECOVERY_MIGRATION_ORDER = [
   "20260910_03_recovery_upstream_organization_access.sql",
   "20260910_04_recovery_upstream_migrate_legacy_sharing.sql",
   "20260910_05_recovery_upstream_workflow_assets.sql",
+  "20260910_06_recovery_scoped_memory_files.sql",
+  "20260910_07_recovery_memory_safety_boundaries.sql",
 ] as const;
 
 const RECOVERY_NAME_PATTERN = /^(\d{8})_(\d{2})_recovery_([a-z0-9_]+)\.sql$/;
