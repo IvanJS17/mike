@@ -14,6 +14,7 @@ import { LIQUID_GLASS_TRANSLUCENT_CLASS } from "@/shared/ui/LiquidGlassUI";
 
 interface Props {
     doc: { document_id: string; version_id?: string | null } | null;
+    displayUrl?: string | null;
     /** Preferred: one or more (page, quote) pairs to highlight. */
     quotes?: CitationQuote[];
     /** Changes when the parent wants the current quote re-focused. */
@@ -57,6 +58,7 @@ export function getObservedPanelWidth(entry: ResizeObserverEntry): number {
 
 export function PdfView({
     doc,
+    displayUrl,
     quotes,
     quoteFocusKey,
     quote,
@@ -94,6 +96,7 @@ export function PdfView({
     const { result, loading, error } = useFetchSingleDoc(
         doc?.document_id ?? null,
         doc?.version_id ?? null,
+        displayUrl,
     );
 
     // Track container width via ResizeObserver so re-renders fire on resize

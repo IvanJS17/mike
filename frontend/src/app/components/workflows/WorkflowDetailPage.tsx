@@ -80,10 +80,7 @@ import { useAuth } from "@/app/contexts/AuthContext";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
 import { useQueryParamTab } from "@/app/hooks/useQueryParamTab";
 import { downloadWorkflowZip } from "./workflowZipExport";
-import {
-  WorkflowReferenceFiles,
-  type WorkflowReferenceFilesHandle,
-} from "./WorkflowReferenceFiles";
+import { WorkflowAssets, type WorkflowAssetsHandle } from "./WorkflowAssets";
 // dynamic import keeps Tiptap (browser-only) out of the SSR bundle
 const WorkflowPromptEditor = dynamic(
   () =>
@@ -130,10 +127,10 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
   // Editor state
   const [promptMd, setPromptMd] = useState("");
   const [columns, setColumns] = useState<ColumnConfig[]>([]);
-  const [referenceFilesUploading, setReferenceFilesUploading] = useState(false);
-  const [draggingReferenceFiles, setDraggingReferenceFiles] = useState(false);
-  const referenceFilesRef = useRef<WorkflowReferenceFilesHandle>(null);
-  const pendingReferenceFilesRef = useRef<File[] | null>(null);
+  const [assetsUploading, setAssetsUploading] = useState(false);
+  const [draggingAssets, setDraggingAssets] = useState(false);
+  const assetsRef = useRef<WorkflowAssetsHandle>(null);
+  const pendingAssetsRef = useRef<File[] | null>(null);
   const searchParams = useSearchParams();
   const [assistantTab, setAssistantTab] = useQueryParamTab(
     ASSISTANT_TABS,
@@ -186,56 +183,56 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
   }, [colActionsOpen]);
 
   useEffect(() => {
-    if (assistantTab !== "assets" || !pendingReferenceFilesRef.current) return;
-    const pendingFiles = pendingReferenceFilesRef.current;
-    pendingReferenceFilesRef.current = null;
-    referenceFilesRef.current?.uploadFiles(pendingFiles);
+    if (assistantTab !== "assets" || !pendingAssetsRef.current) return;
+    const pendingFiles = pendingAssetsRef.current;
+    pendingAssetsRef.current = null;
+    assetsRef.current?.uploadFiles(pendingFiles);
   }, [assistantTab]);
 
   function hasFilePayload(dataTransfer: DataTransfer) {
     return Array.from(dataTransfer.types).includes("Files");
   }
 
-  function handleReferenceDragOver(event: DragEvent<HTMLDivElement>) {
+  function handleAssetDragOver(event: DragEvent<HTMLDivElement>) {
     if (!hasFilePayload(event.dataTransfer)) return;
     event.preventDefault();
     if (
       workflow?.metadata.type !== "assistant" ||
       readOnly ||
-      referenceFilesUploading
+      assetsUploading
     ) {
       return;
     }
     event.dataTransfer.dropEffect = "copy";
-    setDraggingReferenceFiles(true);
+    setDraggingAssets(true);
   }
 
-  function handleReferenceDragLeave(event: DragEvent<HTMLDivElement>) {
+  function handleAssetDragLeave(event: DragEvent<HTMLDivElement>) {
     if (
       !event.currentTarget.contains(event.relatedTarget as Node | null)
     ) {
-      setDraggingReferenceFiles(false);
+      setDraggingAssets(false);
     }
   }
 
-  function handleReferenceDrop(event: DragEvent<HTMLDivElement>) {
+  function handleAssetDrop(event: DragEvent<HTMLDivElement>) {
     if (!hasFilePayload(event.dataTransfer)) return;
     event.preventDefault();
     event.stopPropagation();
-    setDraggingReferenceFiles(false);
+    setDraggingAssets(false);
     if (workflow?.metadata.type !== "assistant" || readOnly) return;
     // A batch is already uploading: dropping more files now would interleave
-    // with it (WorkflowReferenceFiles also rejects and explains). The toolbar
+    // with it (WorkflowAssets also rejects and explains). The toolbar
     // button is disabled for the same window.
-    if (referenceFilesUploading) return;
+    if (assetsUploading) return;
 
     const files = Array.from(event.dataTransfer.files);
     if (files.length === 0) return;
-    if (assistantTab === "assets" && referenceFilesRef.current) {
-      referenceFilesRef.current.uploadFiles(files);
+    if (assistantTab === "assets" && assetsRef.current) {
+      assetsRef.current.uploadFiles(files);
       return;
     }
-    pendingReferenceFilesRef.current = files;
+    pendingAssetsRef.current = files;
     setAssistantTab("assets");
   }
 
@@ -491,12 +488,12 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
   return (
     <div
       className="flex flex-col h-full"
-      onDragOver={handleReferenceDragOver}
-      onDragLeave={handleReferenceDragLeave}
-      onDrop={handleReferenceDrop}
+      onDragOver={handleAssetDragOver}
+      onDragLeave={handleAssetDragLeave}
+      onDrop={handleAssetDrop}
     >
       <UploadOverlay
-        open={draggingReferenceFiles}
+        open={draggingAssets}
         label="Drop files here to add as workflow assets"
       />
       {/* Page header */}
@@ -650,13 +647,13 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
               actions={
                 assistantTab === "assets" && !readOnly ? (
                   <TabPillButton
-                    disabled={referenceFilesUploading}
+                    disabled={assetsUploading}
                     onClick={() =>
-                      referenceFilesRef.current?.openUploadPicker()
+                      assetsRef.current?.openUploadPicker()
                     }
                   >
                     <Upload className="h-3.5 w-3.5" />
-                    {referenceFilesUploading ? "Uploading…" : "Upload files"}
+                    {assetsUploading ? "Uploading…" : "Upload files"}
                   </TabPillButton>
                 ) : undefined
               }
@@ -670,11 +667,11 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
                 />
               </div>
             ) : (
-              <WorkflowReferenceFiles
-                ref={referenceFilesRef}
+              <WorkflowAssets
+                ref={assetsRef}
                 workflowId={id}
                 readOnly={readOnly}
-                onUploadingChange={setReferenceFilesUploading}
+                onUploadingChange={setAssetsUploading}
               />
             )}
           </>
