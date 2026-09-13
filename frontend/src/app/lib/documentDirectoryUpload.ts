@@ -3,7 +3,12 @@ export type DocumentUploadEntry = {
     relativePath: string;
 };
 
-export const MAX_DOCUMENTS_PER_DIRECTORY_UPLOAD = 50;
+// Pre-flight ceiling for one drop/selection. The upload client chunks large
+// selections into <=50-file sessions itself, so this is not the session limit —
+// it only stops a mis-drop (for example a home directory) from queueing
+// hundreds of sessions against the 50-session hourly cap. 500 files = at most
+// 10 sessions.
+export const MAX_DOCUMENTS_PER_DIRECTORY_UPLOAD = 500;
 export const DOCUMENT_UPLOAD_CONCURRENCY = 2;
 
 export type DocumentUploadProgressEntry = {
@@ -25,37 +30,9 @@ export type DocumentUploadFolderPathResolution<TFolder> =
           folders: TFolder[];
       };
 
-export async function settleWithConcurrency<TItem, TResult>(
-    items: readonly TItem[],
-    concurrency: number,
-    worker: (item: TItem, index: number) => Promise<TResult>,
-): Promise<PromiseSettledResult<TResult>[]> {
-    if (items.length === 0) return [];
-    const results = new Array<PromiseSettledResult<TResult>>(items.length);
-    const workerCount = Math.min(
-        items.length,
-        Math.max(1, Math.floor(concurrency)),
-    );
-    let nextIndex = 0;
-
-    const runWorker = async () => {
-        while (nextIndex < items.length) {
-            const index = nextIndex;
-            nextIndex += 1;
-            try {
-                results[index] = {
-                    status: "fulfilled",
-                    value: await worker(items[index], index),
-                };
-            } catch (reason) {
-                results[index] = { status: "rejected", reason };
-            }
-        }
-    };
-
-    await Promise.all(Array.from({ length: workerCount }, runWorker));
-    return results;
-}
+// Re-exported from the shared client so existing importers keep one path while
+// the upload-session client and the DocTable share a single implementation.
+export { settleWithConcurrency } from "@/shared/lib/settleWithConcurrency";
 
 export async function resolveDocumentUploadRootFolder<TFolder>({
     rootFolderName,

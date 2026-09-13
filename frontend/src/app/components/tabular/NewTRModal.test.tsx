@@ -1,17 +1,19 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-    uploadProjectDocument,
-    uploadStandaloneDocument,
+    uploadProjectDocuments,
+    uploadStandaloneDocuments,
 } from "@/app/lib/mikeApi";
 import type { Document } from "../shared/types";
 import { NewTRModal } from "./NewTRModal";
 
 vi.mock("@/app/lib/mikeApi", () => ({
+    UploadBatchError: class UploadBatchError extends Error {},
+    failedUploadMessage: vi.fn(() => "upload failed"),
     getProject: vi.fn(),
     listWorkflows: vi.fn(async () => []),
-    uploadProjectDocument: vi.fn(),
-    uploadStandaloneDocument: vi.fn(),
+    uploadProjectDocuments: vi.fn(),
+    uploadStandaloneDocuments: vi.fn(),
 }));
 
 vi.mock("@/app/contexts/UserProfileContext", () => ({
@@ -124,9 +126,15 @@ describe("NewTRModal", () => {
             filename: "New agreement.pdf",
             file_type: "pdf",
         };
-        vi.mocked(uploadProjectDocument).mockResolvedValue(
-            uploadedDocument as Document,
-        );
+        vi.mocked(uploadProjectDocuments).mockResolvedValue([
+            {
+                clientId: "client-1",
+                filename: "New agreement.pdf",
+                status: "completed",
+                result: uploadedDocument as Document,
+                errorCode: null,
+            },
+        ]);
 
         render(
             <NewTRModal
@@ -154,11 +162,10 @@ describe("NewTRModal", () => {
         fireEvent.change(input!, { target: { files: [file] } });
 
         await waitFor(() =>
-            expect(uploadProjectDocument).toHaveBeenCalledWith(
-                "project-1",
-                file,
-            ),
+            expect(uploadProjectDocuments).toHaveBeenCalledWith("project-1", [
+                { file },
+            ]),
         );
-        expect(uploadStandaloneDocument).not.toHaveBeenCalled();
+        expect(uploadStandaloneDocuments).not.toHaveBeenCalled();
     });
 });
