@@ -14,6 +14,7 @@ import {
     requestPasswordReset,
     signup,
     startGoogleOAuth,
+    startSso,
     unenrollMfa,
     updateAuthEmail,
     updateAuthPassword,
@@ -137,6 +138,17 @@ describe("cookie auth client", () => {
     });
 
     it.each([
+        [
+            "SSO with company email",
+            () => startSso("/onboarding", "lawyer@example.com"),
+            "/api/auth/oauth",
+            "POST",
+            {
+                provider: "sso",
+                next: "/onboarding",
+                email: "lawyer@example.com",
+            },
+        ],
         [
             "signup",
             () => signup("new@example.test", "long-password", "/onboarding"),
