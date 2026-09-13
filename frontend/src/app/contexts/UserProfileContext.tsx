@@ -50,6 +50,7 @@ interface UserProfile {
     tier: string;
     titleModel: string | null;
     tabularModel: string | null;
+    memoryCuratorModel: string | null;
     lastSelectedChatModel: string | null;
     lastSelectedReasoningLevel: NonNullable<Message["reasoning"]>;
     mfaOnLogin: boolean;
@@ -58,6 +59,7 @@ interface UserProfile {
     vercelModels: string[];
     openCodeGoModels: string[];
     darkMode: boolean;
+    projectMemoryDefault: boolean;
     apiKeys: ApiKeyState;
 }
 
@@ -82,7 +84,7 @@ interface UserProfileContextType {
     ) => Promise<boolean>;
     syncPasswordSet: () => Promise<boolean>;
     updateModelPreference: (
-        field: "titleModel" | "tabularModel",
+        field: "titleModel" | "tabularModel" | "memoryCuratorModel",
         value: string | null,
     ) => Promise<boolean>;
     persistChatModelSelection: (
@@ -99,6 +101,7 @@ interface UserProfileContextType {
     updateVercelModels: (models: string[]) => Promise<boolean>;
     updateOpenCodeGoModels: (models: string[]) => Promise<boolean>;
     updateDarkMode: (enabled: boolean) => Promise<void>;
+    updateProjectMemoryDefault: (enabled: boolean) => Promise<void>;
     updateApiKey: (
         provider: ApiKeyProvider,
         value: string | null,
@@ -154,10 +157,15 @@ function toProfile(data: ApiUserProfile): UserProfile {
         onboardingVersion: profile.onboardingVersion ?? null,
         onboardingComplete: profile.onboardingComplete !== false,
         passwordSet: profile.passwordSet === true,
+        memoryCuratorModel: profile.memoryCuratorModel ?? null,
         lastSelectedChatModel: profile.lastSelectedChatModel ?? null,
         lastSelectedReasoningLevel:
             profile.lastSelectedReasoningLevel ?? "high",
         mfaOnLogin: profile.mfaOnLogin === true,
+        // LITT (S5d): memory is opt-in — absent/null falls back to false, so a
+        // missing value can never silently enable memory for new projects
+        // (upstream's `!== false` encoded their default-ON behaviour).
+        projectMemoryDefault: profile.projectMemoryDefault === true,
         openRouterModels: Array.isArray(profile.openRouterModels)
             ? profile.openRouterModels
             : [],
@@ -218,6 +226,7 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
                 tier: "Free",
                 titleModel: null,
                 tabularModel: null,
+                memoryCuratorModel: null,
                 lastSelectedChatModel: null,
                 lastSelectedReasoningLevel: "high",
                 mfaOnLogin: false,
@@ -226,6 +235,7 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
                 vercelModels: [],
                 openCodeGoModels: [],
                 darkMode: false,
+                projectMemoryDefault: false,
                 apiKeys: emptyApiKeys(),
             });
         } finally {
@@ -324,7 +334,7 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
 
     const updateModelPreference = useCallback(
         async (
-            field: "titleModel" | "tabularModel",
+            field: "titleModel" | "tabularModel" | "memoryCuratorModel",
             value: string | null,
         ): Promise<boolean> => {
             if (!user) return false;
@@ -528,6 +538,24 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
         [user, profile?.darkMode],
     );
 
+    const updateProjectMemoryDefault = useCallback(
+        async (enabled: boolean): Promise<void> => {
+            if (!user) {
+                throw new Error("Sign in to update memory settings.");
+            }
+            const updated = await updateUserProfile({
+                projectMemoryDefault: enabled,
+            });
+            const normalized = toProfile(updated);
+            setProfile((prev) =>
+                prev
+                    ? { ...prev, ...normalized, projectMemoryDefault: enabled }
+                    : null,
+            );
+        },
+        [user],
+    );
+
     const updateApiKey = useCallback(
         async (
             provider: ApiKeyProvider,
@@ -600,6 +628,7 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
                 updateVercelModels,
                 updateOpenCodeGoModels,
                 updateDarkMode,
+                updateProjectMemoryDefault,
                 updateApiKey,
                 reloadProfile,
                 incrementMessageCredits,

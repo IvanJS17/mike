@@ -55,6 +55,7 @@ import {
     userExportFilename,
 } from "../lib/userDataExport";
 import { deleteUserPrivateMemories } from "../lib/memory/bulk";
+import { buildMemoryArchive } from "../lib/memory/archive";
 import { findProfileUserByEmail } from "../lib/userLookup";
 import { configuredApiPublicUrl } from "../lib/runtimeConfig";
 import {
@@ -1977,6 +1978,52 @@ userRouter.get(
         } catch (err) {
             const detail = errorMessage(err);
             console.error("[user/chats/export] failed", {
+                userId,
+                error: detail,
+            });
+            sendInternalError(res, err);
+        }
+    },
+);
+
+// GET /user/memory/export
+//
+// Deviation from upstream: upstream serves this through the async export
+// subsystem (POST /user/exports → durable "memory-zip" job). LiTT keeps the
+// per-type exports synchronous like /user/chats/export, so this builds and
+// returns the archive inline. The archive is produced by the same
+// buildMemoryArchive used by the durable handler, so it keeps the
+// mike-memory-export.zip name and the
+// app/memory.md + projects/<name>--<id>/memory.md layout.
+userRouter.get(
+    "/memory/export",
+    requireAuth,
+    requireMfaIfEnrolled,
+    async (_req, res) => {
+        const userId = res.locals.userId as string;
+        const userEmail = res.locals.userEmail as string | undefined;
+        const db = createServerSupabase();
+        try {
+            const archive = await buildMemoryArchive(
+                db,
+                userId,
+                userEmail ?? null,
+            );
+            res.setHeader("Content-Type", "application/zip");
+            res.setHeader(
+                "Content-Disposition",
+                'attachment; filename="mike-memory-export.zip"',
+            );
+            void recordAudit(createServerSupabase(), {
+                userId,
+                userEmail: res.locals.userEmail as string | undefined,
+                action: "export.memory",
+                surface: "account",
+            });
+            res.send(archive);
+        } catch (err) {
+            const detail = errorMessage(err);
+            console.error("[user/memory/export] failed", {
                 userId,
                 error: detail,
             });

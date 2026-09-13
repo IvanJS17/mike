@@ -23,6 +23,7 @@ const {
     buildUserAccountExport,
     buildUserChatsExport,
     buildUserTabularReviewsExport,
+    buildMemoryArchive,
     supabaseRpc,
 } = vi.hoisted(() => ({
     requireMfaIfEnrolled: vi.fn(),
@@ -37,6 +38,7 @@ const {
     buildUserAccountExport: vi.fn(),
     buildUserChatsExport: vi.fn(),
     buildUserTabularReviewsExport: vi.fn(),
+    buildMemoryArchive: vi.fn(),
     supabaseRpc: vi.fn(),
 }));
 
@@ -195,6 +197,10 @@ vi.mock("../../lib/userDataExport", () => ({
         `mike-${kind}-export-${userId.slice(0, 8)}.json`,
 }));
 
+vi.mock("../../lib/memory/archive", () => ({
+    buildMemoryArchive: (...args: unknown[]) => buildMemoryArchive(...args),
+}));
+
 import { app } from "../../app";
 
 const AUTH = ["Authorization", "Bearer test"] as const;
@@ -259,6 +265,9 @@ describe("user.routes", () => {
         buildUserAccountExport.mockResolvedValue({ account: "data" });
         buildUserChatsExport.mockResolvedValue({ chats: "data" });
         buildUserTabularReviewsExport.mockResolvedValue({ reviews: "data" });
+        buildMemoryArchive.mockResolvedValue(
+            Buffer.from("PK\u0003\u0004 memory archive"),
+        );
         supabaseRpc.mockImplementation((name: string) => {
             if (name === "provision_initial_organization") {
                 return Promise.resolve({
@@ -970,6 +979,23 @@ describe("user.routes", () => {
                 "mike-tabular-reviews-export-u1.json",
             );
             expect(buildUserTabularReviewsExport).toHaveBeenCalledTimes(1);
+        });
+
+        it("GET /user/memory/export returns the memory archive as a zip", async () => {
+            const res = await request(app)
+                .get("/user/memory/export")
+                .set(...AUTH);
+
+            expect(res.status).toBe(200);
+            expect(res.headers["content-type"]).toContain("application/zip");
+            expect(res.headers["content-disposition"]).toContain(
+                "mike-memory-export.zip",
+            );
+            expect(buildMemoryArchive).toHaveBeenCalledWith(
+                expect.anything(),
+                "u1",
+                "u1@test.local",
+            );
         });
 
         it("GET /user/export returns 500 when the builder throws", async () => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import { Upload, User, X } from "lucide-react";
 import {
     addDocumentToProject,
@@ -13,8 +13,10 @@ import { AddUserInput } from "../shared/AddUserInput";
 import type { Document, Project } from "../shared/types";
 import type { UserLookupResult } from "@/app/lib/mikeApi";
 import { useAuth } from "@/app/contexts/AuthContext";
+import { useUserProfile } from "@/app/contexts/UserProfileContext";
 import { Modal } from "../modals/Modal";
 import { FieldLabel, FormTextInput } from "../ui/form-field";
+import { ToggleSwitch } from "../ui/toggle-switch";
 import { ProjectPracticeField } from "./ProjectPracticeField";
 import { userFacingApiError } from "@/app/lib/userFacingError";
 import { LIQUID_GLASS_MODAL_ROW_HOVER_CLASS } from "@/shared/ui/LiquidGlassUI";
@@ -33,12 +35,27 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
     const [sharedUsers, setSharedUsers] = useState<UserLookupResult[]>([]);
     const [selectedDocuments, setSelectedDocuments] = useState<Document[]>([]);
     const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+    const [memoryEnabled, setMemoryEnabled] = useState(false);
+    const memoryEditedRef = useRef(false);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
     const fileInputRef = useRef<HTMLInputElement>(null);
     const { user } = useAuth();
+    const { profile } = useUserProfile();
+    // The account's saved default seeds this project's memory setting, until
+    // the creator says otherwise for this one project. Missing means off.
+    const projectMemoryDefault = profile?.projectMemoryDefault ?? false;
     const ownEmail = user?.email?.trim().toLowerCase() ?? null;
     const formId = "new-project-modal-form";
+
+    useEffect(() => {
+        if (!open) {
+            memoryEditedRef.current = false;
+            return;
+        }
+        if (memoryEditedRef.current) return;
+        setMemoryEnabled(projectMemoryDefault);
+    }, [open, projectMemoryDefault]);
 
     if (!open) return null;
 
@@ -73,6 +90,7 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
                 practice.trim() && practice.trim() !== "Other"
                     ? practice.trim()
                     : undefined,
+                memoryEnabled,
             );
             // Recipients are granted AFTER creation through the role-aware
             // access endpoint — POST /projects rejects `shared_with`.
@@ -111,6 +129,8 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
         setSharedUsers([]);
         setSelectedDocuments([]);
         setPendingFiles([]);
+        memoryEditedRef.current = false;
+        setMemoryEnabled(projectMemoryDefault);
         setError("");
     }
 
@@ -315,6 +335,20 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
                                     })}
                                 </ul>
                             )}
+                        </div>
+
+                        <div>
+                            <FieldLabel as="p">Project memory</FieldLabel>
+                            <ToggleSwitch
+                                checked={memoryEnabled}
+                                onCheckedChange={(enabled) => {
+                                    memoryEditedRef.current = true;
+                                    setMemoryEnabled(enabled);
+                                }}
+                                aria-label="Enable project memory"
+                            >
+                                Let Mike remember shared project context
+                            </ToggleSwitch>
                         </div>
                     </div>
                 ) : (

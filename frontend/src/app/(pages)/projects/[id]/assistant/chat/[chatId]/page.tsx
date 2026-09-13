@@ -12,6 +12,7 @@ import {
 } from "react";
 import { useRouter } from "next/navigation";
 import {
+    Brain,
     ChevronLeft,
     ChevronRight,
     FileText,
@@ -40,6 +41,7 @@ import { AssistantMessage } from "@/app/components/assistant/AssistantMessage";
 import { ChatInput } from "@/app/components/assistant/ChatInput";
 import type { ChatInputHandle } from "@/app/components/assistant/ChatInput";
 import { ProjectExplorer } from "@/app/components/projects/ProjectExplorer";
+import { ProjectMemoryModal } from "@/app/components/projects/ProjectMemoryModal";
 import { PdfView } from "@/app/components/shared/views/PdfView";
 import { SpreadsheetView } from "@/app/components/shared/views/SpreadsheetView";
 import { ConfirmPopup } from "@/app/components/popups/ConfirmPopup";
@@ -222,6 +224,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
     const [chatTitle, setChatTitle] = useState<string | null>(null);
     const [chatOwnerId, setChatOwnerId] = useState<string | null>(null);
     const [ownerOnlyAction, setOwnerOnlyAction] = useState<string | null>(null);
+    const [projectMemoryOpen, setProjectMemoryOpen] = useState(false);
     const [chatLoaded, setChatLoaded] = useState(false);
     const [creatingChat, setCreatingChat] = useState(false);
     const [deletingChat, setDeletingChat] = useState(false);
@@ -989,6 +992,13 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                             void handleRenameChat(),
                                     },
                                     {
+                                        label: "Memory",
+                                        icon: Brain,
+                                        onSelect: () =>
+                                            setProjectMemoryOpen(true),
+                                        disabled: !project,
+                                    },
+                                    {
                                         label: deletingChat
                                             ? "Deleting..."
                                             : "Delete",
@@ -1457,6 +1467,27 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                 open={!!ownerOnlyAction}
                 action={ownerOnlyAction ?? undefined}
                 onClose={() => setOwnerOnlyAction(null)}
+            />
+            {/* LiTT has no `canDo` capability check (upstream granted
+                content.edit / access.manage). The only signal available is
+                `is_owner`, so editing memory and toggling it are degraded to
+                owner-only. */}
+            <ProjectMemoryModal
+                key={projectId}
+                open={projectMemoryOpen}
+                onClose={() => setProjectMemoryOpen(false)}
+                projectId={projectId}
+                projectName={project?.name ?? null}
+                projectLoading={!project}
+                canEdit={project?.is_owner !== false}
+                canManage={project?.is_owner !== false}
+                onMemoryEnabledChange={(enabled) =>
+                    setProject((current) =>
+                        current
+                            ? { ...current, memory_enabled: enabled }
+                            : current,
+                    )
+                }
             />
             <ConfirmPopup
                 open={!!pendingDeleteFolder}

@@ -36,6 +36,9 @@ describe("model preferences page legacy ids", () => {
         // Without the LEGACY_MODEL_IDS mapping the stored title value
         // matches no option and the dropdown falls back to "Select a model".
         expect(screen.getByText("Gemini 3.5 Flash-Lite")).toBeInTheDocument();
+        expect(
+            screen.getByText("Memory curation model"),
+        ).toBeInTheDocument();
         expect(screen.queryByText("Select a model")).not.toBeInTheDocument();
     });
 });

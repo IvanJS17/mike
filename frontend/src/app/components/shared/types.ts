@@ -43,6 +43,11 @@ export interface Project {
     name: string;
     cm_number: string | null;
     practice: string | null;
+    /**
+     * Whether this project's shared memory.md is active. Optional until the
+     * project memory routes land; absent means the state is unknown.
+     */
+    memory_enabled?: boolean;
     shared_with: string[];
     created_at: string;
     updated_at: string;

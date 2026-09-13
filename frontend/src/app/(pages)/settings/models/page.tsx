@@ -30,7 +30,10 @@ import { SETTINGS_CONTROL_CLASS } from "@/app/components/settings/SettingsTextIn
 import { SettingsSection } from "../SettingsSection";
 import { useOllamaModels } from "@/app/hooks/useOllamaModels";
 
-type ModelPreferenceField = "titleModel" | "tabularModel";
+type ModelPreferenceField =
+    | "titleModel"
+    | "tabularModel"
+    | "memoryCuratorModel";
 
 export default function ModelPreferencesPage() {
     const { profile, updateModelPreference } = useUserProfile();
@@ -146,6 +149,35 @@ export default function ModelPreferencesPage() {
                             emptyOptionLabel="No default model"
                             onChange={(id) =>
                                 handleModelChange("tabularModel", id)
+                            }
+                        />
+                    </div>
+                    <div className="px-4 py-5">
+                        <FieldLabel>Memory curation model</FieldLabel>
+                        <p className="text-xs text-gray-400 mb-2">
+                            Used after conversations to identify durable
+                            information worth keeping. By default, memory uses
+                            the model selected for the chat.
+                        </p>
+                        <ModelPreferenceDropdown
+                            value={canonicalModelId(
+                                optimisticValues.memoryCuratorModel ??
+                                    profile?.memoryCuratorModel ??
+                                    "",
+                            )}
+                            options={[
+                                ...SETTINGS_MODELS,
+                                ...selectedOpenRouterOptions,
+                                ...selectedVercelOptions,
+                                ...selectedOpenCodeGoOptions,
+                                ...ollamaModels,
+                            ]}
+                            apiKeys={profile?.apiKeys}
+                            isSaving={savingField === "memoryCuratorModel"}
+                            isSaved={savedField === "memoryCuratorModel"}
+                            emptyOptionLabel="Automatic — use chat model"
+                            onChange={(id) =>
+                                handleModelChange("memoryCuratorModel", id)
                             }
                         />
                     </div>
