@@ -99,3 +99,56 @@ describe("account export: shared projects", () => {
         expect(reads.filter((r) => r.startsWith("projects."))).toEqual([]);
     });
 });
+
+describe("organization exports", () => {
+    it("reads memberships from organization_memberships (not org_members) and exports them under that key", async () => {
+        const { db } = makeDb({
+            organization_memberships: [
+                {
+                    id: "om1",
+                    organization_id: "org1",
+                    user_id: "u1",
+                    role: "owner",
+                    status: "active",
+                    created_at: "2026-09-01T00:00:00Z",
+                },
+            ],
+            // Decoy from the upstream table name LiTT never had: must be inert.
+            org_members: [
+                { id: "decoy", organization_id: "org1", user_id: "u1" },
+            ],
+            organizations: [
+                {
+                    id: "org1",
+                    name: "Acme Legal",
+                    created_at: "2026-09-01T00:00:00Z",
+                },
+            ],
+            org_invitations: [
+                {
+                    id: "inv1",
+                    email: "u1@example.com",
+                    organization_id: "org1",
+                    created_at: "2026-09-01T00:00:00Z",
+                },
+            ],
+        });
+
+        const exported = await buildUserAccountExport(db, "u1", "u1@example.com");
+
+        expect(exported.organization_memberships).toEqual([
+            expect.objectContaining({
+                id: "om1",
+                organization_id: "org1",
+                role: "owner",
+            }),
+        ]);
+        expect(exported.organizations).toEqual([
+            expect.objectContaining({ id: "org1" }),
+        ]);
+        expect(exported.org_invitations).toEqual([
+            expect.objectContaining({ id: "inv1" }),
+        ]);
+        expect("org_members" in exported).toBe(false);
+    });
+});
