@@ -1,13 +1,11 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
-import { deleteFile } from "../lib/storage";
+import { enqueueStorageCleanup } from "../lib/dbq/enqueue";
 import {
   attachActiveVersionPaths,
   attachLatestVersionNumbers,
 } from "../lib/documentVersions";
-import { singleFileUpload } from "../lib/upload";
-import { handleDocumentUpload } from "./documents";
 import { parsePaginationQuery, type PaginationParams } from "../lib/pagination";
 import { normalizeSearchTerm } from "../lib/search";
 import { sendInternalError } from "../lib/httpError";
@@ -131,8 +129,6 @@ async function deleteLibraryDocumentsAndVersionFiles(
       paths.add(version.pdf_storage_path);
     }
   }
-  await Promise.all([...paths].map((path) => deleteFile(path).catch(() => {})));
-
   let deleteQuery = db
     .from("documents")
     .delete()
@@ -143,6 +139,9 @@ async function deleteLibraryDocumentsAndVersionFiles(
       ? deleteQuery.or("library_kind.eq.file,library_kind.is.null")
       : deleteQuery.eq("library_kind", kind);
   const { error } = await deleteQuery.in("id", eligibleIds);
+  // Rows first, files second (durable storage.cleanup job) — previously each
+  // file delete was fire-and-forget, so one storage hiccup leaked the bytes.
+  if (!error) await enqueueStorageCleanup(db, [...paths]);
   return { error: error ?? null, deletedIds: error ? [] : eligibleIds };
 }
 
@@ -444,33 +443,6 @@ libraryRouter.post(
       deletedIds.push(...result.deletedIds);
     }
     res.json({ deletedIds });
-  },
-);
-
-// POST /library/:kind/documents
-libraryRouter.post(
-  "/:kind/documents",
-  requireAuth,
-  singleFileUpload("file"),
-  async (req, res) => {
-    const userId = res.locals.userId as string;
-    const kind = normalizeLibraryKind(req.params.kind);
-    if (!kind)
-      return void res.status(404).json({ detail: "Library not found" });
-    const db = createServerSupabase();
-    const folderId =
-      typeof req.body?.folder_id === "string" && req.body.folder_id.trim()
-        ? req.body.folder_id.trim()
-        : null;
-    if (folderId) {
-      const folder = await loadLibraryFolder(db, userId, kind, folderId);
-      if (!folder)
-        return void res.status(404).json({ detail: "Folder not found" });
-    }
-    await handleDocumentUpload(req, res, userId, null, db, {
-      libraryKind: kind,
-      libraryFolderId: folderId,
-    });
   },
 );
 
