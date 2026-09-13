@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Check, Code2, Plus } from "lucide-react";
+import { Check, ChevronLeft, Code2, Plus } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { WorkflowAddon } from "../shared/types";
@@ -13,8 +13,13 @@ import {
 } from "@/app/components/ui/liquid-surface";
 import { Modal } from "../modals/Modal";
 import { FileTypeIcon } from "../shared/FileTypeIcon";
+import { PdfView } from "../shared/views/PdfView";
+import { SpreadsheetView } from "../shared/views/SpreadsheetView";
+import { workflowAddonAssetDisplayUrl } from "@/app/lib/mikeApi";
+import { resolveDocumentViewType } from "@/app/lib/documentViewType";
 
 type DetailView = "columns" | "skill" | "assets";
+type AddonAsset = NonNullable<WorkflowAddon["assets"]>[number];
 
 const markdownComponents: React.ComponentProps<
   typeof ReactMarkdown
@@ -202,6 +207,31 @@ function formatFileSize(size: number | null) {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function AddonAssetViewer({
+  addonId,
+  asset,
+}: {
+  addonId: string;
+  asset: AddonAsset;
+}) {
+  const displayUrl = workflowAddonAssetDisplayUrl(addonId, asset.id);
+  const viewType = resolveDocumentViewType({
+    filename: asset.filename,
+    fileType: asset.file_type,
+    legacyDocViewType: "pdf",
+    preferPdfForWord: true,
+  });
+
+  if (viewType === "spreadsheet") {
+    return (
+      <SpreadsheetView documentId={asset.id} displayUrl={displayUrl} rounded />
+    );
+  }
+  return (
+    <PdfView doc={{ document_id: asset.id }} displayUrl={displayUrl} rounded />
+  );
+}
+
 export function WorkflowAddonPreviewModal({
   addon,
   importing,
@@ -239,6 +269,7 @@ function WorkflowAddonPreviewDialog({
   const [view, setView] = useState<DetailView>(
     addon.type === "tabular" ? "columns" : "skill",
   );
+  const [selectedAsset, setSelectedAsset] = useState<AddonAsset | null>(null);
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
@@ -253,13 +284,13 @@ function WorkflowAddonPreviewDialog({
     };
   }, [addon, onClose]);
 
-  const references = addon.reference_files ?? [];
+  const assets = addon.assets ?? [];
   const tabs: { id: DetailView; label: string }[] =
     addon.type === "tabular"
       ? [{ id: "columns", label: "Columns" }]
       : [
           { id: "skill", label: "SKILL.md" },
-          ...(references.length > 0
+          ...(assets.length > 0
             ? [{ id: "assets" as const, label: "Assets" }]
             : []),
         ];
@@ -268,7 +299,13 @@ function WorkflowAddonPreviewDialog({
     <Modal
       open
       onClose={onClose}
-      breadcrumbs={["Workflows", "Add-ons", addon.title]}
+      breadcrumbs={[
+        "Workflows",
+        "Add-ons",
+        addon.title,
+        ...(selectedAsset ? [selectedAsset.filename] : []),
+      ]}
+      size={selectedAsset ? "xl" : "lg"}
       primaryAction={{
         label: importing ? "Importing…" : "Import",
         icon: <Plus className="h-4 w-4" />,
@@ -276,113 +313,153 @@ function WorkflowAddonPreviewDialog({
         disabled: importing,
         onClick: () => void onImport(addon),
       }}
+      secondaryAction={
+        selectedAsset
+          ? {
+              label: "Back",
+              icon: <ChevronLeft className="h-4 w-4" />,
+              onClick: () => setSelectedAsset(null),
+            }
+          : undefined
+      }
       cancelAction={false}
     >
-      <div className="flex min-h-0 flex-1 flex-col pb-3">
-        <div className="flex shrink-0 items-start justify-between gap-4 pb-5">
-          <h2 className="min-w-0 font-serif text-xl font-medium leading-tight tracking-tight text-gray-950">
-            {addon.title}
-          </h2>
-        </div>
-        <section className="shrink-0">
-          <div className="flex flex-wrap items-end gap-x-8 gap-y-3">
-            <MetadataItem
-              label="Contributor"
-              value={addon.contributors
-                .map((contributor) => contributor.name)
-                .join(", ")}
+      {selectedAsset ? (
+        <div className="mb-3 flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg">
+          <div className="flex min-h-10 shrink-0 items-center gap-2 border-b border-white/60 py-1.5 text-xs">
+            <FileTypeIcon
+              fileType={selectedAsset.file_type || selectedAsset.filename}
+              className="h-4 w-4"
             />
-            <MetadataItem label="Language" value={addon.language || "—"} />
-            <MetadataItem label="Version" value={addon.version || "—"} />
-            <MetadataItem
-              label="Practice"
-              value={addon.practice || "General"}
-            />
-            <MetadataItem
-              label="Jurisdiction"
-              value={addon.jurisdictions?.join(", ") || "—"}
-            />
+            <span className="min-w-0 flex-1 truncate font-medium text-gray-800">
+              {selectedAsset.filename}
+            </span>
+            <span className="shrink-0 uppercase text-gray-400">
+              {selectedAsset.file_type}
+            </span>
+            <span className="shrink-0 text-gray-400">
+              {formatFileSize(selectedAsset.size_bytes)}
+            </span>
           </div>
-          {addon.description && (
-            <p className="mt-3 max-w-4xl text-xs leading-5 text-gray-600">
-              {addon.description}
-            </p>
-          )}
-        </section>
-
-        <div className="mt-4 mb-2 flex min-h-0 flex-1 flex-col">
-          {tabs.length > 1 && (
-            <div className="mb-3 flex shrink-0 items-center">
-              <DetailTabs tabs={tabs} active={view} onChange={setView} />
+          <div className="flex min-h-0 flex-1 overflow-hidden">
+            <AddonAssetViewer addonId={addon.id} asset={selectedAsset} />
+          </div>
+        </div>
+      ) : (
+        <div className="flex min-h-0 flex-1 flex-col pb-3">
+          <div className="flex shrink-0 items-start justify-between gap-4 pb-5">
+            <h2 className="min-w-0 font-serif text-xl font-medium leading-tight tracking-tight text-gray-950">
+              {addon.title}
+            </h2>
+          </div>
+          <section className="shrink-0">
+            <div className="flex flex-wrap items-end gap-x-8 gap-y-3">
+              <MetadataItem
+                label="Contributor"
+                value={addon.contributors
+                  .map((contributor) => contributor.name)
+                  .join(", ")}
+              />
+              <MetadataItem label="Language" value={addon.language || "—"} />
+              <MetadataItem label="Version" value={addon.version || "—"} />
+              <MetadataItem
+                label="Practice"
+                value={addon.practice || "General"}
+              />
+              <MetadataItem
+                label="Jurisdiction"
+                value={addon.jurisdictions?.join(", ") || "—"}
+              />
             </div>
-          )}
-          <div
-            className={`${LIQUID_SUBTLE_PANEL_SURFACE_CLASS} flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl`}
-          >
-            {view === "columns" ? (
-              <>
-                <div className="grid min-h-10 shrink-0 grid-cols-[52px_0.8fr_1.8fr] items-center border-b border-white/60 text-xs font-medium text-gray-500">
-                  <div className="px-3 py-1.5">#</div>
-                  <div className="border-l border-white/60 px-3 py-1.5">
-                    Column
-                  </div>
-                  <div className="border-l border-white/60 px-3 py-1.5">
-                    Prompt
-                  </div>
-                </div>
-                <div className="min-h-0 flex-1 overflow-y-auto">
-                  {(addon.columns_config ?? []).map((column) => (
-                    <div
-                      key={`${column.index}-${column.name}`}
-                      className="grid grid-cols-[52px_0.8fr_1.8fr] border-b border-white/50 text-xs last:border-b-0"
-                    >
-                      <div className="px-3 py-3 text-gray-400">
-                        {column.index + 1}
-                      </div>
-                      <div className="border-l border-white/50 px-3 py-3 font-medium text-gray-800">
-                        {column.name}
-                      </div>
-                      <div className="border-l border-white/50 px-3 py-3 text-gray-600">
-                        {column.prompt}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : view === "assets" ? (
-              <div className="flex h-full min-h-0 flex-col">
-                <div className="flex min-h-10 shrink-0 items-center border-b border-white/60 px-3 py-1.5 text-xs font-medium text-gray-500">
-                  Assets
-                </div>
-                <div className="min-h-0 flex-1 overflow-y-auto">
-                  {references.map((file) => (
-                    <div
-                      key={file.id}
-                      className="flex items-center gap-3 border-b border-white/50 px-3 py-3 text-xs last:border-b-0"
-                    >
-                      <FileTypeIcon
-                        fileType={file.file_type || file.filename}
-                        className="h-5 w-5"
-                      />
-                      <span className="min-w-0 flex-1 truncate font-medium text-gray-800">
-                        {file.filename}
-                      </span>
-                      <span className="shrink-0 text-xs uppercase text-gray-400">
-                        {file.file_type}
-                      </span>
-                      <span className="w-16 shrink-0 text-right text-xs text-gray-400">
-                        {formatFileSize(file.size_bytes)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <SkillViewer skill={addon.prompt_md ?? ""} />
+            {addon.description && (
+              <p className="mt-3 max-w-4xl text-xs leading-5 text-gray-600">
+                {addon.description}
+              </p>
             )}
+          </section>
+
+          <div className="mt-4 mb-2 flex min-h-0 flex-1 flex-col">
+            {tabs.length > 1 && (
+              <div className="mb-3 flex shrink-0 items-center">
+                <DetailTabs tabs={tabs} active={view} onChange={setView} />
+              </div>
+            )}
+            <div
+              className={`${LIQUID_SUBTLE_PANEL_SURFACE_CLASS} flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl`}
+            >
+              {view === "columns" ? (
+                <>
+                  <div className="grid min-h-10 shrink-0 grid-cols-[52px_0.8fr_1.8fr] items-center border-b border-white/60 text-xs font-medium text-gray-500">
+                    <div className="px-3 py-1.5">#</div>
+                    <div className="border-l border-white/60 px-3 py-1.5">
+                      Column
+                    </div>
+                    <div className="border-l border-white/60 px-3 py-1.5">
+                      Prompt
+                    </div>
+                  </div>
+                  <div className="min-h-0 flex-1 overflow-y-auto">
+                    {(addon.columns_config ?? []).map((column) => (
+                      <div
+                        key={`${column.index}-${column.name}`}
+                        className="grid grid-cols-[52px_0.8fr_1.8fr] border-b border-white/50 text-xs last:border-b-0"
+                      >
+                        <div className="px-3 py-3 text-gray-400">
+                          {column.index + 1}
+                        </div>
+                        <div className="border-l border-white/50 px-3 py-3 font-medium text-gray-800">
+                          {column.name}
+                        </div>
+                        <div className="border-l border-white/50 px-3 py-3 text-gray-600">
+                          {column.prompt}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : view === "assets" ? (
+                <div className="flex h-full min-h-0 flex-col">
+                  <div className="flex min-h-10 shrink-0 items-center border-b border-white/60 px-3 py-1.5 text-xs font-medium text-gray-500">
+                    Assets
+                  </div>
+                  <div className="min-h-0 flex-1 overflow-y-auto">
+                    {assets.length === 0 ? (
+                      <div className="flex h-full min-h-24 items-center justify-center px-4 text-xs text-gray-400">
+                        No assets included.
+                      </div>
+                    ) : (
+                      assets.map((file) => (
+                        <button
+                          key={file.id}
+                          type="button"
+                          onClick={() => setSelectedAsset(file)}
+                          className={`flex w-full items-center gap-3 border-b border-white/50 px-3 py-3 text-left text-xs transition-colors last:border-b-0 ${LIQUID_GLASS_HOVER_CLASS} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500/60`}
+                        >
+                          <FileTypeIcon
+                            fileType={file.file_type || file.filename}
+                            className="h-4 w-4"
+                          />
+                          <span className="min-w-0 flex-1 truncate font-medium text-gray-800">
+                            {file.filename}
+                          </span>
+                          <span className="shrink-0 text-xs uppercase text-gray-400">
+                            {file.file_type}
+                          </span>
+                          <span className="w-16 shrink-0 text-right text-xs text-gray-400">
+                            {formatFileSize(file.size_bytes)}
+                          </span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <SkillViewer skill={addon.prompt_md ?? ""} />
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </Modal>
   );
 }

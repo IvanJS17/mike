@@ -26,6 +26,7 @@ import {
     clearTabularCells,
     completeUserOnboarding,
     copyDocumentVersionFromDocument,
+    copyDocumentsToWorkflowAssets,
     createChat,
     createQuickAction,
     createLibraryFolder,
@@ -48,7 +49,7 @@ import {
     deleteTabularChat,
     deleteTabularReview,
     deleteWorkflow,
-    deleteWorkflowReferenceFile,
+    deleteWorkflowAsset,
     deleteWorkflowShare,
     downloadDocumentsZip,
     exportAccountData,
@@ -86,7 +87,6 @@ import {
     getWorkflow,
     getWorkflowAddon,
     getWorkflowFilterOptions,
-    getWorkflowReferenceUrl,
     grantProjectAccess,
     hideWorkflow,
     isMfaRequiredError,
@@ -106,7 +106,7 @@ import {
     listTabularReviews,
     listWorkflowIds,
     listWorkflowAddons,
-    listWorkflowReferenceFiles,
+    listWorkflowAssets,
     listWorkflowShares,
     listWorkflows,
     listWorkflowsPage,
@@ -116,6 +116,7 @@ import {
     moveLibraryDocument,
     moveLibraryFolder,
     moveSubfolderToFolder,
+    workflowAddonAssetDisplayUrl,
     openSourceWorkflow,
     refreshMcpConnectorTools,
     regenerateTabularCell,
@@ -160,9 +161,9 @@ import {
     deleteQuickAction,
     importWorkflowAddon,
     listQuickActions,
-    replaceWorkflowReferenceFile,
     uploadFilesWithSession,
-    uploadWorkflowReferenceFile,
+    uploadWorkflowAsset,
+    uploadWorkflowAssets,
     uploadDocumentVersion,
     uploadLibraryDocument,
     uploadProjectDocument,
@@ -1608,19 +1609,25 @@ describe("upload session wrappers", () => {
         expect(manifest.files[0]!.file.name).toBe("renamed.pdf");
     });
 
-    it("uses the workflow reference purposes", async () => {
+    it("uses the workflow asset purposes", async () => {
         vi.mocked(uploadFilesWithSessionCore).mockResolvedValue([outcome()]);
 
-        await uploadWorkflowReferenceFile("w1", file);
+        await uploadWorkflowAssets("w1", [{ file }]);
         expect(lastManifest()).toMatchObject({
-            purpose: "workflow_reference_create",
-            destination: { workflow_id: "w1" },
+            purpose: "document_create",
+            destination: { scope: "workflow", workflow_id: "w1" },
         });
+    });
 
-        await replaceWorkflowReferenceFile("w1", "ref-1", file);
+    it("uploads a single workflow asset through the session flow", async () => {
+        vi.mocked(uploadFilesWithSessionCore).mockResolvedValue([outcome()]);
+
+        await expect(uploadWorkflowAsset("w1", file)).resolves.toEqual({
+            id: "new-doc",
+        });
         expect(lastManifest()).toMatchObject({
-            purpose: "workflow_reference_replace",
-            destination: { workflow_id: "w1", reference_id: "ref-1" },
+            purpose: "document_create",
+            destination: { scope: "workflow", workflow_id: "w1" },
         });
     });
 
@@ -2555,19 +2562,22 @@ describe("thin endpoint wrappers", () => {
             method: "POST",
         },
         {
-            name: "listWorkflowReferenceFiles",
-            call: () => listWorkflowReferenceFiles("w1"),
-            url: "/workflows/w1/reference-files",
+            name: "listWorkflowAssets",
+            call: () => listWorkflowAssets("w1"),
+            url: "/workflows/w1/assets",
         },
         {
-            name: "getWorkflowReferenceUrl",
-            call: () => getWorkflowReferenceUrl("w1", "ref-1"),
-            url: "/workflows/w1/reference-files/ref-1/url",
+            name: "copyDocumentsToWorkflowAssets",
+            call: () =>
+                copyDocumentsToWorkflowAssets("w1", ["document-1", "document-2"]),
+            url: "/workflows/w1/assets/from-documents",
+            method: "POST",
+            body: { document_ids: ["document-1", "document-2"] },
         },
         {
-            name: "deleteWorkflowReferenceFile",
-            call: () => deleteWorkflowReferenceFile("w1", "ref-1"),
-            url: "/workflows/w1/reference-files/ref-1",
+            name: "deleteWorkflowAsset",
+            call: () => deleteWorkflowAsset("w1", "asset-1"),
+            url: "/workflows/w1/assets/asset-1",
             method: "DELETE",
         },
     ];
@@ -2601,6 +2611,12 @@ describe("thin endpoint wrappers", () => {
 // ---------------------------------------------------------------------------
 
 describe("unwrapping and blob wrappers", () => {
+    it("builds an encoded workflow add-on asset display URL", () => {
+        expect(workflowAddonAssetDisplayUrl("workflow/1", "asset 1")).toBe(
+            "/api/workflow-addons/workflow%2F1/assets/asset%201/display",
+        );
+    });
+
     it("getOllamaModels unwraps the models envelope", async () => {
         const models = [
             { id: "ollama/llama3.2", label: "Llama 3.2", group: "Local" },
