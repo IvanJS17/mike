@@ -585,27 +585,32 @@ chatRouter.post("/", requireAuth, async (req, res) => {
                 userEmail,
                 db,
             );
+            // Appending messages (and triggering LLM generation) writes to the
+            // chat: member+ only, mirroring the new-chat path below. A project
+            // viewer can read this chat (GET) but must not be able to add to
+            // it. A project verdict that went missing between the two reads
+            // (access revoked mid-request) fails the same way rather than
+            // falling back to its author's private audience.
+            if (
+                !projectAccess.ok ||
+                !can(projectAccess.projectRole, "content.edit")
+            ) {
+                return void res.status(403).json({
+                    detail: "You do not have permission to modify this chat",
+                });
+            }
             canReadProjectMemory = projectAccess.ok;
             canCurateProjectMemory =
                 projectAccess.ok &&
                 can(projectAccess.projectRole, "content.edit");
             allowDocumentMutation = canCurateProjectMemory;
-            if (projectAccess.ok) {
-                memorySharedAudience =
-                    memorySharedAudience ||
-                    (await projectHasSharedAudience(
-                        db,
-                        existingProjectId,
-                        projectAccess.project.org_id,
-                    ));
-            } else {
-                // getAccessibleChat already required the project verdict for
-                // this row, so this only fires when access changed mid-request
-                // (revocation between the two reads): fail closed and treat
-                // the conversation as shared — never as its author's private
-                // audience.
-                memorySharedAudience = true;
-            }
+            memorySharedAudience =
+                memorySharedAudience ||
+                (await projectHasSharedAudience(
+                    db,
+                    existingProjectId,
+                    projectAccess.project.org_id,
+                ));
         }
     }
 

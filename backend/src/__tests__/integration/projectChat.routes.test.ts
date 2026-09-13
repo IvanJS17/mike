@@ -163,6 +163,50 @@ describe("POST /projects/:projectId/chat", () => {
         expect(runLLMStream).not.toHaveBeenCalled();
     });
 
+    it("refuses a project viewer before any write or stream", async () => {
+        checkProjectAccess.mockResolvedValue({
+            ok: true,
+            isCreator: false,
+            orgRole: null,
+            projectRole: "viewer",
+            project: { id: "p1", user_id: "u2" },
+        });
+        const db = mockSupabase();
+        vi.mocked(createServerSupabase).mockReturnValueOnce(db as never);
+
+        const res = await request(app)
+            .post("/projects/p1/chat")
+            .set("Authorization", "Bearer test")
+            .send(VALID_BODY);
+
+        expect(res.status).toBe(403);
+        expect(res.body.detail).toBe(
+            "You do not have permission to write in this project.",
+        );
+        expect(runLLMStream).not.toHaveBeenCalled();
+        expect(buildProjectDocContext).not.toHaveBeenCalled();
+        // The gate precedes the new-chat INSERT.
+        expect(db.from).not.toHaveBeenCalled();
+    });
+
+    it("lets a project editor start a new chat", async () => {
+        checkProjectAccess.mockResolvedValue({
+            ok: true,
+            isCreator: false,
+            orgRole: null,
+            projectRole: "editor",
+            project: { id: "p1", user_id: "u2" },
+        });
+
+        const res = await request(app)
+            .post("/projects/p1/chat")
+            .set("Authorization", "Bearer test")
+            .send(VALID_BODY);
+
+        expect(res.status).toBe(200);
+        expect(runLLMStream).toHaveBeenCalledTimes(1);
+    });
+
     it("streams SSE on the happy path with project access granted", async () => {
         const res = await request(app)
             .post("/projects/p1/chat")

@@ -42,6 +42,13 @@ const { runLLMStream, dbInserts, dbUpdates, dbRpcCalls, dbControl } =
             // project verdict in the request comes back as "no access" (the
             // member was removed from the project).
             projectMissing: false,
+            // When set, selects on `projects` resolve to a row owned by this
+            // user (not the caller), so the caller's project role comes from a
+            // grant instead of the creator shortcut.
+            projectOwnerId: null as string | null,
+            // When set, selects on `project_access_grants` resolve to this
+            // role, so a request can authenticate as a project viewer/editor.
+            projectGrantRole: null as string | null,
         },
     }));
 
@@ -54,17 +61,28 @@ function makeQuery(table: string) {
     let result: { data: unknown; error: { message: string } | null } =
         table === "chats" && dbControl.chatRow
             ? { data: dbControl.chatRow, error: null }
-            : table === "projects" && dbControl.projectMissing
-              ? { data: null, error: null }
-              : {
-                    data: {
-                        id: "chat-1",
-                        title: null,
-                        user_id: "u1",
-                        project_id: null,
-                    },
-                    error: null,
-                };
+            : table === "project_access_grants" && dbControl.projectGrantRole
+              ? { data: { role: dbControl.projectGrantRole }, error: null }
+              : table === "projects" && dbControl.projectMissing
+                ? { data: null, error: null }
+                : table === "projects" && dbControl.projectOwnerId
+                  ? {
+                        data: {
+                            id: "p1",
+                            user_id: dbControl.projectOwnerId,
+                            org_id: null,
+                        },
+                        error: null,
+                    }
+                  : {
+                        data: {
+                            id: "chat-1",
+                            title: null,
+                            user_id: "u1",
+                            project_id: null,
+                        },
+                        error: null,
+                    };
     const q: Record<string, unknown> = {};
     let activeUpdate:
         | {
@@ -337,6 +355,8 @@ describe("POST /chat — streaming endpoint", () => {
         dbControl.chatRow = null;
         dbControl.failMemoryFence = false;
         dbControl.projectMissing = false;
+        dbControl.projectOwnerId = null;
+        dbControl.projectGrantRole = null;
         runLLMStream.mockResolvedValue({
             fullText: "hi there",
             events: [],
@@ -1216,6 +1236,47 @@ describe("POST /chat — streaming endpoint", () => {
                 ({ name }) => name === "begin_memory_conversation_turn",
             ),
         ).toBe(false);
+    });
+
+    it("blocks a project viewer from writing to an existing project chat", async () => {
+        // A viewer can read a project conversation (GET) but POST /chat writes
+        // a user message and triggers generation, so it requires content.edit —
+        // the same capability the new-chat path demands. Editors (and the
+        // owner/creator) keep writing.
+        dbControl.chatRow = {
+            id: "chat-1",
+            title: "Read-only thread",
+            model: null,
+            reasoning_level: null,
+            user_id: "u2",
+            project_id: "p1",
+        };
+        dbControl.projectOwnerId = "u2";
+        dbControl.projectGrantRole = "viewer";
+
+        const denied = await request(app)
+            .post("/chat")
+            .set("Authorization", "Bearer test")
+            .send({ ...VALID_BODY, chat_id: "chat-1" });
+
+        expect(denied.status).toBe(403);
+        expect(denied.body.detail).toBe(
+            "You do not have permission to modify this chat",
+        );
+        expect(runLLMStream).not.toHaveBeenCalled();
+        expect(dbInserts.some(({ table }) => table === "chat_messages")).toBe(
+            false,
+        );
+
+        // The same request from an editor on the project is admitted.
+        dbControl.projectGrantRole = "editor";
+        const allowed = await request(app)
+            .post("/chat")
+            .set("Authorization", "Bearer test")
+            .send({ ...VALID_BODY, chat_id: "chat-1" });
+
+        expect(allowed.status).toBe(200);
+        expect(runLLMStream).toHaveBeenCalledTimes(1);
     });
 
     it("fails closed before streaming when memory activity cannot be fenced", async () => {
