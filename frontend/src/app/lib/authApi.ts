@@ -84,6 +84,13 @@ export async function startGoogleOAuth(next: string) {
     });
 }
 
+export function startSso(next: string, email: string) {
+    return authRequest<{ url: string }>("/oauth", {
+        method: "POST",
+        body: JSON.stringify({ provider: "sso", next, email }),
+    });
+}
+
 export async function exchangeAuthCode(code: string) {
     return authRequest<{ user: AuthUser }>("/exchange", {
         method: "POST",
