@@ -38,6 +38,10 @@ const { runLLMStream, dbInserts, dbUpdates, dbRpcCalls, dbControl } =
             // When true, begin_memory_conversation_turn fails at the DB,
             // proving the route fails closed before streaming.
             failMemoryFence: false,
+            // When true, selects on `projects` resolve to no row, so every
+            // project verdict in the request comes back as "no access" (the
+            // member was removed from the project).
+            projectMissing: false,
         },
     }));
 
@@ -50,15 +54,17 @@ function makeQuery(table: string) {
     let result: { data: unknown; error: { message: string } | null } =
         table === "chats" && dbControl.chatRow
             ? { data: dbControl.chatRow, error: null }
-            : {
-                  data: {
-                      id: "chat-1",
-                      title: null,
-                      user_id: "u1",
-                      project_id: null,
-                  },
-                  error: null,
-              };
+            : table === "projects" && dbControl.projectMissing
+              ? { data: null, error: null }
+              : {
+                    data: {
+                        id: "chat-1",
+                        title: null,
+                        user_id: "u1",
+                        project_id: null,
+                    },
+                    error: null,
+                };
     const q: Record<string, unknown> = {};
     let activeUpdate:
         | {
@@ -330,6 +336,7 @@ describe("POST /chat — streaming endpoint", () => {
         dbControl.assistantMessageRows = null;
         dbControl.chatRow = null;
         dbControl.failMemoryFence = false;
+        dbControl.projectMissing = false;
         runLLMStream.mockResolvedValue({
             fullText: "hi there",
             events: [],
@@ -1178,6 +1185,37 @@ describe("POST /chat — streaming endpoint", () => {
                 memoryProjectId: "p1",
             }),
         );
+    });
+
+    it("rejects a project chat once its author lost access to the project", async () => {
+        // Revoking a member's project access must also remove them from the
+        // project's conversations. Current project members still read this
+        // thread, so it can never fall back to its author's private audience:
+        // the owner shortcut in getAccessibleChat would otherwise let the
+        // revoked author keep extending it (with their app memory folded in).
+        dbControl.chatRow = {
+            id: "chat-1",
+            title: "Revoked access",
+            model: null,
+            reasoning_level: null,
+            user_id: "u1",
+            project_id: "p1",
+        };
+        dbControl.projectMissing = true;
+
+        const res = await request(app)
+            .post("/chat")
+            .set("Authorization", "Bearer test")
+            .send({ ...VALID_BODY, chat_id: "chat-1" });
+
+        expect(res.status).toBe(404);
+        expect(res.body.detail).toBe("Chat not found");
+        expect(runLLMStream).not.toHaveBeenCalled();
+        expect(
+            dbRpcCalls.some(
+                ({ name }) => name === "begin_memory_conversation_turn",
+            ),
+        ).toBe(false);
     });
 
     it("fails closed before streaming when memory activity cannot be fenced", async () => {

@@ -103,8 +103,12 @@ async function getAccessibleChat(
     if (error || !chat) return null;
 
     const row = chat as AccessibleChat;
-    if (row.user_id === userId) return row;
-
+    // LITT (S5c/B1): a project chat is project property — upstream reaches it
+    // through ensureSharedRowAccess, where authorship is never access. The
+    // owner shortcut below only applies to standalone chats; otherwise a
+    // member whose project access was revoked keeps reading and extending a
+    // conversation that current members still see (and app memory would be
+    // folded into it, because the author looks like a private audience).
     if (row.project_id) {
         const access = await checkProjectAccess(
             row.project_id,
@@ -112,8 +116,10 @@ async function getAccessibleChat(
             userEmail,
             db,
         );
-        if (access.ok) return row;
+        return access.ok ? row : null;
     }
+
+    if (row.user_id === userId) return row;
 
     return null;
 }
@@ -592,6 +598,13 @@ chatRouter.post("/", requireAuth, async (req, res) => {
                         existingProjectId,
                         projectAccess.project.org_id,
                     ));
+            } else {
+                // getAccessibleChat already required the project verdict for
+                // this row, so this only fires when access changed mid-request
+                // (revocation between the two reads): fail closed and treat
+                // the conversation as shared — never as its author's private
+                // audience.
+                memorySharedAudience = true;
             }
         }
     }
