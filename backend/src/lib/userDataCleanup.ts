@@ -1,5 +1,6 @@
 import { createServerSupabase } from "./supabase";
-import { deleteFile, listFiles } from "./storage";
+import { assertStorageConfigured, deleteFile, extractedTextKey, listFiles } from "./storage";
+import { enqueueStorageCleanup } from "./dbq/enqueue";
 
 type Db = ReturnType<typeof createServerSupabase>;
 
@@ -103,6 +104,82 @@ async function deleteDocumentVersionFiles(db: Db, documentIds: string[]) {
     }
 
     await Promise.all([...paths].map((path) => deleteFile(path)));
+}
+
+async function collectVersionStoragePaths(
+    db: Db,
+    documentIds: string[],
+): Promise<string[]> {
+    const paths = new Set<string>();
+
+    for (const batch of chunks(documentIds)) {
+        const { data, error } = await db
+            .from("document_versions")
+            .select("id, storage_path, pdf_storage_path")
+            .in("document_id", batch);
+        await throwIfError(error, "Failed to load document storage paths");
+
+        for (const version of data ?? []) {
+            // The extracted-text cache is keyed by version id and lives
+            // outside the per-user storage prefixes, so nothing else would
+            // ever enumerate it. Deleting an object that was never written is
+            // a no-op, so this is unconditional rather than type-gated.
+            if (typeof version.id === "string" && version.id.length > 0) {
+                paths.add(extractedTextKey(version.id));
+            }
+            if (
+                typeof version.storage_path === "string" &&
+                version.storage_path.length > 0
+            ) {
+                paths.add(version.storage_path);
+            }
+            if (
+                typeof version.pdf_storage_path === "string" &&
+                version.pdf_storage_path.length > 0
+            ) {
+                paths.add(version.pdf_storage_path);
+            }
+        }
+    }
+
+    return [...paths];
+}
+
+/**
+ * Delete projects by id — the capability check has already authorized this,
+ * so ownership is deliberately NOT re-derived: an organization project may
+ * have no creator left to scope by (user_id goes NULL when that account is
+ * deleted).
+ */
+export async function deleteProjectsByIds(db: Db, projectIds: string[]) {
+    const ownedProjectIds = uniqueStrings(projectIds);
+    if (ownedProjectIds.length === 0) return 0;
+    const queueDisabled = process.env.DB_JOBS_ENABLED === "false";
+    if (queueDisabled) assertStorageConfigured();
+
+    const projectDocs = await db
+        .from("documents")
+        .select("id")
+        .in("project_id", ownedProjectIds);
+    await throwIfError(projectDocs.error, "Failed to load project documents");
+
+    const documentIds = uniqueStrings(
+        ((projectDocs.data ?? []) as { id: string | null }[]).map(
+            (row) => row.id,
+        ),
+    );
+    // Collect the storage keys BEFORE the version rows go away, but delete
+    // the files AFTER the rows via the durable storage.cleanup job: if any
+    // row delete below fails, no file has been touched; if the process dies
+    // after them, the queued job still removes the files (the old inline
+    // Promise.all died with the request and leaked on any storage error).
+    const storagePaths = await collectVersionStoragePaths(db, documentIds);
+    // One parent DELETE owns all relational cascades.
+    await deleteByIds(db, "projects", ownedProjectIds);
+    // Only now, with every row that pointed at them gone, do the bytes go.
+    await enqueueStorageCleanup(db, storagePaths);
+
+    return ownedProjectIds.length;
 }
 
 async function deleteUserStoragePrefix(userId: string) {

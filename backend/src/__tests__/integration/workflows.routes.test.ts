@@ -125,6 +125,7 @@ vi.mock("../../lib/access", () => ({
 
 vi.mock("../../lib/userDataCleanup", () => ({
     deleteUserProjects: (...args: unknown[]) => deleteUserProjects(...args),
+    deleteProjectsByIds: vi.fn(async () => 1),
     deleteAllUserChats: vi.fn(async () => {}),
     deleteAllUserTabularReviews: vi.fn(async () => {}),
     deleteUserAccountData: vi.fn(async () => {}),
