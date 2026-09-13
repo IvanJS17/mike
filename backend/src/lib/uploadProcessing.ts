@@ -20,7 +20,6 @@ import {
   storageKey,
   uploadFileFromPath,
   versionStorageKey,
-  workflowReferenceKey,
 } from "./storage";
 import { createServerSupabase } from "./supabase";
 import { UPLOAD_VERIFICATION_LEASE_SECONDS } from "./uploadSessions";
@@ -282,6 +281,7 @@ async function processCreatedDocument(
       folder_id: folderId,
       library_kind: libraryKind,
       library_folder_id: libraryFolderId,
+      workflow_id: workflowId,
     },
     { onConflict: "id" },
   );
@@ -541,120 +541,41 @@ export async function processUploadFile(
           artifact,
         );
       case "workflow_reference_create":
-        // LiTT keeps reference files in their own table until the asset
-        // migration (upstream S5) folds them into document versions.
-        return await processWorkflowReferenceCreate(db, session, file, artifact);
+        // Complete upload sessions created by the previous release using the
+        // standard workflow-asset document path.
+        return await processCreatedDocument(
+          db,
+          {
+            ...session,
+            purpose: "document_create",
+            destination: {
+              scope: "workflow",
+              workflow_id: session.destination.workflow_id,
+            },
+          },
+          file,
+          artifact,
+        );
       case "workflow_reference_replace":
-        return await processWorkflowReferenceReplace(db, session, file, artifact);
+        // A former replacement is retained as a new version so history is not
+        // destroyed during a rolling deployment.
+        return await processNewDocumentVersion(
+          db,
+          {
+            ...session,
+            purpose: "document_version_create",
+            destination: {
+              document_id: session.destination.reference_id,
+              filename: file.filename,
+            },
+          },
+          file,
+          artifact,
+        );
     }
   } finally {
     await removeTemporaryArtifact(artifact.directory);
   }
-}
-
-/**
- * Create/replace keep LiTT's `workflow_reference_documents` as the source of
- * truth for reference files. The upload-session protocol carries the bytes
- * (and the durable worker the retries), but the row still lands in the same
- * table the reference UI lists — the assets-as-documents migration is a later
- * slice, and until it lands these purposes must not write orphaned document
- * rows.
- */
-async function processWorkflowReferenceCreate(
-  db: Db,
-  session: UploadSessionRow,
-  file: UploadFileRow,
-  artifact: SealedFileArtifact,
-): Promise<unknown> {
-  const workflowId = session.destination.workflow_id as string;
-  const { data: workflow, error: workflowError } = await db
-    .from("workflows")
-    .select("user_id")
-    .eq("id", workflowId)
-    .maybeSingle();
-  if (workflowError) throw new Error(workflowError.message);
-  if (!workflow) throw new Error("Workflow not found");
-  const ownerId =
-    (workflow as { user_id?: string | null }).user_id ?? session.user_id;
-  const storagePath = workflowReferenceKey(
-    ownerId,
-    workflowId,
-    file.resource_id,
-    artifact.sha256,
-    file.filename,
-  );
-  await copyFile(file.sealed_storage_path, storagePath);
-  const { data, error } = await db
-    .from("workflow_reference_documents")
-    .insert({
-      id: file.resource_id,
-      workflow_id: workflowId,
-      user_id: ownerId,
-      filename: file.filename,
-      file_type: file.file_type,
-      storage_path: storagePath,
-      size_bytes: artifact.size,
-      content_hash: artifact.sha256,
-    })
-    .select(
-      "id, workflow_id, filename, file_type, size_bytes, created_at, updated_at",
-    )
-    .single();
-  if (error || !data) {
-    await deleteFile(storagePath).catch(() => {});
-    throw error ?? new Error("Reference upload returned no data");
-  }
-  return data;
-}
-
-async function processWorkflowReferenceReplace(
-  db: Db,
-  session: UploadSessionRow,
-  file: UploadFileRow,
-  artifact: SealedFileArtifact,
-): Promise<unknown> {
-  const workflowId = session.destination.workflow_id as string;
-  const referenceId = session.destination.reference_id as string;
-  const { data: current, error: currentError } = await db
-    .from("workflow_reference_documents")
-    .select("id, user_id, storage_path")
-    .eq("id", referenceId)
-    .eq("workflow_id", workflowId)
-    .maybeSingle();
-  if (currentError) throw new Error(currentError.message);
-  if (!current) throw new Error("Reference file not found");
-  const row = current as { id: string; user_id: string; storage_path: string };
-  const storagePath = workflowReferenceKey(
-    row.user_id,
-    workflowId,
-    row.id,
-    artifact.sha256,
-    file.filename,
-  );
-  await copyFile(file.sealed_storage_path, storagePath);
-  const { data, error } = await db
-    .from("workflow_reference_documents")
-    .update({
-      filename: file.filename,
-      file_type: file.file_type,
-      storage_path: storagePath,
-      size_bytes: artifact.size,
-      content_hash: artifact.sha256,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", referenceId)
-    .select(
-      "id, workflow_id, filename, file_type, size_bytes, created_at, updated_at",
-    )
-    .single();
-  if (error || !data) {
-    await deleteFile(storagePath).catch(() => {});
-    throw error ?? new Error("Reference replacement returned no data");
-  }
-  if (row.storage_path !== storagePath) {
-    await deleteFile(row.storage_path).catch(() => {});
-  }
-  return data;
 }
 
 async function heartbeatJob(db: Db, jobId: string, workerId: string) {
