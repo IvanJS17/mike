@@ -178,6 +178,25 @@ export const KNOWN_SUPPORTED_MIGRATIONS: Readonly<
         "begin;\n",
     ),
   },
+  "20260910_05_recovery_upstream_workflow_assets.sql": {
+    sha256: "b29be56de69d5bd51a3c47ca8f5400ba1dc8f5c053a9be4f5461e1d7d93a97f3",
+    envelope: wrapped(
+        "-- LiTT sync S5 port of upstream 20260901_03_workflow_assets_as_documents.sql; renamed to the merge-time stem 20260910_05 (recovery series).\n" +
+        "-- ADAPTED to LiTT invariants; deviations from upstream are marked \"LITT:\":\n" +
+        "--   * LITT: replace_mike_workflows keeps the LiTT provenance contract from\n" +
+        "--     20260909_02 (explicit source_commit validation, per-entry source_commit,\n" +
+        "--     source and approval_provenance columns). Upstream's literal RPC would\n" +
+        "--     silently drop that provenance on upsert; it is NOT imported.\n" +
+        "--   * reference_files remains a rollout alias: catalog payloads coalesce\n" +
+        "--     assets then reference_files (upstream comment kept).\n" +
+        "--   * LITT: the legacy unique name is a table constraint, so it is renamed with\n" +
+        "--     ALTER TABLE ... RENAME CONSTRAINT (which also renames its backing index);\n" +
+        "--     upstream's separate ALTER INDEX line is not needed.\n" +
+        "-- Migration date: 2026-09-01\n" +
+        "\n" +
+        "begin;\n",
+    ),
+  },
 };
 
 function sha256(source: string): string {

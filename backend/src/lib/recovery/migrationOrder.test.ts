@@ -99,6 +99,7 @@ describe("recovery migration ordering contract", () => {
       "20260910_02_recovery_upstream_db_jobs.sql",
       "20260910_03_recovery_upstream_organization_access.sql",
       "20260910_04_recovery_upstream_migrate_legacy_sharing.sql",
+      "20260910_05_recovery_upstream_workflow_assets.sql",
     ]);
   });
 
@@ -150,6 +151,7 @@ describe("recovery migration ledger state", () => {
       "20260910_02_recovery_upstream_db_jobs.sql",
       "20260910_03_recovery_upstream_organization_access.sql",
       "20260910_04_recovery_upstream_migrate_legacy_sharing.sql",
+      "20260910_05_recovery_upstream_workflow_assets.sql",
     ];
     const candidate = "20260905_02_recovery_approved_artifact_storage.sql";
     const beforeDrive = integrated.filter((name) => name <= candidate);
