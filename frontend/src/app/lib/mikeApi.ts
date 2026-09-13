@@ -450,12 +450,25 @@ export async function createProject(
     name: string,
     cm_number?: string,
     practice?: string,
-    shared_with?: string[],
 ): Promise<Project> {
     return apiRequest<Project>("/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, cm_number, practice, shared_with }),
+        body: JSON.stringify({ name, cm_number, practice }),
+    });
+}
+
+// Sharing is granted after creation through the role-aware access endpoint:
+// the retired `shared_with` array is rejected by POST /projects with a 400.
+export async function grantProjectAccess(
+    projectId: string,
+    email: string,
+    role: "owner" | "editor" | "viewer" = "editor",
+): Promise<{ email: string; role: string }> {
+    return apiRequest(`/projects/${projectId}/access`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, role }),
     });
 }
 

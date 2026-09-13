@@ -85,6 +85,7 @@ import {
     getWorkflowAddon,
     getWorkflowFilterOptions,
     getWorkflowReferenceUrl,
+    grantProjectAccess,
     hideWorkflow,
     isMfaRequiredError,
     listChats,
@@ -1957,18 +1958,21 @@ describe("thin endpoint wrappers", () => {
         // Account & profile
         {
             name: "createProject",
-            call: () =>
-                createProject("Acme v. Zenith", "CM-42", "litigation", [
-                    "a@b.c",
-                ]),
+            call: () => createProject("Acme v. Zenith", "CM-42", "litigation"),
             url: "/projects",
             method: "POST",
             body: {
                 name: "Acme v. Zenith",
                 cm_number: "CM-42",
                 practice: "litigation",
-                shared_with: ["a@b.c"],
             },
+        },
+        {
+            name: "grantProjectAccess",
+            call: () => grantProjectAccess("p1", "a@b.c"),
+            url: "/projects/p1/access",
+            method: "POST",
+            body: { email: "a@b.c", role: "editor" },
         },
         {
             name: "deleteAccount",

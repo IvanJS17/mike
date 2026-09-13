@@ -5,6 +5,7 @@ import { Upload, User, X } from "lucide-react";
 import {
     addDocumentToProject,
     createProject,
+    grantProjectAccess,
     uploadProjectDocument,
 } from "@/app/lib/mikeApi";
 import { FileDirectory } from "../shared/FileDirectory";
@@ -72,13 +73,18 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
                 practice.trim() && practice.trim() !== "Other"
                     ? practice.trim()
                     : undefined,
-                ownEmail
-                    ? sharedUsers
-                          .map((user) => user.email)
-                          .filter((email) => email !== ownEmail)
-                    : sharedUsers.map((user) => user.email),
             );
+            // Recipients are granted AFTER creation through the role-aware
+            // access endpoint — POST /projects rejects `shared_with`.
+            const recipientEmails = ownEmail
+                ? sharedUsers
+                      .map((user) => user.email)
+                      .filter((email) => email !== ownEmail)
+                : sharedUsers.map((user) => user.email);
             await Promise.all([
+                ...recipientEmails.map((email) =>
+                    grantProjectAccess(project.id, email).catch(() => {}),
+                ),
                 ...selectedDocuments.map((document) =>
                     addDocumentToProject(project.id, document.id).catch(() => {}),
                 ),
