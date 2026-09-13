@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { randomUUID } from "node:crypto";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
 import { recordChatTurn } from "../lib/audit";
@@ -8,8 +9,8 @@ import {
     buildUserPersonalisationPrompt,
     buildWorkflowStore,
     enrichWithPriorEvents,
-    appendAskInputsResponseToLastAssistantMessage,
-    appendAssistantEventsToLastAssistantMessage,
+    appendAskInputsResponseToAssistantMessage,
+    appendAssistantEventsToMessage,
     AssistantStreamError,
     ASSISTANT_ERROR_MESSAGE,
     buildCancelledAssistantMessage,
@@ -30,13 +31,22 @@ import {
     type ChatMessage,
 } from "../lib/chat";
 import { getUserModelSettings } from "../lib/userSettings";
-import { checkProjectAccess } from "../lib/access";
+import { checkProjectAccess, projectHasSharedAudience } from "../lib/access";
+import { hasDirectContentGrants } from "../lib/contentAccess";
+import { can } from "../lib/permissions";
 import { generateAssistantChatTitle } from "../lib/chatTitle";
 import {
     resolveEffectiveChatModel,
     resolveEffectiveReasoningLevel,
     titleModelForChat,
 } from "../lib/modelSelection";
+import {
+    beginMemoryConversationTurn,
+    releaseMemoryConversationTurn,
+    scheduleMemoryConsolidation,
+    type MemoryConversationTurn,
+} from "../lib/memory/schedule";
+import { sendInternalError } from "../lib/httpError";
 
 const PROJECT_SYSTEM_PROMPT_EXTRA = `PROJECT CONTEXT:
 You are operating within a project folder that contains a collection of legal documents the user has organised for a single matter. The user's questions will usually refer to one or more documents in this project — your job is to find the relevant files to work on. Use list_documents to see what is available and fetch_documents / read_document to pull in any documents you need before answering.
@@ -100,6 +110,8 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     const displayed_doc = parsedDisplayedDoc.value;
     const attached_documents = parsedAttachedDocuments.value;
     const askInputsResponse = parsedAskInputsResponse.value;
+    const assistantMessageId = askInputsResponse ? null : randomUUID();
+    const inputMessageId = askInputsResponse ? null : randomUUID();
 
     const db = createServerSupabase();
     // Verify the user has access to the project (owner or shared member).
@@ -111,6 +123,15 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     );
     if (!projectAccess.ok)
         return void res.status(404).json({ detail: "Project not found" });
+    let memorySharedAudience = await projectHasSharedAudience(
+        db,
+        projectId,
+        projectAccess.project.org_id,
+    );
+    const allowDocumentMutation = can(
+        projectAccess.projectRole,
+        "content.edit",
+    );
 
     let chatId = chat_id ?? null;
     let chatTitle: string | null = null;
@@ -130,6 +151,9 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
             chatModel = (existing!.model as string | null) ?? null;
             chatReasoningLevel =
                 (existing!.reasoning_level as string | null) ?? null;
+            memorySharedAudience =
+                memorySharedAudience ||
+                (await hasDirectContentGrants(db, "chat", existing!.id));
         }
     }
 
@@ -195,23 +219,72 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     }
 
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    let completedTurnPersisted = true;
+    let memoryTurn: MemoryConversationTurn | null = null;
+    let memoryTurnScheduled = false;
     if (askInputsResponse) {
-        await appendAskInputsResponseToLastAssistantMessage(
+        const appendResult = await appendAskInputsResponseToAssistantMessage(
             db,
             chatId,
             askInputsResponse,
+            userId,
         );
+        if (appendResult === "forbidden") {
+            return void res.status(403).json({
+                detail:
+                    "Only the user who started this turn can answer these questions",
+            });
+        }
+        if (appendResult === "invalid") {
+            return void res.status(400).json({
+                detail: "The answers do not match the pending questions",
+            });
+        }
+        if (appendResult === "stale") {
+            return void res.status(409).json({
+                code: "ask_inputs_stale",
+                detail:
+                    "These questions have already been answered or are no longer active",
+            });
+        }
+        completedTurnPersisted = appendResult === "appended";
+        if (!completedTurnPersisted) {
+            return void res
+                .status(500)
+                .json({ detail: "Failed to save message" });
+        }
     } else if (lastUser) {
-        await db.from("chat_messages").insert({
-            chat_id: chatId,
-            role: "user",
-            content: lastUser.content,
-            files: lastUser.files ?? null,
-            workflow: lastUser.workflow ?? null,
-        });
+        const { error: userMessageError } = await db
+            .from("chat_messages")
+            .insert({
+                id: inputMessageId,
+                chat_id: chatId,
+                role: "user",
+                content: lastUser.content,
+                files: lastUser.files ?? null,
+                workflow: lastUser.workflow ?? null,
+                author_user_id: userId,
+            });
+        if (userMessageError) {
+            return void sendInternalError(res, userMessageError);
+        }
     }
 
-    const { docIndex, docStore, folderPaths } = await buildProjectDocContext(
+    if (askInputsResponse || lastUser) {
+        try {
+            memoryTurn = await beginMemoryConversationTurn({
+                db,
+                surface: "chat",
+                conversationId: chatId,
+                actorUserId: userId,
+            });
+        } catch (error) {
+            return void sendInternalError(res, error);
+        }
+    }
+
+    try {
+        const { docIndex, docStore, folderPaths } = await buildProjectDocContext(
         projectId,
         userId,
         db,
@@ -370,30 +443,40 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
             db,
             write,
             extraTools: PROJECT_EXTRA_TOOLS,
+            allowDocumentMutation,
             workflowStore,
             model: selectedModel,
             reasoning: selectedReasoningLevel,
             apiKeys,
             signal: streamAbort.signal,
             projectId,
+            includeMemory: true,
+            memoryProjectId: projectId,
+            memorySharedAudience,
             nonce,
             emitDone: false,
         });
 
         const persistedEvents = events;
         if (askInputsResponse) {
-            await appendAssistantEventsToLastAssistantMessage(
+            const appended = await appendAssistantEventsToMessage(
                 db,
                 chatId,
+                askInputsResponse.assistant_message_id,
+                userId,
                 persistedEvents,
                 citations,
             );
+            completedTurnPersisted = appended;
         } else {
             await db.from("chat_messages").insert({
+                id: assistantMessageId,
                 chat_id: chatId,
                 role: "assistant",
                 content: persistedEvents.length ? persistedEvents : null,
                 citations: citations.length ? citations : null,
+                author_user_id: userId,
+                memory_input_message_id: inputMessageId,
             });
         }
 
@@ -407,6 +490,31 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
                 write(
                     `data: ${JSON.stringify({ type: "chat_title", chatId, title })}\n\n`,
                 );
+            }
+        }
+
+        if (
+            completedTurnPersisted &&
+            !persistedEvents.some(
+                (event) =>
+                    event.type === "ask_inputs" || event.type === "error",
+            )
+        ) {
+            const completedTurnId =
+                assistantMessageId ??
+                askInputsResponse?.assistant_message_id ??
+                null;
+            if (completedTurnId) {
+                const scheduled = await scheduleMemoryConsolidation({
+                    db,
+                    surface: "chat",
+                    conversationId: chatId,
+                    actorUserId: userId,
+                    projectId: allowDocumentMutation ? projectId : null,
+                    turnId: completedTurnId,
+                    turn: memoryTurn,
+                });
+                memoryTurnScheduled = scheduled != null;
             }
         }
 
@@ -439,6 +547,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
                     ? null
                     : (
                           await db.from("chat_messages").insert({
+                              id: assistantMessageId,
                               chat_id: chatId,
                               role: "assistant",
                               content: partial.events.length
@@ -447,12 +556,16 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
                               citations: partial.citations.length
                                   ? partial.citations
                                   : null,
+                              author_user_id: userId,
+                              memory_input_message_id: inputMessageId,
                           })
                       ).error;
                 if (askInputsResponse) {
-                    await appendAssistantEventsToLastAssistantMessage(
+                    await appendAssistantEventsToMessage(
                         db,
                         chatId,
+                        askInputsResponse.assistant_message_id,
+                        userId,
                         partial.events,
                         partial.citations,
                     );
@@ -480,16 +593,21 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
                 ? null
                 : (
                       await db.from("chat_messages").insert({
+                          id: assistantMessageId,
                           chat_id: chatId,
                           role: "assistant",
                           content: errorEvents.length ? errorEvents : null,
                           citations: citations.length ? citations : null,
+                          author_user_id: userId,
+                          memory_input_message_id: inputMessageId,
                       })
                   ).error;
             if (askInputsResponse) {
-                await appendAssistantEventsToLastAssistantMessage(
+                await appendAssistantEventsToMessage(
                     db,
                     chatId,
+                    askInputsResponse.assistant_message_id,
+                    userId,
                     errorEvents,
                     citations,
                 );
@@ -514,5 +632,21 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     } finally {
         streamFinished = true;
         res.end();
+    }
+    } finally {
+        if (memoryTurn && !memoryTurnScheduled) {
+            try {
+                await releaseMemoryConversationTurn({
+                    db,
+                    surface: "chat",
+                    conversationId: chatId,
+                    turn: memoryTurn,
+                });
+            } catch {
+                console.warn("[memory] project chat activity release failed", {
+                    chatId,
+                });
+            }
+        }
     }
 });

@@ -152,7 +152,7 @@ function normalizeAskInputsEvent(
     .filter((item): item is AskInputItem => !!item)
     .slice(0, 12);
 
-  return { type: "ask_inputs", items };
+  return { type: "ask_inputs", event_id: crypto.randomUUID(), items };
 }
 
 export async function runToolCalls(

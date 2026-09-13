@@ -20,7 +20,12 @@ import {
   devLog,
   resolveDocLabel,
 } from "./types";
-import { TOOLS, WORKFLOW_TOOLS } from "./tools/toolSchemas";
+import {
+  TOOLS,
+  WORKFLOW_TOOLS,
+  isDocumentMutatingTool,
+  withoutDocumentMutatingTools,
+} from "./tools/toolSchemas";
 import {
   parseCitationsWithDiagnostics,
   parsePartialCitationObjects,
@@ -34,13 +39,20 @@ import {
   type TurnReadState,
 } from "./tools/documentOps";
 import { verifyCitations } from "./verifyCitations";
+import { buildMemoryTurn } from "../memory/prompt";
 
 export type AssistantEvent =
   | { type: "reasoning"; text: string }
   | AskInputsEvent
   | {
       type: "ask_inputs_response";
+      assistant_message_id: string;
+      ask_event_id: string;
       responses: AskInputResponseItem[];
+      /** User who supplied this continuation, for scoped-memory attribution. */
+      author_user_id?: string;
+      /** Immutable evidence time used by memory wipe/enable cutoffs. */
+      recorded_at?: string;
     }
   | {
       type: "doc_read";
@@ -182,6 +194,23 @@ class AssistantStreamAskInputsPause extends Error {
   }
 }
 
+function isAskInputsPause(error: unknown): boolean {
+  if (error instanceof AssistantStreamAskInputsPause) return true;
+  if (!error || typeof error !== "object") return false;
+  const record = error as {
+    name?: unknown;
+    message?: unknown;
+    cause?: unknown;
+  };
+  if (
+    record.name === "AssistantStreamAskInputsPause" ||
+    record.message === "Waiting for user input."
+  ) {
+    return true;
+  }
+  return record.cause !== error && isAskInputsPause(record.cause);
+}
+
 export function isAbortError(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const record = error as { name?: unknown; message?: unknown };
@@ -205,6 +234,18 @@ export async function runLLMStream(params: {
   extraTools?: unknown[];
   /** Expose ask_inputs only to clients that can render and answer it. */
   includeAskInputs?: boolean;
+  /**
+   * May this turn WRITE documents (edit_document, replicate_document, the
+   * generate_* family)? Defaults to true; pass false and those tools are
+   * neither advertised to the model nor executed if it asks for one anyway.
+   *
+   * The caller decides this from the role the caller holds on the CONTAINER
+   * whose documents the tools would touch — not from their standing in the
+   * chat. The two come apart: a project viewer named on one chat's share
+   * list writes in that thread as a member, and without this partition the
+   * thread would hand them edit_document over every document in the project.
+   */
+  allowDocumentMutation?: boolean;
   workflowStore?: WorkflowStore;
   tabularStore?: TabularCellStore;
   /** Tools executed by the connected client (Word add-in) instead of here. */
@@ -223,6 +264,12 @@ export async function runLLMStream(params: {
   signal?: AbortSignal;
   /** Let a route persist the completed turn before it signals stream success. */
   emitDone?: boolean;
+  /** Add read-only app/project memory as an earliest untrusted reference turn. */
+  includeMemory?: boolean;
+  /** Memory scope is independent from generated-document destination. */
+  memoryProjectId?: string | null;
+  /** Tell the memory policy whether other people can see the persisted turn. */
+  memorySharedAudience?: boolean;
   /**
    * If set, generate_docx will attach created docs to this project so
    * they appear in the project sidebar. Leave null for general chats —
@@ -247,6 +294,7 @@ export async function runLLMStream(params: {
     write: unsafeWrite,
     extraTools,
     includeAskInputs = true,
+    allowDocumentMutation = true,
     workflowStore,
     tabularStore,
     clientTools,
@@ -255,6 +303,9 @@ export async function runLLMStream(params: {
     apiKeys,
     signal,
     projectId,
+    includeMemory = false,
+    memoryProjectId,
+    memorySharedAudience = false,
     nonce,
   } = params;
   const write = (chunk: string) =>
@@ -264,24 +315,42 @@ export async function runLLMStream(params: {
     ? TOOLS
     : TOOLS.filter((tool) => tool.function.name !== "ask_inputs");
   const baseTools = [...conversationTools, ...WORKFLOW_TOOLS];
-  const activeTools = [
+  const advertisedTools = [
     ...baseTools,
     ...mcpTools,
     ...(extraTools ?? []),
     ...(clientTools?.schemas ?? []),
   ];
+  // Hiding the schema is the first half of the gate: a tool the model was
+  // never shown is a tool it will not plan around. The second half is in
+  // `runTools` below, because "not advertised" is not "not callable" — a
+  // model can name a tool from memory.
+  const activeTools = allowDocumentMutation
+    ? advertisedTools
+    : withoutDocumentMutatingTools(advertisedTools);
 
   // Extract system prompt; pass remaining turns to the adapter as
   // plain user/assistant messages.
   const rawMsgs = apiMessages as { role: string; content: string | null }[];
-  const systemPrompt =
+  const baseSystemPrompt =
     rawMsgs[0]?.role === "system" ? (rawMsgs[0].content ?? "") : "";
+  const memory = await buildMemoryTurn({
+    db,
+    userId,
+    systemPrompt: baseSystemPrompt,
+    include: includeMemory,
+    projectId: memoryProjectId,
+    sharedAudience: memorySharedAudience,
+  });
+  const systemPrompt = memory.systemPrompt;
   const chatMessages: LlmMessage[] = rawMsgs
     .filter((m) => m.role !== "system")
     .map((m) => ({
       role: m.role === "assistant" ? "assistant" : "user",
       content: m.content ?? "",
     }));
+  // Before every real turn: see MemoryTurn for why it goes there.
+  if (memory.message) chatMessages.unshift(memory.message);
 
   const events: AssistantEvent[] = [];
   // One assistant turn produces at most one document_versions row per
@@ -489,11 +558,20 @@ export async function runLLMStream(params: {
         // server batch and sequentially among themselves: each call mutates
         // or reads the live document, so order is part of their semantics.
         const clientResultByCallId = new Map<string, string>();
+        // Enforcement, not just omission: a document-writing call from a
+        // caller who may not write is dropped before dispatch, on the server
+        // side and the client side alike. It falls through to the
+        // "Tool 'x' is not available." answer below, which every tool_use
+        // without a result already gets, so the model is told plainly rather
+        // than left waiting on a call that silently did nothing.
+        const permittedCalls = allowDocumentMutation
+          ? calls
+          : calls.filter((c) => !isDocumentMutatingTool(c.name));
         const serverCalls = clientTools
-          ? calls.filter((c) => !clientTools.owns(c.name))
-          : calls;
+          ? permittedCalls.filter((c) => !clientTools.owns(c.name))
+          : permittedCalls;
         if (clientTools) {
-          for (const call of calls) {
+          for (const call of permittedCalls) {
             if (!clientTools.owns(call.name)) continue;
             const { content, events: clientEvents } =
               await clientTools.execute(call);
@@ -630,7 +708,7 @@ export async function runLLMStream(params: {
       },
     });
   } catch (err) {
-    if (err instanceof AssistantStreamAskInputsPause) {
+    if (isAskInputsPause(err)) {
       // The ask_inputs event has already been emitted and persisted in `events`.
       // Stop this assistant turn here so the model does not add redundant
       // prose telling the user to answer the picker or attach documents.

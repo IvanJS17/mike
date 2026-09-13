@@ -163,6 +163,8 @@ export type AskInputItem =
 
 export type AskInputsEvent = {
   type: "ask_inputs";
+  /** Stable identity for this particular prompt within its assistant message. */
+  event_id: string;
   items: AskInputItem[];
 };
 
@@ -189,6 +191,10 @@ export type AskInputResponseItem =
     };
 
 export type AskInputsResponseRequest = {
+  /** Durable assistant row that contains the unanswered ask_inputs event. */
+  assistant_message_id: string;
+  /** The exact ask_inputs event being answered. */
+  ask_event_id: string;
   responses: AskInputResponseItem[];
 };
 
