@@ -202,7 +202,36 @@ describe("projects.routes", () => {
 
             expect(res.status).toBe(200);
             expect(res.body).toEqual([
-                { id: "p1", name: "Alpha", memory_enabled: true },
+                { id: "p1", name: "Alpha", memory_enabled: false },
+            ]);
+        });
+
+        it("reads memory_enabled from the stored row and fails closed without one", async () => {
+            supabaseState.rpc = {
+                data: [
+                    { id: "p1", name: "No row" },
+                    { id: "p2", name: "Opted in" },
+                    { id: "p3", name: "Opted out" },
+                ],
+                error: null,
+            };
+            supabaseState.tables.memory_files = {
+                data: [
+                    { project_id: "p2", enabled: true },
+                    { project_id: "p3", enabled: false },
+                ],
+                error: null,
+            };
+
+            const res = await request(app).get("/projects").set(...AUTH);
+
+            expect(res.status).toBe(200);
+            // LITT (S5d): memory is opt-in — only a stored `true` reads enabled;
+            // a project with no memory_files row reads disabled, never enabled.
+            expect(res.body).toEqual([
+                { id: "p1", name: "No row", memory_enabled: false },
+                { id: "p2", name: "Opted in", memory_enabled: true },
+                { id: "p3", name: "Opted out", memory_enabled: false },
             ]);
         });
 
@@ -311,7 +340,7 @@ describe("projects.routes", () => {
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual([
-        { id: "p1", name: "Recently updated", memory_enabled: true },
+        { id: "p1", name: "Recently updated", memory_enabled: false },
       ]);
       expect(captured.name).toBe("get_project_summaries");
       expect(captured.args).toEqual({
@@ -683,7 +712,7 @@ describe("projects.routes", () => {
             );
         });
 
-        it("creates the project via the atomic memory RPC (201)", async () => {
+        it("creates the project via the atomic memory RPC, defaulting memory off (201)", async () => {
             supabaseState.rpc = {
                 data: {
                     id: "p9",
@@ -700,6 +729,8 @@ describe("projects.routes", () => {
 
             expect(res.status).toBe(201);
             expect(res.body).toMatchObject({ id: "p9", documents: [] });
+            // LITT (S5d): no body flag + no stored profile default ⇒ off.
+            expect(res.body.memory_enabled).toBe(false);
 
             const db = vi.mocked(createServerSupabase).mock.results.at(-1)
                 ?.value as ReturnType<typeof mockSupabase>;
@@ -709,7 +740,7 @@ describe("projects.routes", () => {
                 p_cm_number: null,
                 p_practice: null,
                 p_org_id: null,
-                p_memory_enabled: true,
+                p_memory_enabled: false,
             });
         });
 
@@ -723,6 +754,56 @@ describe("projects.routes", () => {
                 .post("/projects")
                 .set(...AUTH)
                 .send({ name: "Private", memory_enabled: false });
+
+            expect(res.status).toBe(201);
+            expect(res.body.memory_enabled).toBe(false);
+            const db = vi.mocked(createServerSupabase).mock.results.at(-1)
+                ?.value as ReturnType<typeof mockSupabase>;
+            expect(db.rpc).toHaveBeenCalledWith(
+                "create_project_with_memory",
+                expect.objectContaining({ p_memory_enabled: false }),
+            );
+        });
+
+        it("uses the creator's stored opt-in default when the profile says true", async () => {
+            supabaseState.rpc = {
+                data: { id: "p11", name: "Shared", user_id: "u1" },
+                error: null,
+            };
+            supabaseState.tables.user_profiles = {
+                data: { project_memory_default: true },
+                error: null,
+            };
+
+            const res = await request(app)
+                .post("/projects")
+                .set(...AUTH)
+                .send({ name: "Shared" });
+
+            expect(res.status).toBe(201);
+            expect(res.body.memory_enabled).toBe(true);
+            const db = vi.mocked(createServerSupabase).mock.results.at(-1)
+                ?.value as ReturnType<typeof mockSupabase>;
+            expect(db.rpc).toHaveBeenCalledWith(
+                "create_project_with_memory",
+                expect.objectContaining({ p_memory_enabled: true }),
+            );
+        });
+
+        it("fails closed to disabled when the profile lookup errors", async () => {
+            supabaseState.rpc = {
+                data: { id: "p12", name: "Degraded", user_id: "u1" },
+                error: null,
+            };
+            supabaseState.tables.user_profiles = {
+                data: null,
+                error: { message: "profile lookup failed" },
+            };
+
+            const res = await request(app)
+                .post("/projects")
+                .set(...AUTH)
+                .send({ name: "Degraded" });
 
             expect(res.status).toBe(201);
             expect(res.body.memory_enabled).toBe(false);
@@ -833,7 +914,7 @@ describe("projects.routes", () => {
             expect(res.body).toMatchObject({
                 id: "p1",
                 is_owner: true,
-                memory_enabled: true,
+                memory_enabled: false,
                 documents: [{ id: "d1" }],
                 folders: [{ id: "f1" }],
             });

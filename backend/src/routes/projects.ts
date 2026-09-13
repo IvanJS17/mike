@@ -83,19 +83,19 @@ async function attachProjectMemoryEnabled<
   return {
     rows: projects.map((project) => ({
       ...project,
-      // Creation writes the row atomically. Project memory is on by default,
-      // so a project with no row yet (one predating the memory tables) reads
-      // as enabled; an explicit opt-out is a stored `false`, not a gap.
-      memory_enabled: enabledByProject.get(project.id) ?? true,
+      // LITT (S5d): memory is opt-in — only a stored `true` row reads as
+      // enabled. A project with no row yet (or a stored `false`) reads as
+      // disabled, matching ensureMemoryFile's fail-closed materialization.
+      memory_enabled: enabledByProject.get(project.id) ?? false,
     })),
     error: null,
   };
 }
 
 /**
- * The creator's saved default for new projects' shared memory. A database
- * that has not applied the preference migration, or a profile row that has
- * not been created yet, falls back to on — the product default.
+ * The creator's saved default for new projects' shared memory. LiTT (S5d):
+ * memory is opt-in, so a missing profile row or a failed lookup falls back
+ * to off — never on. Only an explicit stored `true` enables the new project.
  */
 async function projectMemoryDefaultFor(
   db: ReturnType<typeof createServerSupabase>,
@@ -106,9 +106,9 @@ async function projectMemoryDefaultFor(
     .select("project_memory_default")
     .eq("user_id", userId)
     .maybeSingle();
-  if (error || !data) return true;
+  if (error || !data) return false;
   return (data as { project_memory_default?: unknown })
-    .project_memory_default !== false;
+    .project_memory_default === true;
 }
 
 function normalizeDocumentFilename(nextName: unknown, currentName: string) {
