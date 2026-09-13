@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { sealManifest } from "./manifestSigning";
 import { createServerSupabase } from "./supabase";
 
@@ -70,67 +69,6 @@ function idsFrom(rows: Record<string, unknown>[], column = "id"): string[] {
             typeof row[column] === "string" ? (row[column] as string) : null,
         ),
     );
-}
-
-async function loadMemoryExport(
-    db: Db,
-    scope: "user" | "project",
-    ownerId: string,
-) {
-    const ownerColumn = scope === "user" ? "user_id" : "project_id";
-    const rows = await selectAll(
-        db,
-        "memory_files",
-        (query) => query.eq("scope", scope).eq(ownerColumn, ownerId),
-        "id, enabled, epoch, revision, content, content_sha256, size_bytes, status, last_source, updated_by, created_at, updated_at",
-    );
-    const file = rows[0];
-    if (!file) {
-        return {
-            // Missing state is legacy/corrupt and must never be reported as an
-            // implicit opt-in. New owners receive an explicit row at creation.
-            enabled: false,
-            epoch: 0,
-            revision: 0,
-            status: "idle",
-            created_at: null,
-            updated_at: null,
-            markdown: "",
-            content_sha256: null,
-            size_bytes: 0,
-            source: null,
-            updated_by: null,
-        };
-    }
-
-    const markdown = typeof file.content === "string" ? file.content : "";
-    const storedHash =
-        typeof file.content_sha256 === "string" ? file.content_sha256 : null;
-    if (storedHash) {
-        const actualHash = createHash("sha256")
-            .update(markdown, "utf8")
-            .digest("hex");
-        if (actualHash !== storedHash) {
-            throw new Error("Memory export content checksum mismatch");
-        }
-    }
-
-    return {
-        enabled: file.enabled === true,
-        epoch: Number(file.epoch),
-        revision: Number(file.revision),
-        status: String(file.status ?? "idle"),
-        created_at:
-            typeof file.created_at === "string" ? file.created_at : null,
-        updated_at:
-            typeof file.updated_at === "string" ? file.updated_at : null,
-        markdown,
-        content_sha256: storedHash,
-        size_bytes: Number(file.size_bytes ?? 0),
-        source: typeof file.last_source === "string" ? file.last_source : null,
-        updated_by:
-            typeof file.updated_by === "string" ? file.updated_by : null,
-    };
 }
 
 async function loadUserChats(db: Db, userId: string) {
@@ -266,8 +204,6 @@ export async function buildProjectExportManifest(db: Db, projectId: string) {
         .single();
     await throwIfError(projectError, "Failed to export project");
 
-    const memory = await loadMemoryExport(db, "project", projectId);
-
     const documents = await selectAll(
         db,
         "documents",
@@ -324,7 +260,6 @@ export async function buildProjectExportManifest(db: Db, projectId: string) {
         manifest_version: 1,
         exported_at: new Date().toISOString(),
         project,
-        memory,
         documents: documents.map((doc) => ({
             id: doc.id,
             status: doc.status,
@@ -377,7 +312,6 @@ export async function buildUserAccountExport(
         sharedProjects,
         sharedTabularReviews,
         auditEvents,
-        appMemory,
     ] = await Promise.all([
         selectAll(db, "user_profiles", (query) => query.eq("user_id", userId)),
         loadApiKeyStatus(db, userId),
@@ -498,16 +432,20 @@ export async function buildUserAccountExport(
                 .eq("user_id", userId)
                 .order("created_at", { ascending: true }),
         ),
-        loadMemoryExport(db, "user", userId),
     ]);
 
     // Organization membership + the orgs the user belongs to and the
     // invitations addressed to them, for a complete GDPR-style export of
     // their multi-tenant footprint.
-    const orgMemberships = await selectAll(db, "org_members", (query) =>
-        query.eq("user_id", userId).order("created_at", { ascending: true }),
+    const orgMemberships = await selectAll(
+        db,
+        "organization_memberships",
+        (query) =>
+            query
+                .eq("user_id", userId)
+                .order("created_at", { ascending: true }),
     );
-    const orgIds = idsFrom(orgMemberships, "org_id");
+    const orgIds = idsFrom(orgMemberships, "organization_id");
     const [organizations, orgInvitations] = await Promise.all([
         selectByIds(db, "organizations", "id", orgIds),
         userEmail
@@ -544,7 +482,7 @@ export async function buildUserAccountExport(
         api_keys: apiKeys,
         router_models: routerModels,
         organizations,
-        org_members: orgMemberships,
+        organization_memberships: orgMemberships,
         org_invitations: orgInvitations,
         projects,
         project_subfolders: folders,
@@ -566,7 +504,6 @@ export async function buildUserAccountExport(
             projects: sharedProjects,
             tabular_reviews: sharedTabularReviews,
         },
-        memory: appMemory,
         audit_events: auditEvents,
     };
 }
