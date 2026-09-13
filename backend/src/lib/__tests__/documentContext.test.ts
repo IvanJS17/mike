@@ -5,7 +5,7 @@ import {
     generateSpotlightNonce,
     spotlight,
     enrichWithPriorEvents,
-    appendAskInputsResponseToLastAssistantMessage,
+    appendAskInputsResponseToAssistantMessage,
     buildMessages,
 } from "../chat/contextBuilders";
 import {
@@ -128,6 +128,7 @@ type FakeAssistantRow = {
     role: string;
     content: unknown;
     citations: unknown;
+    author_user_id: string;
     created_at: string;
 };
 
@@ -138,6 +139,7 @@ type FakeAssistantRow = {
  */
 function makeFakeMessagesDb(rows: FakeAssistantRow[]) {
     const updates: { id: string; content: unknown; citations: unknown }[] = [];
+    const rpcCalls: { name: string; args: Record<string, unknown> }[] = [];
     const db = {
         from: () => {
             let selected = [...rows];
@@ -182,6 +184,8 @@ function makeFakeMessagesDb(rows: FakeAssistantRow[]) {
                     selected = selected.slice(0, count);
                     return builder;
                 },
+                maybeSingle: () =>
+                    Promise.resolve({ data: selected[0] ?? null, error: null }),
                 then: (
                     resolve: (value: unknown) => unknown,
                     reject?: (error: unknown) => unknown,
@@ -204,8 +208,12 @@ function makeFakeMessagesDb(rows: FakeAssistantRow[]) {
             };
             return builder;
         },
+        rpc: async (name: string, args: Record<string, unknown>) => {
+            rpcCalls.push({ name, args });
+            return { data: "appended", error: null };
+        },
     };
-    return { db: db as never, updates };
+    return { db: db as never, updates, rpcCalls };
 }
 
 function realAssistantRow(content: unknown): FakeAssistantRow {
@@ -215,6 +223,7 @@ function realAssistantRow(content: unknown): FakeAssistantRow {
         role: "assistant",
         content,
         citations: null,
+        author_user_id: "user-1",
         created_at: "2026-01-01T00:00:00Z",
     };
 }
@@ -226,6 +235,7 @@ function reservationRow(): FakeAssistantRow {
         role: "assistant",
         content: null,
         citations: null,
+        author_user_id: "user-1",
         created_at: "2026-01-01T00:05:00Z",
     };
 }
@@ -279,30 +289,34 @@ describe("null-content assistant reservations", () => {
         expect(enriched).toEqual(messages);
     });
 
-    it("ask-input responses append to the real last message, never the reservation", async () => {
+    it("ask-input responses append to their exact parent, never a reservation", async () => {
         const rows = [
-            realAssistantRow([{ type: "ask_inputs", items: [] }]),
+            realAssistantRow([
+                {
+                    type: "ask_inputs",
+                    event_id: "ask-1",
+                    items: [
+                        {
+                            id: "choice-1",
+                            kind: "choice",
+                            question: "Continue?",
+                            options: [{ value: "Yes" }, { value: "No" }],
+                            allow_other: false,
+                            other_label: "Other",
+                        },
+                    ],
+                },
+            ]),
             reservationRow(),
         ];
-        const { db, updates } = makeFakeMessagesDb(rows);
+        const { db, rpcCalls } = makeFakeMessagesDb(rows);
 
-        await appendAskInputsResponseToLastAssistantMessage(db, "chat-1", {
-            responses: [
-                {
-                    id: "choice-1",
-                    kind: "choice",
-                    question: "Continue?",
-                    answer: "Yes",
-                },
-            ],
-        });
-
-        expect(updates).toHaveLength(1);
-        expect(updates[0].id).toBe("assistant-real");
-        expect(updates[0].content).toEqual([
-            { type: "ask_inputs", items: [] },
+        await appendAskInputsResponseToAssistantMessage(
+            db,
+            "chat-1",
             {
-                type: "ask_inputs_response",
+                assistant_message_id: "assistant-real",
+                ask_event_id: "ask-1",
                 responses: [
                     {
                         id: "choice-1",
@@ -311,6 +325,24 @@ describe("null-content assistant reservations", () => {
                         answer: "Yes",
                     },
                 ],
+            },
+            "user-1",
+        );
+
+        expect(rpcCalls).toEqual([
+            {
+                name: "append_chat_ask_inputs_response",
+                args: expect.objectContaining({
+                    p_chat_id: "chat-1",
+                    p_message_id: "assistant-real",
+                    p_author_user_id: "user-1",
+                    p_ask_event_id: "ask-1",
+                    p_response: expect.objectContaining({
+                        type: "ask_inputs_response",
+                        assistant_message_id: "assistant-real",
+                        ask_event_id: "ask-1",
+                    }),
+                }),
             },
         ]);
         // The reservation stays empty for its own stream's terminal save.

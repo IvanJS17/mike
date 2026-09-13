@@ -1,28 +1,49 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 
+// This file's model-selection coverage pushes past the chat limiter's
+// 30-requests-per-window budget, so later requests would answer 429 before any
+// route logic runs. Hoisted so it precedes app.ts's limiter construction;
+// scoped to tests — production reads its own env.
+vi.hoisted(() => {
+    process.env.RATE_LIMIT_CHAT_MAX = "1000";
+});
+
 // Hoisted mock fn so the vi.mock factory below (which is itself hoisted above
 // the imports) can reference it. Lets each test drive the stream outcome.
-const { runLLMStream, dbInserts, dbUpdates, dbControl } = vi.hoisted(() => ({
-    runLLMStream: vi.fn(),
-    dbInserts: [] as { table: string; value: unknown }[],
-    dbUpdates: [] as {
-        table: string;
-        value: unknown;
-        filters: { column: string; value: unknown }[];
-    }[],
-    dbControl: {
-        failAssistantReservation: false,
-        terminalUpdateFailures: 0,
-        terminalUpdateAttempts: 0,
-        terminalUpdateGate: null as Promise<void> | null,
-        wordChatMissing: false,
-        // When set, selects on chat_messages resolve against these rows with
-        // the eq/not/order/limit chain genuinely applied (a mini query
-        // engine), so tests can prove which assistant row a query picks.
-        assistantMessageRows: null as Record<string, unknown>[] | null,
-    },
-}));
+const { runLLMStream, dbInserts, dbUpdates, dbRpcCalls, dbControl } =
+    vi.hoisted(() => ({
+        runLLMStream: vi.fn(),
+        dbInserts: [] as { table: string; value: unknown }[],
+        dbUpdates: [] as {
+            table: string;
+            value: unknown;
+            filters: { column: string; value: unknown }[];
+        }[],
+        dbRpcCalls: [] as { name: string; args: unknown }[],
+        dbControl: {
+            failAssistantReservation: false,
+            terminalUpdateFailures: 0,
+            terminalUpdateAttempts: 0,
+            terminalUpdateGate: null as Promise<void> | null,
+            wordChatMissing: false,
+            // When set, selects on chat_messages resolve against these rows with
+            // the eq/not/order/limit chain genuinely applied (a mini query
+            // engine), so tests can prove which assistant row a query picks.
+            assistantMessageRows: null as Record<string, unknown>[] | null,
+            // When set, selects on `chats` resolve to this row instead of the
+            // default owned-by-u1 row, so tests can present a conversation
+            // shared by another user.
+            chatRow: null as Record<string, unknown> | null,
+            // When true, begin_memory_conversation_turn fails at the DB,
+            // proving the route fails closed before streaming.
+            failMemoryFence: false,
+            // When true, selects on `projects` resolve to no row, so every
+            // project verdict in the request comes back as "no access" (the
+            // member was removed from the project).
+            projectMissing: false,
+        },
+    }));
 
 // A permissive, chainable Supabase stub. Every query-builder method returns the
 // same object (so arbitrary chains work), the object is awaitable (thenable),
@@ -30,15 +51,20 @@ const { runLLMStream, dbInserts, dbUpdates, dbControl } = vi.hoisted(() => ({
 // routes only read `.id`/`.title` and check `.error`, so this is enough to let
 // a request flow through chat creation and message inserts without real IO.
 function makeQuery(table: string) {
-    let result: { data: unknown; error: { message: string } | null } = {
-        data: {
-            id: "chat-1",
-            title: null,
-            user_id: "u1",
-            project_id: null,
-        },
-        error: null,
-    };
+    let result: { data: unknown; error: { message: string } | null } =
+        table === "chats" && dbControl.chatRow
+            ? { data: dbControl.chatRow, error: null }
+            : table === "projects" && dbControl.projectMissing
+              ? { data: null, error: null }
+              : {
+                    data: {
+                        id: "chat-1",
+                        title: null,
+                        user_id: "u1",
+                        project_id: null,
+                    },
+                    error: null,
+                };
     const q: Record<string, unknown> = {};
     let activeUpdate:
         | {
@@ -112,13 +138,28 @@ function makeQuery(table: string) {
         return q;
     });
     q.single = vi.fn(() => Promise.resolve(result));
-    q.maybeSingle = vi.fn(() =>
-        Promise.resolve(
+    q.maybeSingle = vi.fn(() => {
+        if (
+            didSelect &&
+            table === "chat_messages" &&
+            dbControl.assistantMessageRows
+        ) {
+            let rows = [...dbControl.assistantMessageRows];
+            for (const filter of selectState.filters) {
+                if (filter.op === "eq") {
+                    rows = rows.filter(
+                        (row) => row[filter.column] === filter.value,
+                    );
+                }
+            }
+            return Promise.resolve({ data: rows[0] ?? null, error: null });
+        }
+        return Promise.resolve(
             table === "word_chats" && dbControl.wordChatMissing
                 ? { data: null, error: null }
                 : result,
-        ),
-    );
+        );
+    });
     q.then = (
         resolve: (v: unknown) => unknown,
         reject?: (e: unknown) => unknown,
@@ -178,7 +219,22 @@ function makeQuery(table: string) {
 function mockSupabase() {
     return {
         from: vi.fn((table: string) => makeQuery(table)),
-        rpc: vi.fn(() => Promise.resolve({ data: null, error: null })),
+        rpc: vi.fn((name: string, args: unknown) => {
+            dbRpcCalls.push({ name, args });
+            if (
+                name === "begin_memory_conversation_turn" &&
+                dbControl.failMemoryFence
+            ) {
+                return Promise.resolve({
+                    data: null,
+                    error: { message: "memory activity could not be fenced" },
+                });
+            }
+            return Promise.resolve({
+                data: name.startsWith("append_chat_") ? "appended" : null,
+                error: null,
+            });
+        }),
         auth: {
             getUser: () =>
                 Promise.resolve({ data: { user: { id: "u1" } }, error: null }),
@@ -271,12 +327,16 @@ describe("POST /chat — streaming endpoint", () => {
         vi.clearAllMocks();
         dbInserts.length = 0;
         dbUpdates.length = 0;
+        dbRpcCalls.length = 0;
         dbControl.failAssistantReservation = false;
         dbControl.terminalUpdateFailures = 0;
         dbControl.terminalUpdateAttempts = 0;
         dbControl.terminalUpdateGate = null;
         dbControl.wordChatMissing = false;
         dbControl.assistantMessageRows = null;
+        dbControl.chatRow = null;
+        dbControl.failMemoryFence = false;
+        dbControl.projectMissing = false;
         runLLMStream.mockResolvedValue({
             fullText: "hi there",
             events: [],
@@ -810,6 +870,32 @@ describe("POST /chat — streaming endpoint", () => {
     });
 
     it("does not allocate or insert a new assistant message for an ask-input continuation", async () => {
+        dbControl.assistantMessageRows = [
+            {
+                id: "assistant-existing",
+                chat_id: "chat-1",
+                role: "assistant",
+                content: [
+                    {
+                        type: "ask_inputs",
+                        event_id: "ask-1",
+                        items: [
+                            {
+                                id: "choice-1",
+                                kind: "choice",
+                                question: "Continue?",
+                                options: [{ value: "Yes" }, { value: "No" }],
+                                allow_other: false,
+                                other_label: "Other",
+                            },
+                        ],
+                    },
+                ],
+                citations: null,
+                author_user_id: "u1",
+                created_at: "2026-01-01T00:00:00Z",
+            },
+        ];
         const res = await request(app)
             .post("/chat")
             .set("Authorization", "Bearer test")
@@ -817,6 +903,8 @@ describe("POST /chat — streaming endpoint", () => {
                 ...VALID_BODY,
                 chat_id: "chat-1",
                 ask_inputs_response: {
+                    assistant_message_id: "assistant-existing",
+                    ask_event_id: "ask-1",
                     responses: [
                         {
                             id: "choice-1",
@@ -855,8 +943,24 @@ describe("POST /chat — streaming endpoint", () => {
                 id: "assistant-real",
                 chat_id: "chat-1",
                 role: "assistant",
-                content: [{ type: "ask_inputs", items: [] }],
+                content: [
+                    {
+                        type: "ask_inputs",
+                        event_id: "ask-1",
+                        items: [
+                            {
+                                id: "choice-1",
+                                kind: "choice",
+                                question: "Continue?",
+                                options: [{ value: "Yes" }, { value: "No" }],
+                                allow_other: false,
+                                other_label: "Other",
+                            },
+                        ],
+                    },
+                ],
                 citations: null,
+                author_user_id: "u1",
                 created_at: "2026-01-01T00:00:00Z",
             },
             {
@@ -865,6 +969,7 @@ describe("POST /chat — streaming endpoint", () => {
                 role: "assistant",
                 content: null,
                 citations: null,
+                author_user_id: "u1",
                 created_at: "2026-01-01T00:05:00Z",
             },
         ];
@@ -876,6 +981,8 @@ describe("POST /chat — streaming endpoint", () => {
                 ...VALID_BODY,
                 chat_id: "chat-1",
                 ask_inputs_response: {
+                    assistant_message_id: "assistant-real",
+                    ask_event_id: "ask-1",
                     responses: [
                         {
                             id: "choice-1",
@@ -888,37 +995,20 @@ describe("POST /chat — streaming endpoint", () => {
             });
 
         expect(res.status).toBe(200);
-        const askInputsUpdate = dbUpdates.find(
-            ({ table, filters }) =>
-                table === "chat_messages" &&
-                filters.some(
-                    (f) => f.column === "id" && f.value === "assistant-real",
-                ),
-        );
-        expect(askInputsUpdate?.value).toMatchObject({
-            content: [
-                { type: "ask_inputs", items: [] },
-                {
-                    type: "ask_inputs_response",
-                    responses: [
-                        {
-                            id: "choice-1",
-                            kind: "choice",
-                            question: "Continue?",
-                            answer: "Yes",
-                        },
-                    ],
-                },
-            ],
+        expect(dbRpcCalls).toContainEqual({
+            name: "append_chat_ask_inputs_response",
+            args: expect.objectContaining({
+                p_chat_id: "chat-1",
+                p_message_id: "assistant-real",
+                p_ask_event_id: "ask-1",
+            }),
         });
         // The orphaned reservation is never selected or written to.
         expect(
-            dbUpdates.some(({ filters }) =>
-                filters.some(
-                    (f) =>
-                        f.column === "id" &&
-                        f.value === "assistant-reservation",
-                ),
+            dbRpcCalls.some(
+                ({ args }) =>
+                    (args as { p_message_id?: unknown }).p_message_id ===
+                    "assistant-reservation",
             ),
         ).toBe(false);
     });
@@ -961,7 +1051,14 @@ describe("POST /chat — streaming endpoint", () => {
             'messages[0].role must be "user" or "assistant"',
         ],
         [
-            { ...VALID_BODY, ask_inputs_response: { responses: [] } },
+            {
+                ...VALID_BODY,
+                ask_inputs_response: {
+                    assistant_message_id: "assistant-1",
+                    ask_event_id: "ask-1",
+                    responses: [],
+                },
+            },
             "ask_inputs_response.responses must be a non-empty array",
         ],
     ])(
@@ -1060,6 +1157,82 @@ describe("POST /chat — streaming endpoint", () => {
             apiKeys?: { courtlistener?: string };
         };
         expect(streamArgs.apiKeys?.courtlistener).toBeUndefined();
+    });
+
+    it("keeps personal memory out of a conversation shared by another user", async () => {
+        // A collaborator's chat in a personal (non-org) project is still a
+        // shared audience. The stream must be told so, so personal/app memory
+        // is never folded into a conversation other people can read.
+        dbControl.chatRow = {
+            id: "chat-1",
+            title: "Shared plan",
+            model: null,
+            reasoning_level: null,
+            user_id: "u2",
+            project_id: "p1",
+        };
+
+        const res = await request(app)
+            .post("/chat")
+            .set("Authorization", "Bearer test")
+            .send({ ...VALID_BODY, chat_id: "chat-1" });
+
+        expect(res.status).toBe(200);
+        expect(runLLMStream).toHaveBeenCalledWith(
+            expect.objectContaining({
+                includeMemory: true,
+                memorySharedAudience: true,
+                memoryProjectId: "p1",
+            }),
+        );
+    });
+
+    it("rejects a project chat once its author lost access to the project", async () => {
+        // Revoking a member's project access must also remove them from the
+        // project's conversations. Current project members still read this
+        // thread, so it can never fall back to its author's private audience:
+        // the owner shortcut in getAccessibleChat would otherwise let the
+        // revoked author keep extending it (with their app memory folded in).
+        dbControl.chatRow = {
+            id: "chat-1",
+            title: "Revoked access",
+            model: null,
+            reasoning_level: null,
+            user_id: "u1",
+            project_id: "p1",
+        };
+        dbControl.projectMissing = true;
+
+        const res = await request(app)
+            .post("/chat")
+            .set("Authorization", "Bearer test")
+            .send({ ...VALID_BODY, chat_id: "chat-1" });
+
+        expect(res.status).toBe(404);
+        expect(res.body.detail).toBe("Chat not found");
+        expect(runLLMStream).not.toHaveBeenCalled();
+        expect(
+            dbRpcCalls.some(
+                ({ name }) => name === "begin_memory_conversation_turn",
+            ),
+        ).toBe(false);
+    });
+
+    it("fails closed before streaming when memory activity cannot be fenced", async () => {
+        dbControl.failMemoryFence = true;
+        const errorSpy = vi
+            .spyOn(console, "error")
+            .mockImplementation(() => {});
+
+        const res = await request(app)
+            .post("/chat")
+            .set("Authorization", "Bearer test")
+            .send(VALID_BODY);
+
+        expect(res.status).toBe(500);
+        expect(res.body.detail).toBe("Something went wrong. Please try again.");
+        expect(runLLMStream).not.toHaveBeenCalled();
+        errorSpy.mockRestore();
     });
 });
 

@@ -8,6 +8,7 @@ import {
   type DocIndex,
   type WorkflowStore,
   type ChatMessage,
+  type AskInputItem,
   type AskInputsResponseRequest,
   type AskInputResponseItem,
   MAX_ASK_INPUT_TEXT_LENGTH,
@@ -186,6 +187,7 @@ export async function enrichWithPriorEvents(
   };
 
   const lines: string[] = [];
+  let skippedInputSeen = false;
   for (const ev of content as Record<string, unknown>[]) {
     if (ev?.type === "doc_created") {
       lines.push(`- generated_document → ${refFor(ev.document_id, ev.filename)}`);
@@ -230,7 +232,14 @@ export async function enrichWithPriorEvents(
         if (!response || typeof response !== "object") continue;
         const row = response as Record<string, unknown>;
         if (row.skipped) {
-          lines.push("- user skipped an input");
+          skippedInputSeen = true;
+          const skippedLabel =
+            typeof row.question === "string" && row.question.trim()
+              ? row.question.trim()
+              : typeof row.id === "string" && row.id.trim()
+                ? row.id.trim()
+                : "an input";
+          lines.push(`- user skipped: ${untrustedRef(skippedLabel)}`);
         } else if (
           (row.kind === "choice" || row.kind === "text") &&
           typeof row.answer === "string"
@@ -250,6 +259,11 @@ export async function enrichWithPriorEvents(
         }
       }
     }
+  }
+  if (skippedInputSeen) {
+    lines.push(
+      "- Instruction: do not ask for any skipped input again. If drafting or editing a document, insert a descriptive placeholder in square brackets wherever a skipped value is required.",
+    );
   }
   if (lines.length === 0) return messages;
   const summary = `\n\n[Tool activity in your previous turn]\n${lines.join("\n")}`;
@@ -399,6 +413,9 @@ export function parseAskInputsResponsePayload(
 ): AskInputsResponseRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
+  const assistantMessageId = cleanAskInputResponseId(row.assistant_message_id);
+  const askEventId = cleanAskInputResponseId(row.ask_event_id);
+  if (!assistantMessageId || !askEventId) return null;
   const rawResponses = Array.isArray(row.responses) ? row.responses : [];
   const responses = rawResponses
     .map((item): AskInputResponseItem | null => {
@@ -452,83 +469,211 @@ export function parseAskInputsResponsePayload(
     })
     .filter((item): item is AskInputResponseItem => !!item)
     .slice(0, 20);
-  return responses.length > 0 ? { responses } : null;
+  return responses.length > 0
+    ? {
+        assistant_message_id: assistantMessageId,
+        ask_event_id: askEventId,
+        responses,
+      }
+    : null;
 }
 
-export async function appendAskInputsResponseToLastAssistantMessage(
-  db: ReturnType<typeof createServerSupabase>,
-  chatId: string,
-  response: AskInputsResponseRequest,
-  messageTable = "chat_messages",
-) {
-  await appendAssistantEventsToLastAssistantMessage(db, chatId, [
-    {
-      type: "ask_inputs_response" as const,
-      responses: response.responses,
-    },
-  ], undefined, messageTable);
-}
+type StoredAssistantEventRow = {
+  id: string;
+  content: unknown;
+  citations?: unknown;
+  author_user_id?: string | null;
+};
 
-export async function appendAssistantEventsToLastAssistantMessage(
+async function loadAssistantMessage(
   db: ReturnType<typeof createServerSupabase>,
   chatId: string,
-  events: AssistantEvent[],
-  citations?: unknown[],
+  messageId: string,
   messageTable = "chat_messages",
-) {
-  if (events.length === 0 && (!citations || citations.length === 0)) {
-    return;
-  }
-  // Skip streaming reservations (content = null, see routeStreaming) so
-  // events are appended to the real last assistant message, not onto an
-  // empty reservation left by a crashed or still-streaming request.
-  const { data: rows, error: selectError } = await db
+): Promise<StoredAssistantEventRow | null> {
+  const { data: row, error: selectError } = await db
     .from(messageTable)
-    .select("id, content, citations")
+    .select("id, content, citations, author_user_id")
     .eq("chat_id", chatId)
+    .eq("id", messageId)
     .eq("role", "assistant")
-    .not("content", "is", null)
-    .order("created_at", { ascending: false })
-    .limit(1);
-  if (selectError || !rows?.[0]) {
+    .maybeSingle();
+  if (selectError || !row) {
     if (selectError) {
       console.error(
         "[assistant-events] failed to load assistant message",
         selectError,
       );
     }
-    return;
+    return null;
   }
+  return row as StoredAssistantEventRow;
+}
 
-  const row = rows[0] as {
-    id: string;
-    content: unknown;
-    citations?: unknown;
-  };
-  const existing = Array.isArray(row.content)
-    ? row.content
-    : [];
-  const next = [...existing, ...events];
-  const existingCitations = Array.isArray(row.citations)
-    ? row.citations
-    : [];
-  const nextCitations =
-    citations && citations.length > 0
-      ? [...existingCitations, ...citations]
-      : existingCitations;
-  const { error: updateError } = await db
-    .from(messageTable)
-    .update({
-      content: next.length ? next : null,
-      citations: nextCitations.length ? nextCitations : null,
-    })
-    .eq("id", row.id);
-  if (updateError) {
+export async function appendAssistantEventsToMessage(
+  db: ReturnType<typeof createServerSupabase>,
+  chatId: string,
+  messageId: string,
+  authorUserId: string,
+  events: AssistantEvent[],
+  citations: unknown[] | undefined,
+): Promise<boolean> {
+  if (events.length === 0 && (!citations || citations.length === 0))
+    return true;
+  const { data, error } = await db.rpc("append_chat_assistant_events", {
+    p_chat_id: chatId,
+    p_message_id: messageId,
+    p_author_user_id: authorUserId,
+    p_events: events,
+    p_citations: citations ?? [],
+  });
+  if (error || data !== "appended") {
     console.error(
       "[assistant-events] failed to update assistant message",
-      updateError,
+      error ?? { result: data },
     );
+    return false;
   }
+  return true;
+}
+
+export type AppendAskInputsResponseResult =
+  | "appended"
+  | "forbidden"
+  | "stale"
+  | "invalid"
+  | "failed";
+
+function canonicalAskInputsResponses(
+  items: AskInputItem[],
+  response: AskInputsResponseRequest,
+): AskInputResponseItem[] | null {
+  if (items.length !== response.responses.length) return null;
+  const responses = new Map<string, AskInputResponseItem>();
+  for (const item of response.responses) {
+    if (responses.has(item.id)) return null;
+    responses.set(item.id, item);
+  }
+
+  const canonical: AskInputResponseItem[] = [];
+  for (const item of items) {
+    const answer = responses.get(item.id);
+    if (!answer || answer.kind !== item.kind) return null;
+    if (answer.skipped) {
+      canonical.push(
+        item.kind === "documents"
+          ? { id: item.id, kind: "documents", filenames: [], skipped: true }
+          : {
+              id: item.id,
+              kind: item.kind,
+              question: item.question,
+              skipped: true,
+            },
+      );
+      continue;
+    }
+
+    if (item.kind === "documents" && answer.kind === "documents") {
+      canonical.push({
+        id: item.id,
+        kind: "documents",
+        filenames: answer.filenames,
+      });
+      continue;
+    }
+    if (item.kind === "text" && answer.kind === "text" && answer.answer) {
+      canonical.push({
+        id: item.id,
+        kind: "text",
+        question: item.question,
+        answer: answer.answer,
+      });
+      continue;
+    }
+    if (item.kind === "choice" && answer.kind === "choice" && answer.answer) {
+      const isListed = item.options.some(
+        (option) => option.value === answer.answer,
+      );
+      if (!isListed && !item.allow_other) return null;
+      canonical.push({
+        id: item.id,
+        kind: "choice",
+        question: item.question,
+        answer: answer.answer,
+      });
+      continue;
+    }
+    return null;
+  }
+  return canonical;
+}
+
+export async function appendAskInputsResponseToAssistantMessage(
+  db: ReturnType<typeof createServerSupabase>,
+  chatId: string,
+  response: AskInputsResponseRequest,
+  authorUserId: string,
+): Promise<AppendAskInputsResponseResult> {
+  const row = await loadAssistantMessage(
+    db,
+    chatId,
+    response.assistant_message_id,
+  );
+  if (!row) return "stale";
+  if (row.author_user_id !== authorUserId) return "forbidden";
+  const events = Array.isArray(row.content) ? row.content : [];
+  const askEvent = events.find(
+    (event): event is Extract<AssistantEvent, { type: "ask_inputs" }> =>
+      !!event &&
+      typeof event === "object" &&
+      (event as { type?: unknown }).type === "ask_inputs" &&
+      (event as { event_id?: unknown }).event_id === response.ask_event_id,
+  );
+  if (!askEvent) return "stale";
+  if (
+    events.some(
+      (event) =>
+        !!event &&
+        typeof event === "object" &&
+        (event as { type?: unknown }).type === "ask_inputs_response" &&
+        (event as { ask_event_id?: unknown }).ask_event_id ===
+          response.ask_event_id,
+    )
+  ) {
+    return "stale";
+  }
+  const canonical = canonicalAskInputsResponses(askEvent.items, response);
+  if (!canonical) return "invalid";
+
+  const storedResponse = {
+    type: "ask_inputs_response" as const,
+    assistant_message_id: response.assistant_message_id,
+    ask_event_id: response.ask_event_id,
+    responses: canonical,
+    author_user_id: authorUserId,
+    recorded_at: new Date().toISOString(),
+  };
+  const { data, error } = await db.rpc("append_chat_ask_inputs_response", {
+    p_chat_id: chatId,
+    p_message_id: response.assistant_message_id,
+    p_author_user_id: authorUserId,
+    p_ask_event_id: response.ask_event_id,
+    p_response: storedResponse,
+  });
+  if (error) {
+    console.error(
+      "[assistant-events] failed to append ask-input response",
+      error,
+    );
+    return "failed";
+  }
+  return data === "appended"
+    ? "appended"
+    : data === "forbidden"
+      ? "forbidden"
+      : data === "stale"
+        ? "stale"
+        : "failed";
 }
 
 export function appendCancelledAssistantEvent(events: AssistantEvent[]) {

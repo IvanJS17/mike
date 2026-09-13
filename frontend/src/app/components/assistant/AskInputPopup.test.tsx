@@ -7,8 +7,10 @@ describe("AskInputPopup", () => {
         const onSubmit = vi.fn();
         render(
             <AskInputPopup
+                assistantMessageId="assistant-1"
                 event={{
                     type: "ask_inputs",
+                    event_id: "ask-1",
                     items: [
                         {
                             id: "registered-address",
@@ -44,6 +46,8 @@ describe("AskInputPopup", () => {
         await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
         expect(onSubmit.mock.calls[0][0]).toEqual({
             type: "ask_inputs_response",
+            assistant_message_id: "assistant-1",
+            ask_event_id: "ask-1",
             responses: [
                 {
                     id: "registered-address",
@@ -63,8 +67,10 @@ describe("AskInputPopup", () => {
         const onSubmit = vi.fn();
         render(
             <AskInputPopup
+                assistantMessageId="assistant-1"
                 event={{
                     type: "ask_inputs",
+                    event_id: "ask-1",
                     items: [
                         {
                             id: "name",

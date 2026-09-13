@@ -295,13 +295,22 @@ describe("POST /projects/:projectId/chat", () => {
             "attached_documents[0] must be an object",
         ],
         [
-            { ...VALID_BODY, ask_inputs_response: { responses: [] } },
+            {
+                ...VALID_BODY,
+                ask_inputs_response: {
+                    assistant_message_id: "assistant-1",
+                    ask_event_id: "ask-1",
+                    responses: [],
+                },
+            },
             "ask_inputs_response.responses must be a non-empty array",
         ],
         [
             {
                 ...VALID_BODY,
                 ask_inputs_response: {
+                    assistant_message_id: "assistant-1",
+                    ask_event_id: "ask-1",
                     responses: [
                         {
                             id: "choice-1",

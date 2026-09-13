@@ -48,6 +48,8 @@ export type {
 };
 
 type AskInputsResponsePayload = {
+    assistant_message_id: string;
+    ask_event_id: string;
     responses: AskInputResponseItem[];
 };
 

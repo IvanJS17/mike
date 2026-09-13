@@ -29,6 +29,12 @@ import {
     parseOptionalReasoning,
 } from "../lib/chat";
 import {
+    beginMemoryConversationTurn,
+    releaseMemoryConversationTurn,
+    scheduleMemoryConsolidation,
+    type MemoryConversationTurn,
+} from "../lib/memory/schedule";
+import {
     completeText,
     providerForModel,
     resolveModel,
@@ -53,7 +59,10 @@ import {
     checkProjectAccess,
     ensureReviewAccess,
     filterAccessibleDocumentIds,
+    projectHasSharedAudience,
 } from "../lib/access";
+import { can } from "../lib/permissions";
+import { hasDirectContentGrants } from "../lib/contentAccess";
 import {
     findMissingUserEmails,
     loadProfileUsersByEmail,
@@ -2161,6 +2170,36 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
     if (!reviewAccess.ok)
         return void res.status(404).json({ detail: "Review not found" });
 
+    // A direct review grant does not grant access to the containing project.
+    // Keep project memory behind the project's own capability verdict: view
+    // may read it, while only a project editor may curate it.
+    let readableMemoryProjectId: string | null = null;
+    let writableMemoryProjectId: string | null = null;
+    let memorySharedAudience =
+        !reviewAccess.isCreator ||
+        (await hasDirectContentGrants(db, "tabular_review", review.id));
+    if (review.project_id) {
+        const projectAccess = await checkProjectAccess(
+            review.project_id,
+            userId,
+            userEmail,
+            db,
+        );
+        if (projectAccess.ok) {
+            readableMemoryProjectId = review.project_id;
+            memorySharedAudience =
+                memorySharedAudience ||
+                (await projectHasSharedAudience(
+                    db,
+                    review.project_id,
+                    projectAccess.project.org_id,
+                ));
+            if (can(projectAccess.projectRole, "content.edit")) {
+                writableMemoryProjectId = review.project_id;
+            }
+        }
+    }
+
     // Fetch all cells and logical review rows for this review.
     const { data: cells } = await db
         .from("tabular_cells")
@@ -2277,15 +2316,40 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
         chatTitle = newChat?.title ?? null;
     }
 
+    let memoryTurn: MemoryConversationTurn | null = null;
+    let memoryTurnScheduled = false;
+    const inputMessageId = randomUUID();
+
     // Persist user message
     if (chatId) {
-        await db.from("tabular_review_chat_messages").insert({
-            chat_id: chatId,
-            role: "user",
-            content: lastUser.content,
-        });
+        const { error: userMessageError } = await db
+            .from("tabular_review_chat_messages")
+            .insert({
+                id: inputMessageId,
+                chat_id: chatId,
+                role: "user",
+                content: lastUser.content,
+                author_user_id: userId,
+            });
+        if (userMessageError) {
+            return void sendInternalError(res, userMessageError);
+        }
     }
 
+    if (chatId) {
+        try {
+            memoryTurn = await beginMemoryConversationTurn({
+                db,
+                surface: "tabular",
+                conversationId: chatId,
+                actorUserId: userId,
+            });
+        } catch (error) {
+            return void sendInternalError(res, error);
+        }
+    }
+
+    try {
     const apiMessages = buildTabularMessages(
         messages,
         tabularStore,
@@ -2308,6 +2372,7 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
         write(`data: ${JSON.stringify({ type: "chat_id", chatId })}\n\n`);
     }
 
+    const assistantMessageId = randomUUID();
     try {
         const { fullText, events } = await runLLMStream({
             apiMessages,
@@ -2324,22 +2389,39 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
             reasoning: selectedReasoningLevel,
             apiKeys: api_keys,
             signal: streamAbort.signal,
+            includeMemory: true,
+            memoryProjectId: readableMemoryProjectId,
+            memorySharedAudience,
         });
 
         const persistedEvents = events;
         const annotations = extractTabularAnnotations(fullText, tabularStore);
 
+        let assistantSaved = false;
         if (chatId) {
-            await db.from("tabular_review_chat_messages").insert({
-                chat_id: chatId,
-                role: "assistant",
-                content: persistedEvents.length ? persistedEvents : null,
-                annotations: annotations.length ? annotations : null,
-            });
-            await db
-                .from("tabular_review_chats")
-                .update({ updated_at: new Date().toISOString() })
-                .eq("id", chatId);
+            const { error: saveError } = await db
+                .from("tabular_review_chat_messages")
+                .insert({
+                    id: assistantMessageId,
+                    chat_id: chatId,
+                    role: "assistant",
+                    content: persistedEvents.length ? persistedEvents : null,
+                    annotations: annotations.length ? annotations : null,
+                    author_user_id: userId,
+                    memory_input_message_id: inputMessageId,
+                });
+            if (saveError) {
+                console.error(
+                    "[tabular/chat] failed to save assistant response",
+                    saveError,
+                );
+            } else {
+                assistantSaved = true;
+                await db
+                    .from("tabular_review_chats")
+                    .update({ updated_at: new Date().toISOString() })
+                    .eq("id", chatId);
+            }
         }
 
         // Generate title on first exchange
@@ -2363,6 +2445,26 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
                 );
             }
         }
+
+        if (
+            chatId &&
+            assistantSaved &&
+            !persistedEvents.some(
+                (event) =>
+                    event.type === "ask_inputs" || event.type === "error",
+            )
+        ) {
+            const scheduled = await scheduleMemoryConsolidation({
+                db,
+                surface: "tabular",
+                conversationId: chatId,
+                actorUserId: userId,
+                projectId: writableMemoryProjectId,
+                turnId: assistantMessageId,
+                turn: memoryTurn,
+            });
+            memoryTurnScheduled = scheduled != null;
+        }
     } catch (err) {
         if (isAbortError(err)) {
             console.log("[tabular/chat] client aborted stream", { chatId });
@@ -2377,10 +2479,13 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
                 const { error: saveError } = await db
                     .from("tabular_review_chat_messages")
                     .insert({
+                        id: assistantMessageId,
                         chat_id: chatId,
                         role: "assistant",
                         content: partial.events.length ? partial.events : null,
                         annotations: annotations.length ? annotations : null,
+                        author_user_id: userId,
+                        memory_input_message_id: inputMessageId,
                     });
                 if (saveError) {
                     console.error(
@@ -2412,10 +2517,13 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
                 const { error: saveError } = await db
                     .from("tabular_review_chat_messages")
                     .insert({
+                        id: assistantMessageId,
                         chat_id: chatId,
                         role: "assistant",
                         content: errorEvents.length ? errorEvents : null,
                         annotations: annotations.length ? annotations : null,
+                        author_user_id: userId,
+                        memory_input_message_id: inputMessageId,
                     });
                 if (saveError)
                     console.error(
@@ -2435,6 +2543,22 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
     } finally {
         streamFinished = true;
         res.end();
+    }
+    } finally {
+        if (memoryTurn && !memoryTurnScheduled) {
+            try {
+                await releaseMemoryConversationTurn({
+                    db,
+                    surface: "tabular",
+                    conversationId: chatId as string,
+                    turn: memoryTurn,
+                });
+            } catch {
+                console.warn("[memory] tabular activity release failed", {
+                    chatId,
+                });
+            }
+        }
     }
 });
 

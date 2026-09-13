@@ -10,6 +10,11 @@ import {
     parseOptionalReasoning,
 } from "../requestValidation";
 
+const ASK_RESPONSE_IDS = {
+    assistant_message_id: "assistant-1",
+    ask_event_id: "ask-1",
+};
+
 describe("chat request validation", () => {
     it("normalizes valid messages and their nested metadata", () => {
         expect(
@@ -216,6 +221,7 @@ describe("chat request validation", () => {
         expect(
             parseOptionalAskInputsResponse({
                 type: "ask_inputs_response",
+                ...ASK_RESPONSE_IDS,
                 responses: [
                     {
                         id: " choice-1 ",
@@ -239,6 +245,7 @@ describe("chat request validation", () => {
         ).toEqual({
             ok: true,
             value: {
+                ...ASK_RESPONSE_IDS,
                 responses: [
                     {
                         id: "choice-1",
@@ -265,15 +272,19 @@ describe("chat request validation", () => {
     it.each([
         ["answer", "ask_inputs_response must be an object"],
         [
-            { responses: [] },
+            { ...ASK_RESPONSE_IDS, responses: [] },
             "ask_inputs_response.responses must be a non-empty array",
         ],
         [
-            { responses: [{ id: "choice-1", kind: "other" }] },
+            {
+                ...ASK_RESPONSE_IDS,
+                responses: [{ id: "choice-1", kind: "other" }],
+            },
             'ask_inputs_response.responses[0].kind must be "choice", "text", or "documents"',
         ],
         [
             {
+                ...ASK_RESPONSE_IDS,
                 responses: [
                     {
                         id: "choice-1",
@@ -287,6 +298,7 @@ describe("chat request validation", () => {
         ],
         [
             {
+                ...ASK_RESPONSE_IDS,
                 responses: [
                     {
                         id: "text-1",
@@ -300,6 +312,7 @@ describe("chat request validation", () => {
         ],
         [
             {
+                ...ASK_RESPONSE_IDS,
                 responses: [
                     {
                         id: "docs-1",

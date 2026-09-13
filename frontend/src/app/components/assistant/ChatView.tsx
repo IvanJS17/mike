@@ -599,8 +599,10 @@ export function ChatView({
                     return null;
                 }
                 if (event.type === "ask_inputs") {
+                    if (!message.id) return null;
                     return {
                         key: `${messageIndex}-${eventIndex}`,
+                        assistantMessageId: message.id,
                         event,
                     };
                 }
@@ -797,6 +799,9 @@ export function ChatView({
                                 <AskInputPopup
                                     key={activeInput.key}
                                     event={activeInput.event}
+                                    assistantMessageId={
+                                        activeInput.assistantMessageId
+                                    }
                                     onSubmit={(response, content, files) => {
                                         setHiddenAskInputKeys((prev) => {
                                             const next = new Set(prev);
