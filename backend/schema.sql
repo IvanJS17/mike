@@ -8148,6 +8148,12 @@ grant execute on function public.cancel_db_jobs(text[])
 -- shared_with/allow_edit columns preserved (backfill-only).
 -- ---------------------------------------------------------------------------
 
+-- The helpers below are declared ahead of the tables/columns they reference
+-- (the objects arrive further down in this section). Bodies are validated on
+-- first call instead of at CREATE time, exactly like the migration that
+-- upgrades an existing deployment (20260910_03).
+set check_function_bodies = false;
+
 create or replace function public.chat_access_role(p_chat_id uuid, p_chat_user_id uuid, p_project_id uuid, p_org_id uuid, p_user_id text, p_user_email text)
 returns text
 language sql
