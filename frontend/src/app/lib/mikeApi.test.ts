@@ -1824,7 +1824,7 @@ describe("query and payload defaults", () => {
         const current = await getDocumentFile("d 1");
         expect(lastFetchCall().url).toBe("/api/single-documents/d%201/file");
         expect(current.filename).toBe("current.docx");
-        expect(await current.blob.text()).toBe("current");
+        expect(await readBlobText(current.blob)).toBe("current");
 
         fetchMock.mockResolvedValueOnce(
             new Response("selected", { status: 200 }),
@@ -1834,7 +1834,7 @@ describe("query and payload defaults", () => {
             "/api/single-documents/d%201/file?version_id=v%201",
         );
         expect(selected.filename).toBeNull();
-        expect(await selected.blob.text()).toBe("selected");
+        expect(await readBlobText(selected.blob)).toBe("selected");
     });
 
     it("createChat defaults to an empty JSON object body", async () => {
