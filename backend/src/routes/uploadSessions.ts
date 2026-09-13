@@ -350,17 +350,17 @@ export async function validateDestinationAccess(
   // Compatibility validation for in-flight sessions created by the previous
   // release. New clients use document_version_create.
   if (manifest.purpose === "workflow_reference_replace") {
-    const { data: reference, error: referenceError } = await db
-      .from("workflow_reference_documents")
+    const { data: asset, error: assetError } = await db
+      .from("documents")
       .select("id")
       .eq("id", destination.reference_id as string)
       .eq("workflow_id", workflowId)
       .maybeSingle();
-    if (referenceError) {
-      sendInternalError(res, referenceError);
+    if (assetError) {
+      sendInternalError(res, assetError);
       return false;
     }
-    if (!reference) {
+    if (!asset) {
       res.status(404).json({ detail: "Asset not found" });
       return false;
     }
