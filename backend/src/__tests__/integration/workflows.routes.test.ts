@@ -140,6 +140,7 @@ vi.mock("../../lib/documentVersions", () => ({
 
 import { app } from "../../app";
 import { createServerSupabase } from "../../lib/supabase";
+import { checkWorkflowAccess } from "../../lib/access";
 import { resetEnsuredDefaultUsersForTests } from "../../lib/workflowCatalog";
 
 const AUTH = ["Authorization", "Bearer test"] as const;
@@ -379,6 +380,46 @@ describe("workflows.routes", () => {
         p_user_email: "u1@test.local",
         p_type: "assistant",
         p_scope: "shared",
+      });
+    });
+  });
+
+  describe("POST /workflows/:workflowId/assets/from-documents", () => {
+    it("rejects an empty saved-file selection", async () => {
+      const res = await request(app)
+        .post("/workflows/workflow-1/assets/from-documents")
+        .set(...AUTH)
+        .send({ document_ids: [] });
+
+      expect(res.status).toBe(400);
+      expect(res.body.detail).toContain("between 1 and 50");
+      expect(createServerSupabase).not.toHaveBeenCalled();
+    });
+
+    it("does not allow assets on a tabular workflow", async () => {
+      supabaseState.tables.workflows = {
+        data: {
+          id: "workflow-1",
+          user_id: "u1",
+          type: "tabular",
+        },
+        error: null,
+      };
+      vi.mocked(checkWorkflowAccess).mockResolvedValueOnce({
+        ok: true,
+        isCreator: true,
+        orgRole: null,
+        projectRole: "owner",
+      } as never);
+
+      const res = await request(app)
+        .post("/workflows/workflow-1/assets/from-documents")
+        .set(...AUTH)
+        .send({ document_ids: ["document-1"] });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(400);
+      expect(res.body).toEqual({
+        detail: "Assets are only available for assistant workflows",
       });
     });
   });

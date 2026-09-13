@@ -843,28 +843,30 @@ export async function buildWorkflowStore(
     .filter(([, workflow]) => workflow.listed !== false)
     .map(([id]) => id);
   if (databaseWorkflowIds.length > 0) {
-    const { data: referenceDocuments } = await db
-      .from("workflow_reference_documents")
-      .select("id, workflow_id, filename, file_type, storage_path")
+    const { data: assetDocuments } = await db
+      .from("documents")
+      .select("id, workflow_id, current_version_id")
       .in("workflow_id", databaseWorkflowIds);
-    const documents = (referenceDocuments ?? []) as {
+    const documents = (assetDocuments ?? []) as {
       id: string;
       workflow_id: string;
-      filename: string;
-      file_type: string;
-      storage_path: string;
+      current_version_id: string | null;
+      filename?: string | null;
+      file_type?: string | null;
+      storage_path?: string | null;
     }[];
+    await attachActiveVersionPaths(db, documents);
     for (const document of documents) {
       const workflow = store.get(document.workflow_id);
-      if (!workflow) continue;
-      const references = workflow.reference_files ?? [];
-      references.push({
-        reference_id: document.id,
-        filename: document.filename?.trim() || "Untitled reference",
-        file_type: document.file_type,
+      if (!workflow || !document.storage_path) continue;
+      const assets = workflow.assets ?? [];
+      assets.push({
+        asset_id: document.id,
+        filename: document.filename?.trim() || "Untitled asset",
+        file_type: document.file_type ?? "",
         storage_path: document.storage_path,
       });
-      workflow.reference_files = references;
+      workflow.assets = assets;
     }
   }
   return store;
