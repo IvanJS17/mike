@@ -7,6 +7,12 @@ import { createSupabaseOnboardingProvisioningPort } from "../lib/recovery/author
 import { recordAudit } from "../lib/audit";
 import { sendInternalError } from "../lib/httpError";
 import {
+    acceptInvitation,
+    declineInvitation,
+    listMyInvitations,
+} from "../lib/orgs";
+import { sendOrgFailure } from "./orgs";
+import {
     isSupportedOpenCodeGoModel,
     REASONING_LEVELS,
     resolveModel,
@@ -1206,6 +1212,66 @@ userRouter.post("/onboarding", requireAuth, async (req, res) => {
     if (error) return void res.status(500).json({ detail: error.message });
     res.json({ ...data, apiKeyStatus });
 });
+
+// ---------------------------------------------------------------------------
+// Organization invitations — the recipient's side
+// ---------------------------------------------------------------------------
+//
+// These live on /user rather than /orgs because the caller is not (yet) a
+// member of the organization: an /orgs/:orgId route would have to answer
+// "which org?" before it could answer "are you allowed to know?". Matching is
+// by the authenticated account's email, which is what lets an invitation sent
+// before signup be claimed the moment the account exists.
+//
+// Accept and decline are mutations, so they require MFA when the account has
+// it enrolled — same rule as every other mutating endpoint on this router.
+
+// GET /user/invitations — live invitations addressed to the caller's email.
+userRouter.get("/invitations", requireAuth, async (_req, res) => {
+    const userEmail = res.locals.userEmail as string | undefined;
+    const db = createServerSupabase();
+    const result = await listMyInvitations(db, { userEmail });
+    if (!result.ok) return sendOrgFailure(res, result);
+    res.json(result.invitations);
+});
+
+// POST /user/invitations/:invitationId/accept — join the organization.
+userRouter.post(
+    "/invitations/:invitationId/accept",
+    requireAuth,
+    requireMfaIfEnrolled,
+    async (req, res) => {
+        const userId = res.locals.userId as string;
+        const userEmail = res.locals.userEmail as string | undefined;
+        const db = createServerSupabase();
+        const result = await acceptInvitation(db, {
+            userId,
+            userEmail,
+            invitationId: req.params.invitationId,
+        });
+        if (!result.ok) return sendOrgFailure(res, result);
+        res.json({ org_id: result.org_id, role: result.role });
+    },
+);
+
+// POST /user/invitations/:invitationId/decline
+userRouter.post(
+    "/invitations/:invitationId/decline",
+    requireAuth,
+    requireMfaIfEnrolled,
+    async (req, res) => {
+        const userId = res.locals.userId as string;
+        const userEmail = res.locals.userEmail as string | undefined;
+        const db = createServerSupabase();
+        const result = await declineInvitation(db, {
+            userId,
+            userEmail,
+            invitationId: req.params.invitationId,
+        });
+        if (!result.ok) return sendOrgFailure(res, result);
+        res.status(204).send();
+    },
+);
 
 // POST /user/security/password-set
 // Record password capability only after verifying Supabase's auth.users row.
