@@ -54,6 +54,7 @@ import {
     buildUserTabularReviewsExport,
     userExportFilename,
 } from "../lib/userDataExport";
+import { deleteUserPrivateMemories } from "../lib/memory/bulk";
 import { findProfileUserByEmail } from "../lib/userLookup";
 import { configuredApiPublicUrl } from "../lib/runtimeConfig";
 import {
@@ -82,11 +83,13 @@ type UserProfileRow = {
     tier: string;
     title_model: string | null;
     tabular_model: string | null;
+    memory_curator_model?: string | null;
     last_selected_chat_model?: string | null;
     last_selected_reasoning_level?: string | null;
     mfa_on_login: boolean | null;
     quick_actions_visible: boolean | null;
     dark_mode: boolean | null;
+    project_memory_default: boolean | null;
 };
 
 function errorMessage(error: unknown): string {
@@ -198,7 +201,9 @@ function mcpOAuthPopupCsp(nonce: string) {
 }
 
 const PROFILE_SELECT_WITH_CHAT_SELECTIONS =
-    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, last_selected_chat_model, last_selected_reasoning_level, mfa_on_login, quick_actions_visible, dark_mode";
+    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, memory_curator_model, last_selected_chat_model, last_selected_reasoning_level, mfa_on_login, quick_actions_visible, dark_mode, project_memory_default";
+const PROFILE_SELECT_NO_MEMORY_CURATOR_MODEL =
+    "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, last_selected_chat_model, last_selected_reasoning_level, mfa_on_login, quick_actions_visible, dark_mode, project_memory_default";
 const PROFILE_SELECT_WITH_LAST_SELECTED_CHAT_MODEL =
     "display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas, onboarding_version, password_set_at, message_credits_used, credits_reset_date, tier, title_model, tabular_model, last_selected_chat_model, mfa_on_login, quick_actions_visible, dark_mode";
 const PROFILE_SELECT =
@@ -259,6 +264,26 @@ async function selectProfile(
             : await newestQuery.maybeSingle();
     if (!newest.error) return newest;
     let cascadeError: unknown = newest.error;
+
+    if (isMissingProfileColumn(cascadeError, "memory_curator_model")) {
+        const previousQuery = db
+            .from("user_profiles")
+            .select(PROFILE_SELECT_NO_MEMORY_CURATOR_MODEL)
+            .eq("user_id", userId);
+        const previous =
+            mode === "single"
+                ? await previousQuery.single()
+                : await previousQuery.maybeSingle();
+        if (!previous.error) {
+            if (previous.data && typeof previous.data === "object") {
+                Object.assign(previous.data as Record<string, unknown>, {
+                    memory_curator_model: null,
+                });
+            }
+            return previous;
+        }
+        cascadeError = previous.error;
+    }
 
     if (isMissingProfileColumn(cascadeError, "last_selected_reasoning_level")) {
         const modelOnlyQuery = db
@@ -560,6 +585,10 @@ function serializeProfile(
             row.tabular_model,
             routerModels,
         ),
+        memoryCuratorModel: normalizeOptionalModelPreference(
+            row.memory_curator_model,
+            routerModels,
+        ),
         lastSelectedChatModel: normalizeOptionalModelPreference(
             row.last_selected_chat_model,
             routerModels,
@@ -570,6 +599,7 @@ function serializeProfile(
         mfaOnLogin: row.mfa_on_login === true,
         quickActionsVisible: row.quick_actions_visible !== false,
         darkMode: row.dark_mode === true,
+        projectMemoryDefault: row.project_memory_default !== false,
         ...Object.fromEntries(
             ROUTER_SLUGS.map((slug) => [
                 ROUTER_PROFILE_FIELDS[slug],
@@ -725,6 +755,7 @@ function validateProfilePayload(body: unknown):
               practice_areas?: string[];
               title_model?: string | null;
               tabular_model?: string | null;
+              memory_curator_model?: string | null;
               last_selected_chat_model?: string | null;
               last_selected_reasoning_level?: string | null;
                     quick_actions_visible?: boolean;
@@ -747,10 +778,12 @@ function validateProfilePayload(body: unknown):
         "practiceAreas",
         "titleModel",
         "tabularModel",
+        "memoryCuratorModel",
         "lastSelectedChatModel",
         "lastSelectedReasoningLevel",
         "quickActionsVisible",
         "darkMode",
+        "projectMemoryDefault",
         ...ROUTER_SLUGS.map((slug) => ROUTER_PROFILE_FIELDS[slug]),
     ]);
     const invalidField = Object.keys(raw).find(
@@ -772,10 +805,12 @@ function validateProfilePayload(body: unknown):
         practice_areas?: string[];
         title_model?: string | null;
         tabular_model?: string | null;
+        memory_curator_model?: string | null;
         last_selected_chat_model?: string | null;
         last_selected_reasoning_level?: string | null;
         quick_actions_visible?: boolean;
         dark_mode?: boolean;
+        project_memory_default?: boolean;
         updated_at: string;
     } = { updated_at: new Date().toISOString() };
     const routerModels: Partial<Record<RouterSlug, string[]>> = {};
@@ -845,6 +880,26 @@ function validateProfilePayload(body: unknown):
                 return { ok: false, detail: "Unsupported titleModel" };
             }
             update.title_model = resolved;
+        }
+    }
+
+    if ("memoryCuratorModel" in raw) {
+        if (raw.memoryCuratorModel === null || raw.memoryCuratorModel === "") {
+            update.memory_curator_model = null;
+        } else if (typeof raw.memoryCuratorModel !== "string") {
+            return {
+                ok: false,
+                detail: "memoryCuratorModel must be a string or null",
+            };
+        } else {
+            const resolved = resolveModel(raw.memoryCuratorModel, "");
+            if (!resolved) {
+                return {
+                    ok: false,
+                    detail: "Unsupported memoryCuratorModel",
+                };
+            }
+            update.memory_curator_model = resolved;
         }
     }
 
@@ -937,6 +992,16 @@ function validateProfilePayload(body: unknown):
             };
         }
         update.dark_mode = raw.darkMode;
+    }
+
+    if ("projectMemoryDefault" in raw) {
+        if (typeof raw.projectMemoryDefault !== "boolean") {
+            return {
+                ok: false,
+                detail: "projectMemoryDefault must be a boolean",
+            };
+        }
+        update.project_memory_default = raw.projectMemoryDefault;
     }
 
     return { ok: true, update, routerModels };
@@ -1826,6 +1891,29 @@ userRouter.delete(
             console.error("[user/tabular-reviews] delete failed", {
                 userId,
                 error: detail,
+            });
+            sendInternalError(res, err);
+        }
+    },
+);
+
+// DELETE /user/memories
+// Wipes the user's app memory and memories belonging to private projects they
+// created. Organization and merely shared projects are intentionally outside
+// this account-level destructive action.
+userRouter.delete(
+    "/memories",
+    requireAuth,
+    requireMfaIfEnrolled,
+    async (_req, res) => {
+        const userId = res.locals.userId as string;
+        try {
+            await deleteUserPrivateMemories(createServerSupabase(), userId);
+            res.status(204).send();
+        } catch (err) {
+            console.error("[user/memories] delete failed", {
+                userId,
+                error: errorMessage(err),
             });
             sendInternalError(res, err);
         }

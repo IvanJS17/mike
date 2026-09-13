@@ -188,6 +188,47 @@ export async function getUserApiKeys(
     return apiKeys;
 }
 
+/**
+ * LiTT (S5b): governed credential read for the curator egress port. Returns
+ * the versioned record — including the decrypted key — for one exact
+ * credential_ref owned by the user. Used only behind the governed egress
+ * boundary; never expose this shape outside it.
+ */
+export async function getGovernedUserApiKeyRecord(
+    userId: string,
+    credentialRef: string,
+    db: Db = createServerSupabase(),
+): Promise<{
+    provider: string;
+    credential_ref: string;
+    version: number;
+    enabled: boolean;
+    provider_api_key: string | null;
+} | null> {
+    const { data, error } = await db
+        .from("user_api_keys")
+        .select(
+            "provider, encrypted_key, iv, auth_tag, credential_ref, enabled, version",
+        )
+        .eq("user_id", userId)
+        .eq("credential_ref", credentialRef)
+        .maybeSingle();
+    if (error) throw error;
+    if (!data) return null;
+    const row = data as EncryptedKeyRow & {
+        credential_ref: string;
+        enabled: boolean;
+        version: number;
+    };
+    return {
+        provider: row.provider,
+        credential_ref: row.credential_ref,
+        version: row.version,
+        enabled: row.enabled,
+        provider_api_key: decrypt(row)?.trim() || null,
+    };
+}
+
 export async function saveUserApiKey(
     userId: string,
     provider: ApiKeyProvider,

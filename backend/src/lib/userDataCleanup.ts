@@ -47,6 +47,42 @@ async function deleteWhereIn(
     }
 }
 
+/**
+ * Fence and purge scoped memory before its owner row cascades away. The
+ * database function empties the body under the file's row lock and advances
+ * its epoch in the same transaction, so a curator job that is already in
+ * flight cannot write learned content back onto a deleted owner.
+ */
+async function wipeMemoryForOwners(
+    db: Db,
+    scope: "user" | "project",
+    ownerIds: string[],
+) {
+    const uniqueOwnerIds = uniqueStrings(ownerIds);
+    if (uniqueOwnerIds.length === 0) return;
+    const ownerColumn = scope === "user" ? "user_id" : "project_id";
+
+    for (const ownerBatch of chunks(uniqueOwnerIds)) {
+        const { data, error } = await db
+            .from("memory_files")
+            .select("id")
+            .eq("scope", scope)
+            .in(ownerColumn, ownerBatch);
+        await throwIfError(error, `Failed to load ${scope} memory files`);
+
+        for (const row of (data ?? []) as { id?: unknown }[]) {
+            if (typeof row.id !== "string" || !row.id) continue;
+            const result = await db.rpc("wipe_memory_file", {
+                p_memory_file_id: row.id,
+                p_enabled: false,
+                p_updated_by: null,
+                p_source: "wipe",
+            });
+            await throwIfError(result.error, `Failed to purge ${scope} memory`);
+        }
+    }
+}
+
 async function getOwnedProjectIds(db: Db, userId: string): Promise<string[]> {
     const { data, error } = await db
         .from("projects")
@@ -398,6 +434,12 @@ export async function deleteUserAccountData(
     ]);
 
     await deleteByIds(db, "documents", documentIds);
+
+    // `wipe_memory_file` empties the body under the file's row lock and bumps
+    // its epoch, fencing any curator job still in flight. Run this before the
+    // owner rows cascade away below.
+    await wipeMemoryForOwners(db, "user", [userId]);
+    await wipeMemoryForOwners(db, "project", ownedProjectIds);
 
     const deletions = [
         db.from("tabular_review_chats").delete().eq("user_id", userId),

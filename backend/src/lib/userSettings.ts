@@ -19,6 +19,8 @@ export type UserModelSettings = {
     last_selected_chat_model: string | null;
     /** Cross-surface fallback used only when a chat has no saved level. */
     last_selected_reasoning_level: ReasoningLevel | null;
+    /** Optional override for the memory curator model; null derives it from the chat. */
+    memory_curator_model: string | null;
     api_keys: UserApiKeys;
     personalisation?: {
         displayName: string | null;
@@ -39,7 +41,7 @@ export async function getUserModelSettings(
         client
             .from("user_profiles")
             .select(
-                "title_model, tabular_model, last_selected_chat_model, last_selected_reasoning_level, display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas",
+                "title_model, tabular_model, last_selected_chat_model, last_selected_reasoning_level, memory_curator_model, display_name, organisation, jurisdiction, practice_setting, professional_title, practice_areas",
             )
             .eq("user_id", userId)
             .single(),
@@ -101,6 +103,10 @@ export async function getUserModelSettings(
         ),
         last_selected_reasoning_level: normalizeReasoningLevel(
             data?.last_selected_reasoning_level,
+        ),
+        memory_curator_model: normalizeOptionalModelPreference(
+            data?.memory_curator_model,
+            routerModels,
         ),
         personalisation: {
             displayName:
