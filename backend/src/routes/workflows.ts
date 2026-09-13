@@ -43,7 +43,7 @@ import {
 } from "../lib/orgAccessOverrides";
 import { enqueueStorageCleanup } from "../lib/dbq/enqueue";
 import { convertedPdfKey } from "../lib/convert";
-import { copyFile, getSignedUrl, storageKey } from "../lib/storage";
+import { copyFile, storageKey } from "../lib/storage";
 import {
   attachActiveVersionPaths,
   attachLatestVersionNumbers,
@@ -1057,42 +1057,6 @@ workflowsRouter.get(
     await attachLatestVersionNumbers(db, assets);
     await attachActiveVersionPaths(db, assets);
     res.json(assets);
-  }),
-);
-
-// GET /workflows/:workflowId/reference-files/:referenceId/url
-workflowsRouter.get(
-  "/:workflowId/reference-files/:referenceId/url",
-  requireAuth,
-  asyncRoute(async (req, res) => {
-    const userId = res.locals.userId as string;
-    const userEmail = res.locals.userEmail as string | undefined;
-    const db = createServerSupabase();
-    const access = await resolveWorkflowAccess(
-      req.params.workflowId,
-      userId,
-      userEmail,
-      db,
-    );
-    if (!access)
-      return void res.status(404).json({ detail: "Workflow not found" });
-    if (rejectAssetsForTabularWorkflow(access, res)) return;
-    const { data: reference } = await db
-      .from("workflow_reference_documents")
-      .select("id, filename, storage_path")
-      .eq("id", req.params.referenceId)
-      .eq("workflow_id", req.params.workflowId)
-      .maybeSingle();
-    if (!reference)
-      return void res.status(404).json({ detail: "Reference file not found" });
-    const url = await getSignedUrl(
-      reference.storage_path,
-      3600,
-      reference.filename,
-    );
-    if (!url)
-      return void res.status(503).json({ detail: "Storage not configured" });
-    res.json({ url, filename: reference.filename });
   }),
 );
 

@@ -164,7 +164,7 @@ documentsRouter.get("/:documentId/display", requireAuth, async (req, res) => {
 
   const { data: doc } = await db
     .from("documents")
-    .select("id, user_id, project_id, org_id")
+    .select("id, user_id, project_id, org_id, workflow_id")
     .eq("id", documentId)
     .single();
   if (!doc)
@@ -277,7 +277,7 @@ documentsRouter.post("/download-zip", requireAuth, async (req, res) => {
   if (documentIds.length > 0) {
     const { data, error } = await db
       .from("documents")
-      .select("id, current_version_id, user_id, project_id, org_id")
+      .select("id, current_version_id, user_id, project_id, org_id, workflow_id")
       .in("id", documentIds);
     if (error) return void sendInternalError(res, error);
     for (const doc of data ?? [])
@@ -357,13 +357,13 @@ documentsRouter.post("/download-zip", requireAuth, async (req, res) => {
       projectFolderIds.length > 0
         ? db
             .from("documents")
-            .select("id, current_version_id, user_id, project_id")
+            .select("id, current_version_id, user_id, project_id, workflow_id")
             .in("folder_id", projectFolderIds)
         : Promise.resolve({ data: [], error: null }),
       libraryFolderIds.length > 0
         ? db
             .from("documents")
-            .select("id, current_version_id, user_id, project_id")
+            .select("id, current_version_id, user_id, project_id, workflow_id")
             .in("library_folder_id", libraryFolderIds)
         : Promise.resolve({ data: [], error: null }),
     ]);
@@ -489,7 +489,7 @@ documentsRouter.get("/:documentId/url", requireAuth, async (req, res) => {
 
   const { data: doc, error } = await db
     .from("documents")
-    .select("id, user_id, project_id, org_id")
+    .select("id, user_id, project_id, org_id, workflow_id")
     .eq("id", documentId)
     .single();
   if (error || !doc)
@@ -543,7 +543,7 @@ documentsRouter.get("/:documentId/file", requireAuth, async (req, res) => {
 
   const { data: doc, error } = await db
     .from("documents")
-    .select("id, user_id, project_id")
+    .select("id, user_id, project_id, workflow_id")
     .eq("id", documentId)
     .single();
   if (error || !doc)
@@ -638,7 +638,7 @@ documentsRouter.get("/:documentId/versions", requireAuth, async (req, res) => {
 
   const { data: doc } = await db
     .from("documents")
-    .select("id, current_version_id, user_id, project_id, org_id")
+    .select("id, current_version_id, user_id, project_id, org_id, workflow_id")
     .eq("id", documentId)
     .single();
   if (!doc)
@@ -690,7 +690,7 @@ documentsRouter.post(
 
     const { data: targetDoc } = await db
       .from("documents")
-      .select("id, user_id, project_id, org_id")
+      .select("id, user_id, project_id, org_id, workflow_id")
       .eq("id", documentId)
       .single();
     if (!targetDoc)
@@ -701,7 +701,7 @@ documentsRouter.post(
 
     const { data: sourceDoc } = await db
       .from("documents")
-      .select("id, user_id, project_id, org_id")
+      .select("id, user_id, project_id, org_id, workflow_id")
       .eq("id", sourceDocumentId)
       .single();
     if (!sourceDoc)
@@ -898,7 +898,7 @@ documentsRouter.patch(
 
     const { data: doc } = await db
       .from("documents")
-      .select("id, user_id, project_id, org_id")
+      .select("id, user_id, project_id, org_id, workflow_id")
       .eq("id", documentId)
       .single();
     if (!doc)
@@ -942,13 +942,17 @@ documentsRouter.delete(
 
     const { data: doc } = await db
       .from("documents")
-      .select("id, user_id, project_id, org_id, current_version_id")
+      .select("id, user_id, project_id, org_id, workflow_id, current_version_id")
       .eq("id", documentId)
       .single();
     if (!doc)
       return void res.status(404).json({ detail: "Document not found" });
     const access = await ensureDocAccess(doc, userId, userEmail, db);
-    if (!access.ok || !creatorScopedAllowed(access, doc.user_id))
+    if (
+      !access.ok ||
+      (!creatorScopedAllowed(access, doc.user_id) &&
+        !(doc.workflow_id && can(access.projectRole, "content.edit")))
+    )
       return void res.status(404).json({ detail: "Document not found" });
 
     const { data: versions, error: versionsErr } = await db
@@ -1056,7 +1060,7 @@ documentsRouter.get(
 
     const { data: doc } = await db
       .from("documents")
-      .select("id, user_id, project_id, org_id")
+      .select("id, user_id, project_id, org_id, workflow_id")
       .eq("id", documentId)
       .single();
     if (!doc)
@@ -1119,7 +1123,7 @@ async function handleEditResolution(
     });
     const { data: doc } = await db
       .from("documents")
-      .select("current_version_id, user_id, project_id, org_id")
+      .select("current_version_id, user_id, project_id, org_id, workflow_id")
       .eq("id", documentId)
       .single();
     if (!doc) {
@@ -1155,7 +1159,7 @@ async function handleEditResolution(
 
   const { data: doc, error: docErr } = await db
     .from("documents")
-    .select("id, current_version_id, user_id, project_id, org_id")
+    .select("id, current_version_id, user_id, project_id, org_id, workflow_id")
     .eq("id", documentId)
     .single();
   devLog(`[edit-resolution] fetched doc`, { doc, docErr });
