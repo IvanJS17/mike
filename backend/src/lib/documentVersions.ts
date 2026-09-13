@@ -9,7 +9,7 @@ type Supa = ReturnType<typeof createServerSupabase>;
  * prove a file matches the bytes the workspace held. Recompute whenever the
  * stored bytes change — a new version row, or an in-place overwrite.
  *
- * Accepts a view (e.g. multer's `file.buffer`) as well as a raw ArrayBuffer;
+ * Accepts a typed-array view as well as a raw ArrayBuffer;
  * several call sites pass views into a larger backing buffer, so the offset
  * and length must be respected rather than hashing the whole buffer.
  */
@@ -37,6 +37,7 @@ interface VersionPathRow extends DocRow {
     /** Set from document_versions.version_number of the active version. */
     active_version_number?: number | null;
     /** Active-version file metadata. */
+    source?: string | null;
     file_type?: string | null;
     size_bytes?: number | null;
     page_count?: number | null;
@@ -101,6 +102,26 @@ export async function loadActiveVersion(
 }
 
 /**
+ * Produce the filename a download should present to the user. Version
+ * filenames are expected to include the real extension.
+ *
+ * Shared by the download routes and the "documents-zip" export job, which
+ * must name the entries in the zip exactly as the sync route does.
+ */
+export function downloadFilenameForVersion(
+    filename: string | null | undefined,
+    versionNumber: number | null,
+    edited = false,
+): string {
+    const resolved = filename?.trim() || "Untitled document.docx";
+    if (!edited || !versionNumber || versionNumber < 1) return resolved;
+    const dot = resolved.lastIndexOf(".");
+    const stem = dot > 0 ? resolved.slice(0, dot) : resolved;
+    const ext = dot > 0 ? resolved.slice(dot) : "";
+    return `${stem} [Edited V${versionNumber}]${ext}`;
+}
+
+/**
  * For a list of documents, look up the active version for each and merge
  * `storage_path` + `pdf_storage_path` onto the row. One round-trip total
  * regardless of list size. Documents with no current_version_id retain
@@ -119,6 +140,7 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
             d.filename = "Untitled document";
             d.storage_path = null;
             d.pdf_storage_path = null;
+            d.source = null;
             d.file_type = null;
             d.size_bytes = null;
             d.page_count = null;
@@ -128,7 +150,7 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
     const { data: rows } = await db
         .from("document_versions")
         .select(
-            "id, storage_path, pdf_storage_path, version_number, filename, file_type, size_bytes, page_count",
+            "id, storage_path, pdf_storage_path, version_number, filename, source, file_type, size_bytes, page_count",
         )
         .in("id", versionIds)
         .is("deleted_at", null);
@@ -139,6 +161,7 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
             pdf_storage_path: string | null;
             version_number: number | null;
             filename: string | null;
+            source: string | null;
             file_type: string | null;
             size_bytes: number | null;
             page_count: number | null;
@@ -150,6 +173,7 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
         pdf_storage_path: string | null;
         version_number: number | null;
         filename: string | null;
+        source: string | null;
         file_type: string | null;
         size_bytes: number | null;
         page_count: number | null;
@@ -159,6 +183,7 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
             pdf_storage_path: r.pdf_storage_path ?? null,
             version_number: r.version_number ?? null,
             filename: r.filename ?? null,
+            source: r.source ?? null,
             file_type: r.file_type ?? null,
             size_bytes: r.size_bytes ?? null,
             page_count: r.page_count ?? null,
@@ -170,6 +195,7 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
         d.pdf_storage_path = v?.pdf_storage_path ?? null;
         d.active_version_number = v?.version_number ?? null;
         d.filename = v?.filename?.trim() || "Untitled document";
+        d.source = v?.source ?? null;
         d.file_type = v?.file_type ?? null;
         d.size_bytes = v?.size_bytes ?? null;
         d.page_count = v?.page_count ?? null;
