@@ -162,6 +162,7 @@ import {
     importWorkflowAddon,
     listQuickActions,
     uploadFilesWithSession,
+    uploadWorkflowAsset,
     uploadWorkflowAssets,
     uploadDocumentVersion,
     uploadLibraryDocument,
@@ -1612,6 +1613,18 @@ describe("upload session wrappers", () => {
         vi.mocked(uploadFilesWithSessionCore).mockResolvedValue([outcome()]);
 
         await uploadWorkflowAssets("w1", [{ file }]);
+        expect(lastManifest()).toMatchObject({
+            purpose: "document_create",
+            destination: { scope: "workflow", workflow_id: "w1" },
+        });
+    });
+
+    it("uploads a single workflow asset through the session flow", async () => {
+        vi.mocked(uploadFilesWithSessionCore).mockResolvedValue([outcome()]);
+
+        await expect(uploadWorkflowAsset("w1", file)).resolves.toEqual({
+            id: "new-doc",
+        });
         expect(lastManifest()).toMatchObject({
             purpose: "document_create",
             destination: { scope: "workflow", workflow_id: "w1" },
