@@ -375,6 +375,12 @@ export function useAssistantChat({
               streamedChatId = data.chatId;
               setChatId(data.chatId);
               setCurrentChatId(data.chatId);
+              if (typeof data.assistantMessageId === "string") {
+                updateLatestAssistantMessage((message) => ({
+                  ...message,
+                  id: data.assistantMessageId,
+                }));
+              }
               continue;
             }
 
@@ -627,6 +633,8 @@ export function useAssistantChat({
             }
 
             if (data.type === "ask_inputs") {
+              const eventId =
+                typeof data.event_id === "string" ? data.event_id.trim() : "";
               const rawItems = Array.isArray(data.items)
                 ? (data.items as unknown[])
                 : [];
@@ -715,8 +723,8 @@ export function useAssistantChat({
                 }
                 return acc;
               }, []);
-              if (items.length > 0) {
-                pushEvent({ type: "ask_inputs", items });
+              if (eventId && items.length > 0) {
+                pushEvent({ type: "ask_inputs", event_id: eventId, items });
               }
               continue;
             }

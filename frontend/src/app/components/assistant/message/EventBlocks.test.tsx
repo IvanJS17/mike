@@ -28,6 +28,7 @@ describe("AskInputsBlock", () => {
             <AskInputsBlock
                 event={{
                     type: "ask_inputs",
+                    event_id: "ask-1",
                     items: [
                         {
                             id: "address",
@@ -38,6 +39,8 @@ describe("AskInputsBlock", () => {
                 }}
                 response={{
                     type: "ask_inputs_response",
+                    assistant_message_id: "assistant-1",
+                    ask_event_id: "ask-1",
                     responses: [
                         {
                             id: "address",
