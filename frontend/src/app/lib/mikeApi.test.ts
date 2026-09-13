@@ -61,6 +61,8 @@ import {
     getChat,
     getAuditHistory,
     getDocument,
+    getDocumentFile,
+    getDocumentFileUrl,
     getDocumentUrl,
     getLibrary,
     getLibraryLevels,
@@ -1801,6 +1803,38 @@ describe("query and payload defaults", () => {
         expect(lastFetchCall().url).toBe(
             "/api/single-documents/d1/url?version_id=v%201",
         );
+    });
+
+    it("getDocumentFile appends version_id only when a version is requested", async () => {
+        expect(getDocumentFileUrl("d 1")).toBe(
+            "/api/single-documents/d%201/file",
+        );
+        expect(getDocumentFileUrl("d 1", "v 1")).toBe(
+            "/api/single-documents/d%201/file?version_id=v%201",
+        );
+
+        fetchMock.mockResolvedValueOnce(
+            new Response("current", {
+                status: 200,
+                headers: {
+                    "content-disposition": 'inline; filename="current.docx"',
+                },
+            }),
+        );
+        const current = await getDocumentFile("d 1");
+        expect(lastFetchCall().url).toBe("/api/single-documents/d%201/file");
+        expect(current.filename).toBe("current.docx");
+        expect(await current.blob.text()).toBe("current");
+
+        fetchMock.mockResolvedValueOnce(
+            new Response("selected", { status: 200 }),
+        );
+        const selected = await getDocumentFile("d 1", "v 1");
+        expect(lastFetchCall().url).toBe(
+            "/api/single-documents/d%201/file?version_id=v%201",
+        );
+        expect(selected.filename).toBeNull();
+        expect(await selected.blob.text()).toBe("selected");
     });
 
     it("createChat defaults to an empty JSON object body", async () => {

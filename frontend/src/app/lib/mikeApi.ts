@@ -1615,6 +1615,28 @@ export async function getDocumentUrl(
     return apiRequest(`/single-documents/${documentId}/url${qs}`);
 }
 
+function documentFilePath(
+    documentId: string,
+    versionId?: string | null,
+): string {
+    const qs = versionId ? `?version_id=${encodeURIComponent(versionId)}` : "";
+    return `/single-documents/${encodeURIComponent(documentId)}/file${qs}`;
+}
+
+export function getDocumentFileUrl(
+    documentId: string,
+    versionId?: string | null,
+): string {
+    return `${API_BASE}${documentFilePath(documentId, versionId)}`;
+}
+
+export async function getDocumentFile(
+    documentId: string,
+    versionId?: string | null,
+): Promise<{ blob: Blob; filename: string | null }> {
+    return apiBlobRequest(documentFilePath(documentId, versionId));
+}
+
 export async function downloadDocumentsZip(
     documentIds: string[],
 ): Promise<Blob> {

@@ -319,6 +319,58 @@ documentsRouter.get("/:documentId/url", requireAuth, async (req, res) => {
   });
 });
 
+// GET /single-documents/:documentId/file
+// Streams the active version's source bytes, or a specific version selected
+// with ?version_id=. Works for every supported document type and returns the
+// version's accurate MIME type (legacy `.doc` included). Unlike /url, this
+// bypasses R2 (avoids the browser CORS problem on signed URLs) so browser
+// viewers and editors can fetch the file directly, and unlike /display it
+// never substitutes a generated PDF rendition. `/docx` stays as the
+// DOCX-specific compatibility route; new callers should use this one.
+documentsRouter.get("/:documentId/file", requireAuth, async (req, res) => {
+  const userId = res.locals.userId as string;
+  const userEmail = res.locals.userEmail as string | undefined;
+  const { documentId } = req.params;
+  const versionIdParam = typeof req.query.version_id === "string" ? req.query.version_id : null;
+  const db = createServerSupabase();
+
+  const { data: doc, error } = await db
+    .from("documents")
+    .select("id, user_id, project_id")
+    .eq("id", documentId)
+    .single();
+  if (error || !doc)
+    return void res.status(404).json({ detail: "Document not found" });
+  const access = await ensureDocAccess(doc, userId, userEmail, db);
+  if (!access.ok)
+    return void res.status(404).json({ detail: "Document not found" });
+
+  const active = await loadActiveVersion(documentId, db, versionIdParam);
+  if (!active)
+    return void res.status(404).json({ detail: "No file available" });
+  const metadata = await headFile(active.storage_path);
+  if (!metadata)
+    return void res.status(404).json({ detail: "Document bytes not available" });
+
+  const filename = downloadFilenameForVersion(
+    active.filename,
+    active.version_number,
+    active.source === "assistant_edit",
+  );
+  res.setHeader("Content-Type", contentTypeForDocumentType(active.file_type));
+  res.setHeader("Content-Length", metadata.size);
+  res.setHeader("Content-Disposition", buildContentDisposition("inline", filename));
+  const source = createFileReadStream(active.storage_path);
+  try {
+    await pipeline(source, res);
+  } catch (error) {
+    source.destroy();
+    if (!res.headersSent && !res.destroyed) {
+      return void sendInternalError(res, error);
+    }
+  }
+});
+
 // GET /single-documents/:documentId/docx
 // Streams the raw .docx bytes for the given document, optionally at a
 // specific tracked-changes version. Unlike /url, this bypasses R2 (avoids
