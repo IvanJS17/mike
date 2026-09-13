@@ -278,3 +278,17 @@ function storageExtension(filename: string, fallback: string): string {
   const ext = filename.slice(lastDot).toLowerCase();
   return /^\.[a-z0-9]{1,16}$/.test(ext) ? ext : fallback;
 }
+
+// ---------------------------------------------------------------------------
+// S2 sync additions (ported from upstream 7e3607e7): fail-closed readiness for
+// durable-deletion paths, and the extracted-text key shared by the precompute
+// job and its readers.
+// ---------------------------------------------------------------------------
+
+export function assertStorageConfigured(): void {
+  requireStorageConfig();
+}
+
+export function extractedTextKey(versionId: string): string {
+  return `extracted-text/${versionId}.txt`;
+}

@@ -20,6 +20,8 @@ import {
     stateHash,
     validateRemoteMcpUrl,
 } from "./client";
+import { ConnectorSetupError } from "./errors";
+import { mcpOAuthProviderFor } from "./providers";
 import {
     CLIENT_INFO,
     OAUTH_STATE_TTL_MS,
@@ -32,9 +34,28 @@ import {
 
 export class McpOAuthRequiredError extends Error {
     code = "oauth_required";
-    constructor(message = "OAuth authorization is required for this MCP server.") {
+    /**
+     * Whether re-running the same refresh could ever succeed. False only when
+     * the authorization server had a transport-level or 5xx/429 hiccup; true
+     * (the default, and every pre-existing throw site) when the grant itself
+     * is dead — invalid_grant, invalid_client, a revoked or absent refresh
+     * token — and nothing short of the user reconnecting will fix it.
+     *
+     * Nothing on the request path reads this: it exists so the background
+     * mcp.refresh_token job can tell "retry me" from "stop retrying", instead
+     * of burning its whole attempt budget replaying a rejected grant.
+     */
+    readonly permanent: boolean;
+    /** The RFC 6749 `error` code from the token endpoint, when it sent one. */
+    readonly oauthErrorCode: string | null;
+    constructor(
+        message = "OAuth authorization is required for this MCP server.",
+        options: { permanent?: boolean; oauthErrorCode?: string | null } = {},
+    ) {
         super(message);
         this.name = "McpOAuthRequiredError";
+        this.permanent = options.permanent ?? true;
+        this.oauthErrorCode = options.oauthErrorCode ?? null;
     }
 }
 
@@ -110,6 +131,35 @@ async function discoverProtectedResourceMetadataUrl(serverUrl: string) {
     throw new McpOAuthRequiredError();
 }
 
+/**
+ * Best-effort variant of {@link discoverProtectedResourceMetadataUrl} for
+ * seeding the MCP SDK's discovery.
+ *
+ * The SDK's own RFC 9728 lookup tries the path-aware well-known form first
+ * (`/.well-known/oauth-protected-resource/mcp`) and only falls back to the
+ * root form on a 4xx. Slack answers the path-aware form with a 302 (an HTML
+ * page), so the SDK never reaches the root document that actually exists —
+ * it silently proceeds with no resource metadata, which drops both the
+ * `scope` (resolved from the metadata's scopes_supported) and the RFC 8707
+ * `resource` parameter from the authorization request. Slack then rejects
+ * the scopeless request outright ("No scopes requested").
+ *
+ * Our own prober handles that server shape: it prefers the URL advertised in
+ * the 401 WWW-Authenticate challenge and otherwise tries BOTH well-known
+ * forms. Handing the resulting URL to the SDK via `resourceMetadataUrl`
+ * makes its discovery deterministic. Returns undefined when the server has
+ * no discoverable metadata — the SDK then behaves exactly as before.
+ */
+async function seedResourceMetadataUrl(
+    serverUrl: string,
+): Promise<URL | undefined> {
+    try {
+        return new URL(await discoverProtectedResourceMetadataUrl(serverUrl));
+    } catch {
+        return undefined;
+    }
+}
+
 async function fetchAuthorizationServerMetadata(
     authorizationServer: string,
 ): Promise<Record<string, unknown>> {
@@ -170,11 +220,23 @@ export async function discoverOAuthMetadata(serverUrl: string): Promise<OAuthMet
     };
 }
 
+/**
+ * Non-standard authorization-request parameters a given provider requires
+ * (from the provider registry in providers.ts).
+ *
+ * The MCP SDK builds a spec-compliant authorization URL and exposes no hook for
+ * adding provider-specific query parameters, so these are applied in
+ * {@link DbMcpOAuthProvider.redirectToAuthorization} — the one point at which
+ * the provider is handed the fully-built URL before the user is sent to it.
+ */
+export function providerAuthorizationParams(
+    serverUrl: string,
+): Record<string, string> {
+    return mcpOAuthProviderFor(serverUrl)?.authorizationParams ?? {};
+}
+
 function oauthClientEnvFor(serverUrl: string) {
-    const hostname = new URL(serverUrl).hostname.toLowerCase();
-    const prefix = hostname.endsWith("googleapis.com")
-        ? "GOOGLE_MCP_OAUTH"
-        : "MCP_OAUTH";
+    const prefix = mcpOAuthProviderFor(serverUrl)?.envPrefix ?? "MCP_OAUTH";
     return {
         clientId:
             process.env[`${prefix}_CLIENT_ID`] ||
@@ -310,7 +372,36 @@ async function storeOAuthToken(
     if (connectorError) throw connectorError;
 }
 
-async function refreshOAuthAccessToken(row: OAuthTokenRow, db: Db) {
+/**
+ * Pull the RFC 6749 `error` code out of a token-endpoint error response. The
+ * spec puts it in a JSON body ({"error":"invalid_grant"}); anything else is
+ * treated as "no code", and the HTTP status decides on its own.
+ */
+function oauthErrorCodeFrom(body: string): string | null {
+    try {
+        const parsed = JSON.parse(body) as Record<string, unknown>;
+        return typeof parsed.error === "string" ? parsed.error : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Codes that mean the grant is gone for good. `invalid_grant` is the one the
+ * spec reserves for an expired/revoked/rejected refresh token, and the rest
+ * describe a client registration that no longer works — replaying the request
+ * gets the identical rejection every time.
+ */
+const PERMANENT_OAUTH_ERROR_CODES = new Set([
+    "invalid_grant",
+    "invalid_client",
+    "unauthorized_client",
+    "invalid_request",
+    "invalid_scope",
+    "unsupported_grant_type",
+]);
+
+export async function refreshOAuthAccessToken(row: OAuthTokenRow, db: Db) {
     const refreshToken = decryptString(
         row.encrypted_refresh_token,
         row.refresh_token_iv,
@@ -340,7 +431,20 @@ async function refreshOAuthAccessToken(row: OAuthTokenRow, db: Db) {
         body,
     });
     if (!response.ok) {
-        throw new McpOAuthRequiredError("OAuth token refresh failed. Please reconnect.");
+        // Same error class and same user-facing message as before — only the
+        // retryability metadata is new. A 5xx/429 is the authorization server
+        // having a bad minute, so the background refresh job may try again;
+        // any other status (or an explicit invalid_grant-family code) means
+        // the grant is dead and retrying just replays the rejection.
+        const detail = await response.text().catch(() => "");
+        const oauthErrorCode = oauthErrorCodeFrom(detail);
+        const transient =
+            (response.status >= 500 || response.status === 429) &&
+            !(oauthErrorCode && PERMANENT_OAUTH_ERROR_CODES.has(oauthErrorCode));
+        throw new McpOAuthRequiredError(
+            "OAuth token refresh failed. Please reconnect.",
+            { permanent: !transient, oauthErrorCode },
+        );
     }
     const token = (await response.json()) as Record<string, unknown>;
     await storeOAuthToken(
@@ -532,11 +636,18 @@ export class DbMcpOAuthProvider implements OAuthClientProvider {
     }
 
     async redirectToAuthorization(authorizationUrl: URL) {
-        if (this.mode === "initiate") {
-            this.lastAuthorizeUrl = authorizationUrl;
-            return;
+        if (this.mode !== "initiate") {
+            throw new McpOAuthRequiredError();
         }
-        throw new McpOAuthRequiredError();
+        // Apply any provider-specific authorization parameters the SDK cannot
+        // express on its own (e.g. Google's offline-access flags). Using `set`
+        // keeps the SDK's own parameters intact and avoids duplicates.
+        for (const [key, value] of Object.entries(
+            providerAuthorizationParams(this.connector.server_url),
+        )) {
+            authorizationUrl.searchParams.set(key, value);
+        }
+        this.lastAuthorizeUrl = authorizationUrl;
     }
 
     async saveCodeVerifier(codeVerifier: string) {
@@ -598,10 +709,34 @@ export class DbMcpOAuthProvider implements OAuthClientProvider {
                 .eq("state_hash", stateHash(this.stateToken));
             return;
         }
-        if (scope === "tokens" || scope === "all") {
+        if (scope === "all") {
             await this.db
                 .from("user_mcp_oauth_tokens")
                 .delete()
+                .eq("connector_id", this.connector.id);
+            return;
+        }
+        if (scope === "tokens") {
+            // Null only the token columns instead of deleting the row. The row
+            // does double duty: besides tokens it stores the client_id /
+            // client_secret that `saveClientInformation` persisted after RFC
+            // 7591 dynamic client registration. Deleting the whole row here
+            // (mid-auth, right before the interactive redirect) would make
+            // `clientInformation()` come back empty on the OAuth callback leg,
+            // and the SDK refuses to exchange the authorization code without
+            // the registered client — permanently breaking DCR-based servers.
+            // `oauthConnected` only checks `encrypted_access_token`, so nulling
+            // the token columns is exactly enough to keep it honest.
+            await this.db
+                .from("user_mcp_oauth_tokens")
+                .update({
+                    ...tokenSecretPatch("access_token"),
+                    ...tokenSecretPatch("refresh_token"),
+                    token_type: null,
+                    scope: null,
+                    expires_at: null,
+                    updated_at: new Date().toISOString(),
+                })
                 .eq("connector_id", this.connector.id);
         }
     }
@@ -622,9 +757,38 @@ export async function startUserMcpConnectorOAuth(
         redirectUri,
     );
     const env = oauthClientEnvFor(connector.server_url);
+    // Some providers (Google, Slack) do not implement RFC 7591 dynamic client
+    // registration, so without a pre-configured OAuth client the SDK's normal
+    // "no client? register one" fallback dead-ends deep inside the flow with a
+    // message no operator can act on. Fail here instead, with the provider's
+    // exact setup instructions — including the redirect URI this deployment
+    // needs, so it can be copy-pasted into the provider's console form.
+    const providerQuirks = mcpOAuthProviderFor(connector.server_url);
+    if (!env.clientId && providerQuirks?.setupInstructions) {
+        const stored = await loadOAuthToken(connector.id, db);
+        if (!stored?.client_id) {
+            throw new ConnectorSetupError(
+                providerQuirks.setupInstructions(redirectUri),
+            );
+        }
+    }
+    // Scope is intentionally left to the SDK when not explicitly configured: it
+    // resolves it as `scope || resourceMetadata.scopes_supported ||
+    // clientMetadata.scope`, i.e. it already falls back to the scopes the MCP
+    // server advertises in its protected-resource metadata. Passing a scope
+    // derived from the *authorization server* metadata here would wrongly take
+    // priority over that and request the wrong scopes (e.g. Google's generic
+    // OIDC scopes instead of the Drive/Gmail scopes the connector needs).
+    // For that fallback to actually fire, the SDK must FIND the resource
+    // metadata — which its own discovery can miss (see
+    // seedResourceMetadataUrl), so seed it with the URL we discover ourselves.
+    const resourceMetadataUrl = await seedResourceMetadataUrl(
+        connector.server_url,
+    );
     const result = await runMcpOAuth(provider, {
         serverUrl: connector.server_url,
         ...(env.scope ? { scope: env.scope } : {}),
+        ...(resourceMetadataUrl ? { resourceMetadataUrl } : {}),
         fetchFn: guardedFetch,
     });
     if (result === "AUTHORIZED") {
@@ -633,6 +797,18 @@ export async function startUserMcpConnectorOAuth(
     if (!provider.lastAuthorizeUrl) {
         throw new Error("OAuth authorization URL was not returned by the MCP SDK.");
     }
+    // We are about to send the user through an interactive authorization
+    // redirect, which means the SDK did not (and could not) complete the flow
+    // from stored credentials — typically because the only token row is an
+    // expired access token with no usable refresh token. That stale row must
+    // not survive: `oauthConnected` (client.ts) is `!!encrypted_access_token`
+    // with no expiry check, so leaving the row in place makes the frontend
+    // completion poll resolve immediately on a token that is already dead,
+    // closing the consent popup mid-flow and looping the connector forever.
+    // Invalidating "tokens" here makes `oauthConnected` an honest "this
+    // authorization attempt has completed" signal: it flips to true only once a
+    // fresh token is persisted by the OAuth callback.
+    await provider.invalidateCredentials("tokens");
     return {
         authorizationUrl: provider.lastAuthorizeUrl.toString(),
         alreadyAuthorized: false,
@@ -676,9 +852,17 @@ export async function completeMcpConnectorOAuthAuthorization(
         config.redirectUri,
         state,
     );
+    // Seed discovery on the code-exchange leg too: RFC 8707 wants the same
+    // `resource` indicator in the token request as in the authorization
+    // request, and without the metadata the SDK would omit it here even
+    // though the authorization leg (seeded above) included it.
+    const resourceMetadataUrl = await seedResourceMetadataUrl(
+        connector.server_url,
+    );
     const result = await runMcpOAuth(provider, {
         serverUrl: connector.server_url,
         authorizationCode: code,
+        ...(resourceMetadataUrl ? { resourceMetadataUrl } : {}),
         fetchFn: guardedFetch,
     });
     if (result !== "AUTHORIZED") {

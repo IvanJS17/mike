@@ -22,6 +22,8 @@ describe("supported populated legacy Drive upgrade manifest", () => {
       "20260909_01_recovery_native_evidence_hashes.sql",
       "20260909_02_recovery_workflow_provenance.sql",
       "20260909_03_recovery_remove_us_research_preference.sql",
+      "20260910_01_recovery_upstream_upload_sessions.sql",
+      "20260910_02_recovery_upstream_db_jobs.sql",
     ]);
   });
 

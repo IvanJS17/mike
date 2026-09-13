@@ -1,10 +1,14 @@
 import {
   downloadFile,
+  extractedTextKey,
   generatedDocKey,
   uploadFile,
 } from "../../storage";
 import { convertedPdfKey, docxToPdf } from "../../convert";
+import { enqueueConversion } from "../../queue/conversionQueue";
+import { enqueueDbJob, enqueueStorageCleanup } from "../../dbq/enqueue";
 import { createServerSupabase } from "../../supabase";
+import { profileAttributionName } from "../../userLookup";
 import {
   applyTrackedEdits,
   extractDocxBodyText,
@@ -27,6 +31,7 @@ import {
   isPresentationDocumentType,
   isSpreadsheetDocumentType,
   isWordDocumentType,
+  requiresLibreOfficeTextExtraction,
   shouldConvertToPdf,
 } from "../../documentTypes";
 import { extractPresentationText } from "../../officeText";
@@ -86,6 +91,24 @@ export async function extractPdfText(buf: ArrayBuffer): Promise<string> {
   } catch {
     return "";
   }
+}
+
+/**
+ * The text read_document derives for the legacy Office types (.doc/.ppt):
+ * LibreOffice → PDF → pdfjs. Exported so the document.precompute_text job
+ * produces byte-identical text to the inline read path — a cache that can
+ * drift from what it caches is worse than no cache.
+ */
+export async function extractLegacyOfficeText(
+  raw: ArrayBuffer,
+): Promise<string> {
+  const pdfBuf = await docxToPdf(Buffer.from(raw));
+  return extractPdfText(
+    pdfBuf.buffer.slice(
+      pdfBuf.byteOffset,
+      pdfBuf.byteOffset + pdfBuf.byteLength,
+    ) as ArrayBuffer,
+  );
 }
 
 export async function generateDocx(
@@ -531,12 +554,7 @@ export async function generateDocx(
       }
     }
     const docId = crypto.randomUUID().replace(/-/g, "");
-    const safeTitle =
-      title
-        .replace(/[^a-zA-Z0-9 -]/g, "")
-        .trim()
-        .slice(0, 64) || "document";
-    const filename = `${safeTitle}.docx`;
+    const filename = safeGeneratedFilename(title, "docx");
     const key = generatedDocKey(userId, docId, filename);
 
     await uploadFile(
@@ -610,14 +628,48 @@ export async function generateDocx(
   }
 }
 
+const GENERATED_FILENAME_MAX_UNITS = 64;
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, {
+  granularity: "grapheme",
+});
+
+/**
+ * Filename stem for a generated document.
+ *
+ * The title is prose the user asked for, so the stem keeps letters, marks and
+ * numbers in any script alongside the spaces and hyphens the ASCII-only
+ * version already allowed, and still drops path separators, control and
+ * formatting characters, and punctuation. Normalization is NFC rather than
+ * NFKC: "e" + U+0301 becomes "é", but fullwidth and circled characters stay
+ * themselves instead of being folded into ASCII.
+ *
+ * The length bound walks whole grapheme clusters, so a truncated stem can
+ * never end in half a character — half of a supplementary-plane letter is an
+ * unpaired surrogate, which the download header's percent-encoding cannot
+ * represent.
+ */
+function generatedFilenameStem(title: string): string {
+  const allowed = title
+    .normalize("NFC")
+    .replace(/[^\p{L}\p{M}\p{N} -]/gu, "")
+    // Filtering can leave a mark next to a base it was not adjacent to.
+    .normalize("NFC")
+    .trim();
+
+  let stem = "";
+  for (const { segment } of graphemeSegmenter.segment(allowed)) {
+    if (stem.length + segment.length > GENERATED_FILENAME_MAX_UNITS) break;
+    stem += segment;
+  }
+
+  // Marks and spaces alone are not a name anyone can read.
+  return /^[\p{M}\s]*$/u.test(stem) ? "" : stem;
+}
+
 export function safeGeneratedFilename(title: string, extension: string) {
   const rawTitle = typeof title === "string" ? title : "document";
-  const safeTitle =
-    rawTitle
-      .replace(/[^a-zA-Z0-9 -]/g, "")
-      .trim()
-      .slice(0, 64) || "document";
-  return `${safeTitle}.${extension}`;
+  return `${generatedFilenameStem(rawTitle) || "document"}.${extension}`;
 }
 
 function xmlEscape(value: unknown) {
@@ -982,8 +1034,17 @@ async function persistGeneratedFile(params: {
     contentTypeForDocumentType(extension),
   );
 
+  // PPTX is the only generated type that pays for LibreOffice here (XLSX is
+  // never converted — spreadsheets are served raw). With the async flag on,
+  // the rendition rides the conversion queue instead: the document is
+  // inserted without one and a job fills it in with retries — closing the
+  // sync path's silent failure mode where a LibreOffice hiccup left the doc
+  // permanently rendition-less.
   let pdfStoragePath: string | null = null;
-  if (shouldConvertToPdf(extension)) {
+  const deferRenditionToQueue =
+    shouldConvertToPdf(extension) &&
+    process.env.ASYNC_DOCUMENT_CONVERSION === "true";
+  if (shouldConvertToPdf(extension) && !deferRenditionToQueue) {
     try {
       const pdfBuf = await docxToPdf(buffer);
       const pdfKey = convertedPdfKey(userId, docId);
@@ -1045,6 +1106,27 @@ async function persistGeneratedFile(params: {
     .from("documents")
     .update({ current_version_id: versionId })
     .eq("id", documentId);
+
+  if (deferRenditionToQueue) {
+    // Deduped on convert:<versionId>, retried with backoff.
+    // finalizeDocumentStatus: false — the document was inserted "ready" and
+    // is downloadable from its raw bytes; a rendition failure must not flip
+    // it to "error". Enqueue failure degrades to the sync path's
+    // conversion-failure behavior: a usable document with no rendition.
+    try {
+      await enqueueConversion({
+        documentId,
+        versionId,
+        userId,
+        storagePath: key,
+        fileType: extension,
+        pdfKey: convertedPdfKey(userId, documentId),
+        finalizeDocumentStatus: false,
+      });
+    } catch (err) {
+      devLog(`[generate_${extension}] rendition enqueue failed:`, err);
+    }
+  }
 
   return {
     filename,
@@ -1179,11 +1261,18 @@ export async function runEditDocument(params: {
   const current = await loadCurrentVersionBytes(documentId, db);
   if (!current) return { ok: false, error: "Could not load document bytes." };
 
+  const { data: authorProfile } = await db
+    .from("user_profiles")
+    .select("display_name, email")
+    .eq("user_id", userId)
+    .maybeSingle();
+  const author = profileAttributionName(authorProfile, "Mike");
+
   const {
     bytes: editedBytes,
     changes,
     errors,
-  } = await applyTrackedEdits(current.bytes, edits, { author: "Mike" });
+  } = await applyTrackedEdits(current.bytes, edits, { author });
 
   if (changes.length === 0) {
     return {
@@ -1231,8 +1320,16 @@ export async function runEditDocument(params: {
         size_bytes: editedBytes.byteLength,
         page_count: null,
         content_sha256: contentSha256(editedBytes),
+        // The bytes just changed in place — any rendition this version
+        // carried no longer matches them (same invariant as accept/reject).
+        pdf_storage_path: null,
       })
       .eq("id", versionRowId);
+    // Same invariant for the extracted-text cache. In practice this rewrite
+    // always produces DOCX, which is not a cached type, so this is a
+    // no-op-shaped safety net rather than a live invalidation — but it is the
+    // one place a cached key could ever go stale, so it must not be missing.
+    await enqueueStorageCleanup(db, [extractedTextKey(versionRowId)]);
   } else {
     const versionId = crypto.randomUUID().replace(/-/g, "");
     newPath = `documents/${userId}/${documentId}/edits/${versionId}.docx`;
@@ -1606,19 +1703,42 @@ export async function readDocumentContent(
       isPresentationDocumentType(fileType) ||
       isWordDocumentType(fileType)
     ) {
-      devLog(
-        `[read_document] legacy Office file_type="${fileType}" for filename="${docInfo.filename}", converting to pdf for text extraction`,
-      );
-      const pdfBuf = await docxToPdf(Buffer.from(raw));
-      text = await extractPdfText(
-        pdfBuf.buffer.slice(
-          pdfBuf.byteOffset,
-          pdfBuf.byteOffset + pdfBuf.byteLength,
-        ) as ArrayBuffer,
-      );
-      devLog(
-        `[read_document] legacy Office PDF extraction length=${text.length} for filename="${docInfo.filename}"`,
-      );
+      // This branch is the only one that shells out to LibreOffice — every
+      // other type has an in-process reader above — so it is the only one
+      // worth caching. The cached object is written by the
+      // document.precompute_text job, keyed on the immutable version id.
+      const cacheKey =
+        versionId && requiresLibreOfficeTextExtraction(fileType)
+          ? extractedTextKey(versionId)
+          : null;
+      const cached = cacheKey ? await downloadFile(cacheKey) : null;
+      if (cached) {
+        text = Buffer.from(cached).toString("utf8");
+        devLog(
+          `[read_document] legacy Office text served from cache key="${cacheKey}" length=${text.length} for filename="${docInfo.filename}"`,
+        );
+      } else {
+        devLog(
+          `[read_document] legacy Office file_type="${fileType}" for filename="${docInfo.filename}", converting to pdf for text extraction`,
+        );
+        text = await extractLegacyOfficeText(raw);
+        devLog(
+          `[read_document] legacy Office PDF extraction length=${text.length} for filename="${docInfo.filename}"`,
+        );
+        // Warm the cache for the next read of this version. Fire-and-forget
+        // and deduped: several tool calls in one turn queue one job, and a
+        // failure here must never affect the text we just produced.
+        if (cacheKey && db) {
+          void enqueueDbJob(db, {
+            kind: "document.precompute_text",
+            payload: { versionId, storagePath: sourcePath, fileType },
+            dedupeKey: `precompute:${versionId}`,
+            maxAttempts: 3,
+          }).catch((err) =>
+            devLog(`[read_document] precompute enqueue failed`, err),
+          );
+        }
+      }
     } else {
       devLog(
         `[read_document] unknown file_type="${docInfo.file_type}" for filename="${docInfo.filename}", trying mammoth`,

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { sealManifest } from "./manifestSigning";
 import { createServerSupabase } from "./supabase";
 
@@ -69,6 +70,67 @@ function idsFrom(rows: Record<string, unknown>[], column = "id"): string[] {
             typeof row[column] === "string" ? (row[column] as string) : null,
         ),
     );
+}
+
+async function loadMemoryExport(
+    db: Db,
+    scope: "user" | "project",
+    ownerId: string,
+) {
+    const ownerColumn = scope === "user" ? "user_id" : "project_id";
+    const rows = await selectAll(
+        db,
+        "memory_files",
+        (query) => query.eq("scope", scope).eq(ownerColumn, ownerId),
+        "id, enabled, epoch, revision, content, content_sha256, size_bytes, status, last_source, updated_by, created_at, updated_at",
+    );
+    const file = rows[0];
+    if (!file) {
+        return {
+            // Missing state is legacy/corrupt and must never be reported as an
+            // implicit opt-in. New owners receive an explicit row at creation.
+            enabled: false,
+            epoch: 0,
+            revision: 0,
+            status: "idle",
+            created_at: null,
+            updated_at: null,
+            markdown: "",
+            content_sha256: null,
+            size_bytes: 0,
+            source: null,
+            updated_by: null,
+        };
+    }
+
+    const markdown = typeof file.content === "string" ? file.content : "";
+    const storedHash =
+        typeof file.content_sha256 === "string" ? file.content_sha256 : null;
+    if (storedHash) {
+        const actualHash = createHash("sha256")
+            .update(markdown, "utf8")
+            .digest("hex");
+        if (actualHash !== storedHash) {
+            throw new Error("Memory export content checksum mismatch");
+        }
+    }
+
+    return {
+        enabled: file.enabled === true,
+        epoch: Number(file.epoch),
+        revision: Number(file.revision),
+        status: String(file.status ?? "idle"),
+        created_at:
+            typeof file.created_at === "string" ? file.created_at : null,
+        updated_at:
+            typeof file.updated_at === "string" ? file.updated_at : null,
+        markdown,
+        content_sha256: storedHash,
+        size_bytes: Number(file.size_bytes ?? 0),
+        source: typeof file.last_source === "string" ? file.last_source : null,
+        updated_by:
+            typeof file.updated_by === "string" ? file.updated_by : null,
+    };
 }
 
 async function loadUserChats(db: Db, userId: string) {
@@ -204,6 +266,8 @@ export async function buildProjectExportManifest(db: Db, projectId: string) {
         .single();
     await throwIfError(projectError, "Failed to export project");
 
+    const memory = await loadMemoryExport(db, "project", projectId);
+
     const documents = await selectAll(
         db,
         "documents",
@@ -260,6 +324,7 @@ export async function buildProjectExportManifest(db: Db, projectId: string) {
         manifest_version: 1,
         exported_at: new Date().toISOString(),
         project,
+        memory,
         documents: documents.map((doc) => ({
             id: doc.id,
             status: doc.status,
@@ -300,7 +365,6 @@ export async function buildUserAccountExport(
         projects,
         standaloneDocuments,
         workflows,
-        workflowReferenceDocuments,
         defaultWorkflowInstallations,
         quickActions,
         workflowOpenSourceSubmissions,
@@ -313,6 +377,7 @@ export async function buildUserAccountExport(
         sharedProjects,
         sharedTabularReviews,
         auditEvents,
+        appMemory,
     ] = await Promise.all([
         selectAll(db, "user_profiles", (query) => query.eq("user_id", userId)),
         loadApiKeyStatus(db, userId),
@@ -332,9 +397,6 @@ export async function buildUserAccountExport(
                 .order("created_at", { ascending: true }),
         ),
         selectAll(db, "workflows", (query) =>
-            query.eq("user_id", userId).order("created_at", { ascending: true }),
-        ),
-        selectAll(db, "workflow_reference_documents", (query) =>
             query.eq("user_id", userId).order("created_at", { ascending: true }),
         ),
         selectAll(db, "default_workflow_installations", (query) =>
@@ -369,32 +431,92 @@ export async function buildUserAccountExport(
             query.eq("user_id", userId).order("created_at", { ascending: true }),
         ),
         userEmail
-            ? selectAll(db, "projects", (query) =>
-                  query
-                      .filter(
-                          "shared_with",
-                          "cs",
-                          JSON.stringify([userEmail.trim().toLowerCase()]),
-                      )
-                      .neq("user_id", userId)
-                      .order("created_at", { ascending: true }),
-                  "id, user_id, name, cm_number, created_at, updated_at",
-              )
+            ? (async () => {
+                  // Shared projects come from the grant table so the export
+                  // lists exactly the projects the caller can actually reach.
+                  const grantRows = await selectAll(
+                      db,
+                      "project_access_grants",
+                      (query) =>
+                          query.eq(
+                              "email",
+                              userEmail.trim().toLowerCase(),
+                          ),
+                      "project_id",
+                  );
+                  const projectIds = [
+                      ...new Set(
+                          grantRows
+                              .map((row) => row.project_id as string | null)
+                              .filter((id): id is string => !!id),
+                      ),
+                  ];
+                  if (projectIds.length === 0) return [];
+                  return selectAll(db, "projects", (query) =>
+                      query
+                          .in("id", projectIds)
+                          .neq("user_id", userId)
+                          .order("created_at", { ascending: true }),
+                      "id, user_id, name, cm_number, created_at, updated_at",
+                  );
+              })()
             : Promise.resolve([]),
         userEmail
-            ? selectAll(db, "tabular_reviews", (query) =>
-                  query
-                      .filter("shared_with", "cs", JSON.stringify([userEmail]))
-                      .neq("user_id", userId)
-                      .order("created_at", { ascending: true }),
-                  "id, user_id, project_id, title, practice, created_at, updated_at",
-              )
+            ? (async () => {
+                  const grantRows = await selectAll(
+                      db,
+                      "tabular_review_access_grants",
+                      (query) =>
+                          query.eq(
+                              "email",
+                              userEmail.trim().toLowerCase(),
+                          ),
+                      "tabular_review_id",
+                  );
+                  const reviewIds = [
+                      ...new Set(
+                          grantRows
+                              .map(
+                                  (row) =>
+                                      row.tabular_review_id as string | null,
+                              )
+                              .filter((id): id is string => !!id),
+                      ),
+                  ];
+                  if (reviewIds.length === 0) return [];
+                  return selectAll(db, "tabular_reviews", (query) =>
+                      query
+                          .in("id", reviewIds)
+                          .neq("user_id", userId)
+                          .order("created_at", { ascending: true }),
+                      "id, user_id, project_id, title, practice, created_at, updated_at",
+                  );
+              })()
             : Promise.resolve([]),
         selectAll(db, "audit_events", (query) =>
             query
                 .eq("user_id", userId)
                 .order("created_at", { ascending: true }),
         ),
+        loadMemoryExport(db, "user", userId),
+    ]);
+
+    // Organization membership + the orgs the user belongs to and the
+    // invitations addressed to them, for a complete GDPR-style export of
+    // their multi-tenant footprint.
+    const orgMemberships = await selectAll(db, "org_members", (query) =>
+        query.eq("user_id", userId).order("created_at", { ascending: true }),
+    );
+    const orgIds = idsFrom(orgMemberships, "org_id");
+    const [organizations, orgInvitations] = await Promise.all([
+        selectByIds(db, "organizations", "id", orgIds),
+        userEmail
+            ? selectAll(db, "org_invitations", (query) =>
+                  query
+                      .eq("email", userEmail.trim().toLowerCase())
+                      .order("created_at", { ascending: true }),
+              )
+            : Promise.resolve([]),
     ]);
 
     const projectIds = idsFrom(projects);
@@ -421,13 +543,15 @@ export async function buildUserAccountExport(
         profile,
         api_keys: apiKeys,
         router_models: routerModels,
+        organizations,
+        org_members: orgMemberships,
+        org_invitations: orgInvitations,
         projects,
         project_subfolders: folders,
         documents,
         document_versions: versions,
         document_edits: edits,
         workflows,
-        workflow_reference_documents: workflowReferenceDocuments,
         default_workflow_installations: defaultWorkflowInstallations,
         quick_actions: quickActions,
         workflow_open_source_submissions: workflowOpenSourceSubmissions,
@@ -442,6 +566,7 @@ export async function buildUserAccountExport(
             projects: sharedProjects,
             tabular_reviews: sharedTabularReviews,
         },
+        memory: appMemory,
         audit_events: auditEvents,
     };
 }

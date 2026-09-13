@@ -43,7 +43,9 @@
     "undici": "^6.27.0",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "yaml": "2.9.0",
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "bullmq": "^6.3.4",
+    "ioredis": "^6.0.0"
   },
   "devDependencies": {
     "@stryker-mutator/core": "^9.6.1",
