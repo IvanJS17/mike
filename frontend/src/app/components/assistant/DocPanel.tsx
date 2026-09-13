@@ -3,8 +3,7 @@
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Download, ExternalLink, Loader2 } from "lucide-react";
-import { API_BASE } from "@/app/lib/mikeApi";
-import { authenticatedFetch } from "@/app/lib/authEvents";
+import { getDocumentFile } from "@/app/lib/mikeApi";
 import { PillButton } from "@/app/components/ui/pill-button";
 import { PdfView } from "../shared/views/PdfView";
 import { DocxView } from "../shared/views/DocxView";
@@ -439,18 +438,12 @@ function DownloadButton({
         if (busy || isReloading) return;
         setBusy(true);
         try {
-            const qs = versionId
-                ? `?version_id=${encodeURIComponent(versionId)}`
-                : "";
-            const resp = await authenticatedFetch(
-                `${API_BASE}/single-documents/${documentId}/docx${qs}`,
-            );
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            const blob = await resp.blob();
+            const { blob, filename: resolvedFilename } =
+                await getDocumentFile(documentId, versionId);
             const blobUrl = URL.createObjectURL(blob);
             const a = document.createElement("a");
             a.href = blobUrl;
-            a.download = filename;
+            a.download = resolvedFilename || filename;
             document.body.appendChild(a);
             a.click();
             a.remove();

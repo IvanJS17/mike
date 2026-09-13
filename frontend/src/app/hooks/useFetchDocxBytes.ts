@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { API_BASE } from "@/app/lib/mikeApi";
+import { getDocumentFileUrl } from "@/app/lib/mikeApi";
 import { authenticatedFetch } from "@/app/lib/authEvents";
 
 export interface FetchDocxResult {
@@ -57,10 +57,7 @@ export function useFetchDocxBytes(
         }
 
         const key = cacheKey(documentId, versionId, refetchKey);
-        const qs = versionId
-            ? `?version_id=${encodeURIComponent(versionId)}`
-            : "";
-        const url = `${API_BASE}/single-documents/${documentId}/docx${qs}`;
+        const url = getDocumentFileUrl(documentId, versionId);
 
         // Cache hit: reuse bytes synchronously, no network, no spinner.
         const cached = bytesCache.get(key);
