@@ -24,7 +24,8 @@ import {
   contentSha256,
   loadActiveVersion,
 } from "../lib/documentVersions";
-import { ensureDocAccess } from "../lib/access";
+import { ensureDocAccess, creatorScopedAllowed
+} from "../lib/access";
 import { singleFileUpload } from "../lib/upload";
 import {
   ALLOWED_DOCUMENT_TYPES,
@@ -439,7 +440,7 @@ documentsRouter.post(
         !targetDoc.project_id &&
         sourceDoc.user_id === userId &&
         targetDoc.user_id === userId);
-    if (willDeleteSource && !sourceAccess.isOwner) {
+    if (willDeleteSource && !creatorScopedAllowed(sourceAccess, sourceDoc.user_id)) {
       return void res.status(403).json({
         detail: "Only the source document owner can move it into a version.",
       });
@@ -807,7 +808,7 @@ documentsRouter.put(
     if (!doc)
       return void res.status(404).json({ detail: "Document not found" });
     const access = await ensureDocAccess(doc, userId, userEmail, db);
-    if (!access.ok || !access.isOwner)
+    if (!access.ok || access.projectRole !== "owner")
       return void res.status(404).json({ detail: "Document not found" });
 
     const { data: target, error: targetErr } = await db
@@ -956,7 +957,7 @@ documentsRouter.delete(
     if (!doc)
       return void res.status(404).json({ detail: "Document not found" });
     const access = await ensureDocAccess(doc, userId, userEmail, db);
-    if (!access.ok || !access.isOwner)
+    if (!access.ok || access.projectRole !== "owner")
       return void res.status(404).json({ detail: "Document not found" });
 
     const { data: versions, error: versionsErr } = await db

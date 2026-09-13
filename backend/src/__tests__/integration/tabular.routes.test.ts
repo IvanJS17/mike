@@ -147,8 +147,23 @@ vi.mock("../../lib/access", () => ({
     checkProjectAccess: (...args: unknown[]) => checkProjectAccess(...args),
     filterAccessibleDocumentIds: (...args: unknown[]) =>
         filterAccessibleDocumentIds(...args),
-    ensureDocAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
+    ensureDocAccess: vi.fn(async () => ({ ok: true, isCreator: true, orgRole: null, projectRole: "owner" })),
     listAccessibleProjectIds: vi.fn(async () => []),
+    getOrgRole: vi.fn(async () => null),
+    listUserOrgIds: vi.fn(async () => []),
+    getProjectGrantRole: vi.fn(async () => null),
+    resolveContentOrgId: vi.fn(async () => ({ ok: true, orgId: null })),
+    projectHasSharedAudience: vi.fn(async () => false),
+    creatorScopedAllowed: vi.fn(() => true),
+    checkWorkflowAccess: vi.fn(async () => ({ ok: false })),
+    ensureChatAccess: vi.fn(async () => ({ ok: true, isCreator: true, orgRole: null, projectRole: "owner" })),
+    normalizeEmail: (email: unknown) =>
+        typeof email === "string" && email.trim() ? email.trim().toLowerCase() : null,
+    isOrgRole: vi.fn(() => false),
+    isOrgAdmin: vi.fn(() => false),
+    can: vi.fn(() => true),
+    isProjectRole: vi.fn(() => true),
+    ORG_ROLES: ["org_owner", "workspace_admin", "editor", "viewer", "technical_operator"],
 }));
 
 vi.mock("../../lib/userSettings", () => ({
@@ -174,11 +189,13 @@ describe("tabular.routes", () => {
         vi.clearAllMocks();
         resetSupabaseState();
         // Default: caller is the owner with full access.
-        ensureReviewAccess.mockResolvedValue({ ok: true, isOwner: true });
+        ensureReviewAccess.mockResolvedValue({ ok: true, isCreator: true, orgRole: null, projectRole: "owner" });
         checkProjectAccess.mockResolvedValue({
             ok: true,
-            isOwner: true,
-            project: { id: "p1", user_id: "u1", shared_with: null },
+            isCreator: true,
+            orgRole: null,
+            projectRole: "owner",
+            project: { id: "p1", user_id: "u1" },
         });
         // Default: every requested doc is accessible (identity passthrough).
         filterAccessibleDocumentIds.mockImplementation(
@@ -688,7 +705,7 @@ describe("tabular.routes", () => {
                 data: { id: "r1", user_id: "other", project_id: "p1" },
                 error: null,
             };
-            ensureReviewAccess.mockResolvedValue({ ok: true, isOwner: false });
+            ensureReviewAccess.mockResolvedValue({ ok: true, isCreator: false, orgRole: null, projectRole: "editor" });
 
             const res = await request(app)
                 .patch("/tabular-review/r1")

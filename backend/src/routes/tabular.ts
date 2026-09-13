@@ -892,7 +892,7 @@ tabularRouter.get("/:reviewId", requireAuth, async (req, res) => {
     res.json({
         review: {
             ...clientReview,
-            is_owner: access.isOwner,
+            is_owner: access.projectRole === "owner",
             is_running: isReviewGenerationRunning(review),
         },
         cells: (cells ?? []).map((cell) => ({
@@ -1014,7 +1014,7 @@ tabularRouter.patch("/:reviewId", requireAuth, async (req, res) => {
             req.body.document_ids != null ||
             req.body.document_grouping != null ||
             modelUpdateProvided) &&
-        !access.isOwner
+        access.projectRole !== "owner"
     ) {
         return void res.status(403).json({
             detail: "Only the review owner can change review settings",
@@ -1034,7 +1034,7 @@ tabularRouter.patch("/:reviewId", requireAuth, async (req, res) => {
         updates.model = selectedModel.model;
     }
     if (req.body.columns_config != null) {
-        if (!access.isOwner) {
+        if (access.projectRole !== "owner") {
             return void res.status(403).json({
                 detail: "Only the review owner can change columns",
             });
@@ -1061,7 +1061,7 @@ tabularRouter.patch("/:reviewId", requireAuth, async (req, res) => {
         );
     }
     if (sharedWithUpdate !== undefined) {
-        if (!access.isOwner)
+        if (access.projectRole !== "owner")
             return void res
                 .status(403)
                 .json({ detail: "Only the review owner can change sharing" });
@@ -1077,7 +1077,7 @@ tabularRouter.patch("/:reviewId", requireAuth, async (req, res) => {
         updates.shared_with = sharedWithUpdate;
     }
     if (projectIdUpdateProvided) {
-        if (!access.isOwner) {
+        if (access.projectRole !== "owner") {
             return void res.status(403).json({
                 detail: "Only the review owner can move a review",
             });

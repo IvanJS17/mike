@@ -662,7 +662,7 @@ projectsRouter.get("/:projectId", requireAuth, async (req, res) => {
   await attachDocumentOwnerLabels(db, docsTyped);
   res.json({
     ...project,
-    is_owner: access.isOwner,
+    is_owner: access.projectRole === "owner",
     documents: docsTyped,
     folders: folderData ?? [],
   });
@@ -1361,7 +1361,7 @@ projectsRouter.delete(
   const access = await checkProjectAccess(projectId, userId, userEmail, db);
     if (!access.ok)
       return void res.status(404).json({ detail: "Project not found" });
-    if (!access.isOwner)
+    if (access.projectRole !== "owner")
       return void res.status(404).json({ detail: "Project not found" });
 
   const { data: allFolders, error: foldersError } = await db
