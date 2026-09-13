@@ -113,6 +113,37 @@ export const KNOWN_SUPPORTED_MIGRATIONS: Readonly<
     sha256: "c00e534f17d19e5e0e03c1826b562e0b0936effece15f9639af8ffba6f6cca70",
     envelope: { kind: "wrapped", prefix: "-- CourtListener/US research is excluded from the recovered product.\nBEGIN;\n", suffix: "COMMIT;\n" },
   },
+  "20260910_01_recovery_upstream_upload_sessions.sql": {
+    sha256: "12c7362891e00e5d4bb22a18c19d26628f32fa0754a7429139268276ed35d62c",
+    envelope: wrapped(
+        "-- LiTT sync S2 port of upstream 20260828_02_upload_sessions.sql; renamed to the merge-time stem 20260910_01 (recovery series).\n" +
+        "-- Body verbatim except the trailing notify pgrst statement, moved inside the transaction so the supported-upgrade\n" +
+        "-- driver path (single encompassing transaction) keeps the reload signal.\n" +
+        "-- Migration date: 2026-08-28\n" +
+        "-- Direct-upload session schema: concurrent sessions, per-file processing jobs,\n" +
+        "-- configurable creation limits, worker audit attribution, and a cross-replica\n" +
+        "-- per-user claim cap.\n" +
+        "--\n" +
+        "-- This file consolidates the branch's two earlier drafts (20260824_01 and\n" +
+        "-- 20260828_01) into a single transactional migration dated at the tip of the\n" +
+        "-- migration order. The split versions had two deployment hazards:\n" +
+        "--   1. 20260824_01 sorted BEFORE six migrations already released on main, so\n" +
+        "--      an existing deployment (which applies only files newer than its\n" +
+        "--      recorded version, in filename order) would skip the table-creating\n" +
+        "--      file entirely and then fail on the index below.\n" +
+        "--   2. 20260828_01 was non-transactional and dropped claim_upload_processing_job\n" +
+        "--      before recreating it \u2014 a failure between the two statements would leave\n" +
+        "--      a deployment with no claim function at all.\n" +
+        "-- NOTE FOR MERGE: if further migrations land on main before this branch\n" +
+        "-- merges, this file must be renamed past them \u2014 the filename is a position in\n" +
+        "-- a global order that main owns, assigned at merge time, not authorship time.\n" +
+        "begin;\n",
+    ),
+  },
+  "20260910_02_recovery_upstream_db_jobs.sql": {
+    sha256: "4d615b6b8e016c34c443b10ddd41b95fc59e2a74f70276c867558696f8dfd4fd",
+    envelope: { kind: "bare" },
+  },
 };
 
 function sha256(source: string): string {
