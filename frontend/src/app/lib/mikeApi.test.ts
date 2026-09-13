@@ -1500,10 +1500,18 @@ describe("upload session wrappers", () => {
         const transport = (
             vi.mocked(uploadFilesWithSessionCore).mock.calls.at(-1)?.[0] as {
                 transport: {
+                    fetchStorage: typeof fetch;
                     shouldRetryControlRequest: (error: unknown) => boolean;
                 };
             }
         ).transport;
+
+        // The storage transport forwards straight to the global fetch.
+        fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
+        await transport.fetchStorage("/storage/key", { method: "PUT" });
+        expect(fetchMock).toHaveBeenCalledWith("/storage/key", {
+            method: "PUT",
+        });
 
         // A typed API error with a non-retryable status stops the loop …
         expect(
