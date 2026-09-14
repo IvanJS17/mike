@@ -400,7 +400,13 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     });
 
     try {
-        write(`data: ${JSON.stringify({ type: "chat_id", chatId })}\n\n`);
+        write(
+            `data: ${JSON.stringify({
+                type: "chat_id",
+                chatId,
+                ...(assistantMessageId ? { assistantMessageId } : {}),
+            })}\n\n`,
+        );
 
         const shouldGenerateTitle =
             !chatTitle && !!lastUser?.content && !askInputsResponse;
@@ -478,15 +484,32 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
             );
             completedTurnPersisted = appended;
         } else {
-            await db.from("chat_messages").insert({
-                id: assistantMessageId,
-                chat_id: chatId,
-                role: "assistant",
-                content: persistedEvents.length ? persistedEvents : null,
-                citations: citations.length ? citations : null,
-                author_user_id: userId,
-                memory_input_message_id: inputMessageId,
-            });
+            const { error: saveError } = await db
+                .from("chat_messages")
+                .insert({
+                    id: assistantMessageId,
+                    chat_id: chatId,
+                    role: "assistant",
+                    content: persistedEvents.length ? persistedEvents : null,
+                    citations: citations.length ? citations : null,
+                    author_user_id: userId,
+                    memory_input_message_id: inputMessageId,
+                });
+            if (saveError) {
+                console.error(
+                    "[project-chat/stream] failed to save assistant response",
+                    saveError,
+                );
+                write(
+                    `data: ${JSON.stringify({
+                        type: "error",
+                        message:
+                            "The response was generated but could not be saved.",
+                    })}\n\n`,
+                );
+                write("data: [DONE]\n\n");
+                return;
+            }
         }
 
         await titlePromise;

@@ -36,7 +36,7 @@ Per-area statement coverage from `npm run test:coverage`:
 | `lib/docxTrackedChanges.ts` | 89 | ✓ |
 | `lib/downloadTokens.ts` | 87 | ✓ |
 | `lib/access.ts` | 76 | ✓ |
-| `lib/storage.ts`, `lib/upload.ts` | 58 | partial |
+| `lib/storage.ts` | 58 | partial |
 | `lib/workflowCatalog.ts` | 69 | partial |
 | `lib/workflowCatalogSource.ts`, `lib/workflowCatalogSync.ts` | 74–96 | ✓ |
 | `lib/userDataExport.ts` | 43 | partial |
@@ -66,8 +66,6 @@ Size is a rough guess: S ≈ an hour, M ≈ an afternoon.
 - [ ] `lib/userSettings.ts` — title/tabular model resolution from which API
       keys a user has; reuse the Supabase mock pattern from
       `userLookup.test.ts`. (S)
-- [ ] `lib/upload.ts` — multer wrapper: assert LIMIT_FILE_SIZE maps to a 413
-      with the right message and other errors pass through. (S)
 - [ ] `lib/officeText.ts` — office XML text extraction; build a tiny in-memory
       zip fixture with JSZip and assert extracted/decoded text. (S)
 - [ ] `lib/chat/tools/toolSchemas.ts` — assert every tool schema has a name,
