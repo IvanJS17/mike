@@ -5,7 +5,22 @@
 > ownership together with the five canonical control documents. It does not by
 > itself authorize a product writer, staging, external-provider contact or production.
 
-## Current execution reconciliation — 2026-09-09
+## Current execution reconciliation — 2026-09-14
+
+**Upstream sync window closed; pin advanced.** The bounded window opened against
+`1b58c7aa0520ff185c44698cea1a9e0c96af50ab` is closed: all 118 upstream commits
+were classified and integrated or explicitly deferred through slices S1–S7
+(PRs #22–#44), covering dependency majors (express 5, zod 4, TypeScript 7 /
+6-native, vitest 5, react 19.2.8), the upstream upload-sessions / dbq / recovery
+core surfaces, scoped memory, and the security/CI hardening batch. The upstream
+pin advances to `7e3607e765e199f824808e1598cc44b3f99cd690` (tree
+`f29d0ce404dede9e6ec9a2b509f7579f01757306`); the integration result is main
+`951c834f7c4dce1e880ade878a795019fb840c2e` (tree
+`d0ec077ec361e4a0bc11a3a1910d2ae889ec563f`), with a local G5-style
+re-verification receipt in the project forensics archive. Residual items
+(transparent tables, curation receipt, attribution fallback) remain
+product-phase proposals pending owner authorization. The 2026-09-09 paragraph
+below is retained as history.
 
 The 25-row decisions and pinned upstream input below remain authoritative. The
 coordinator scaffold, A–F ports and G implementation now exist on the recovery

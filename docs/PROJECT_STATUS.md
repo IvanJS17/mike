@@ -3,7 +3,7 @@
 > Canonical operational status for this fork. Kanban cards are execution receipts,
 > not the project roadmap or source of truth.
 
-**Last reconciled:** 2026-09-09<br>
+**Last reconciled:** 2026-09-14<br>
 **Repository:** `IvanJS17/mike`<br>
 **Upstream:** `Open-Legal-Products/mike`
 
@@ -19,6 +19,15 @@ The current evidence and the 16 acceptance criteria are recorded in
 [`PHASE3_RECOVERY_DECISION.md`](PHASE3_RECOVERY_DECISION.md). That package separates
 code/test proof from the governing exact-tree review and publication receipts.
 A historical PASS or a successful build does not approve this candidate.
+
+**Sync window 2026-09 closed (2026-09-14).** The upstream pin advanced from
+`1b58c7aa…` to `7e3607e7…` after slicing the 118-commit batch (S1–S7, PRs
+#22–#44: dependency majors, upstream upload-sessions/dbq/recovery-core surfaces,
+scoped memory, security/CI hardening). Current main carries the integrated result
+`951c834f7c4dce1e880ade878a795019fb840c2e` (tree `d0ec077e…`) with a local
+G5-style re-verification receipt; product-phase candidates (transparent tables,
+curation receipt/egress, attribution fallback) remain proposals pending owner
+authorization. The Phase 3 narrative below is retained as history.
 
 Authorized close boundary: exact-snapshot Reviewer PASS, commit, recovery-only
 push and independent remote readback. No new PR, merge, remote deployment, real
