@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
@@ -22,8 +22,9 @@ import { pathToFileURL } from "node:url";
 // worker as a *grandchild*, so killing the launcher left the worker running
 // forever (adopted by the init system, still polling). spawnWorker() spawns
 // the worker in its own process group, stopWorker() always signals the whole
-// group, waits for termination and escalates SIGTERM -> SIGKILL, and each
-// test asserts no descendant survived it.
+// group, waits for termination and escalates SIGTERM -> SIGKILL, and the
+// afterEach net below (which vitest runs even after a failed or timed-out
+// test) terminates anything a test spawned and proves no descendant survived.
 const backendRoot = path.resolve(__dirname, "../..");
 const ALIVE_AFTER_MS = 1_500;
 const EXIT_WAIT_MS = 5_000;
@@ -38,12 +39,16 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const hasExited = (child: ChildProcess) =>
     child.exitCode !== null || child.signalCode !== null;
 
+const activeWorkers = new Set<ChildProcess>();
+
 function spawnWorker(env: NodeJS.ProcessEnv, cwd: string): ChildProcess {
-    return spawn(
+    const child = spawn(
         process.execPath,
         ["--require", TSX_PREFLIGHT, "--import", TSX_LOADER, WORKER_ENTRYPOINT],
         { cwd, stdio: "ignore", env, detached: POSIX },
     );
+    activeWorkers.add(child);
+    return child;
 }
 
 function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
@@ -84,7 +89,7 @@ async function stopWorker(child: ChildProcess): Promise<void> {
     }
     // Sweep: if anything else from the group outlived the worker (a stray
     // subprocess, a future launcher's child), it must not survive the test
-    // either; descendantsGone() below then proves the group is empty.
+    // either; descendantsGone() then proves the group is empty.
     signalGroup(child, "SIGKILL");
 }
 
@@ -110,6 +115,21 @@ async function descendantsGone(child: ChildProcess): Promise<boolean> {
         await delay(50);
     }
 }
+
+// Safety net: vitest runs afterEach even when the test failed, threw or hit
+// its timeout, so no worker can outlive a test — and the empty-group check
+// runs on red runs too, not only on green ones.
+afterEach(async () => {
+    const children = [...activeWorkers];
+    activeWorkers.clear();
+    for (const child of children) {
+        await stopWorker(child);
+        expect(
+            await descendantsGone(child),
+            `worker ${child.pid} left descendants behind`,
+        ).toBe(true);
+    }
+});
 
 describe("standalone worker entrypoint", () => {
     it("stays alive in Postgres mode instead of exiting immediately", async () => {
@@ -140,7 +160,6 @@ describe("standalone worker entrypoint", () => {
         } finally {
             await stopWorker(child);
         }
-        expect(await descendantsGone(child), "the worker left descendants behind").toBe(true);
     }, 30_000);
 
     // Bare-metal deployments configure the backend through backend/.env, not
@@ -191,6 +210,5 @@ describe("standalone worker entrypoint", () => {
                 rmSync(workDir, { recursive: true, force: true });
             }
         }
-        expect(await descendantsGone(child), "the worker left descendants behind").toBe(true);
     }, 30_000);
 });
