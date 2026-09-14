@@ -23,6 +23,9 @@ const { runLLMStream, dbInserts, dbUpdates, dbRpcCalls, dbControl } =
         dbRpcCalls: [] as { name: string; args: unknown }[],
         dbControl: {
             failAssistantReservation: false,
+            // When true, the user-message INSERT into chat_messages errors, so
+            // the route must fail before fencing or streaming the turn.
+            failUserMessageInsert: false,
             terminalUpdateFailures: 0,
             terminalUpdateAttempts: 0,
             terminalUpdateGate: null as Promise<void> | null,
@@ -35,9 +38,16 @@ const { runLLMStream, dbInserts, dbUpdates, dbRpcCalls, dbControl } =
             // default owned-by-u1 row, so tests can present a conversation
             // shared by another user.
             chatRow: null as Record<string, unknown> | null,
+            // When set, selects on `chat_access_grants` resolve to these rows,
+            // so a standalone chat owned by the caller can still be a shared
+            // audience through a direct content grant.
+            chatGrantRows: null as Record<string, unknown>[] | null,
             // When true, begin_memory_conversation_turn fails at the DB,
             // proving the route fails closed before streaming.
             failMemoryFence: false,
+            // Overrides the append_chat_ask_inputs_response RPC result so the
+            // route's forbidden/stale branches can be exercised in isolation.
+            appendAskInputsResult: null as string | null,
             // When true, selects on `projects` resolve to no row, so every
             // project verdict in the request comes back as "no access" (the
             // member was removed from the project).
@@ -74,7 +84,9 @@ function makeQuery(table: string) {
                         },
                         error: null,
                     }
-                  : {
+                  : table === "chat_access_grants" && dbControl.chatGrantRows
+                    ? { data: dbControl.chatGrantRows, error: null }
+                    : {
                         data: {
                             id: "chat-1",
                             title: null,
@@ -141,6 +153,16 @@ function makeQuery(table: string) {
             result = {
                 data: null,
                 error: { message: "assistant reservation failed" },
+            };
+        }
+        if (
+            dbControl.failUserMessageInsert &&
+            table === "chat_messages" &&
+            (value as { role?: unknown }).role === "user"
+        ) {
+            result = {
+                data: null,
+                error: { message: "user message insert failed" },
             };
         }
         return q;
@@ -248,6 +270,15 @@ function mockSupabase() {
                     error: { message: "memory activity could not be fenced" },
                 });
             }
+            if (
+                name === "append_chat_ask_inputs_response" &&
+                dbControl.appendAskInputsResult
+            ) {
+                return Promise.resolve({
+                    data: dbControl.appendAskInputsResult,
+                    error: null,
+                });
+            }
             return Promise.resolve({
                 data: name.startsWith("append_chat_") ? "appended" : null,
                 error: null,
@@ -350,6 +381,37 @@ function findAssistantUpdate() {
     return dbUpdates.find(({ table }) => table === "chat_messages");
 }
 
+// A durable assistant turn that paused on one choice question, ready for an
+// ask-inputs continuation. Used by the C10 append-result tests.
+function pendingAskInputsAssistantRows() {
+    return [
+        {
+            id: "assistant-real",
+            chat_id: "chat-1",
+            role: "assistant",
+            content: [
+                {
+                    type: "ask_inputs",
+                    event_id: "ask-1",
+                    items: [
+                        {
+                            id: "choice-1",
+                            kind: "choice",
+                            question: "Continue?",
+                            options: [{ value: "Yes" }, { value: "No" }],
+                            allow_other: false,
+                            other_label: "Other",
+                        },
+                    ],
+                },
+            ],
+            citations: null,
+            author_user_id: "u1",
+            created_at: "2026-01-01T00:00:00Z",
+        },
+    ];
+}
+
 describe("POST /chat — streaming endpoint", () => {
     beforeEach(() => {
         vi.clearAllMocks();
@@ -357,13 +419,16 @@ describe("POST /chat — streaming endpoint", () => {
         dbUpdates.length = 0;
         dbRpcCalls.length = 0;
         dbControl.failAssistantReservation = false;
+        dbControl.failUserMessageInsert = false;
         dbControl.terminalUpdateFailures = 0;
         dbControl.terminalUpdateAttempts = 0;
         dbControl.terminalUpdateGate = null;
         dbControl.wordChatMissing = false;
         dbControl.assistantMessageRows = null;
         dbControl.chatRow = null;
+        dbControl.chatGrantRows = null;
         dbControl.failMemoryFence = false;
+        dbControl.appendAskInputsResult = null;
         dbControl.projectMissing = false;
         dbControl.projectOwnerId = null;
         dbControl.projectGrantRole = null;
@@ -793,6 +858,32 @@ describe("POST /chat — streaming endpoint", () => {
         errorSpy.mockRestore();
     });
 
+    it("stops before streaming or scheduling when the user message is not durable", async () => {
+        dbControl.failUserMessageInsert = true;
+        const errorSpy = vi
+            .spyOn(console, "error")
+            .mockImplementation(() => {});
+
+        const res = await request(app)
+            .post("/chat")
+            .set("Authorization", "Bearer test")
+            .send(VALID_BODY);
+
+        expect(res.status).toBe(500);
+        expect(runLLMStream).not.toHaveBeenCalled();
+        expect(
+            dbRpcCalls.some(
+                ({ name }) => name === "begin_memory_conversation_turn",
+            ),
+        ).toBe(false);
+        expect(
+            dbRpcCalls.some(
+                ({ name }) => name === "schedule_memory_consolidation",
+            ),
+        ).toBe(false);
+        errorSpy.mockRestore();
+    });
+
     it("fails before advertising SSE metadata when the assistant row cannot be reserved", async () => {
         dbControl.failAssistantReservation = true;
         const errorSpy = vi
@@ -1043,6 +1134,105 @@ describe("POST /chat — streaming endpoint", () => {
         ).toBe(false);
     });
 
+    it("returns 403 when the append RPC refuses an ask-input continuation", async () => {
+        dbControl.assistantMessageRows = pendingAskInputsAssistantRows();
+        dbControl.appendAskInputsResult = "forbidden";
+
+        const res = await request(app)
+            .post("/chat")
+            .set("Authorization", "Bearer test")
+            .send({
+                ...VALID_BODY,
+                chat_id: "chat-1",
+                ask_inputs_response: {
+                    assistant_message_id: "assistant-real",
+                    ask_event_id: "ask-1",
+                    responses: [
+                        {
+                            id: "choice-1",
+                            kind: "choice",
+                            question: "Continue?",
+                            answer: "Yes",
+                        },
+                    ],
+                },
+            });
+
+        expect(res.status).toBe(403);
+        expect(res.body.detail).toBe(
+            "Only the user who started this turn can answer these questions",
+        );
+        expect(runLLMStream).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 when the answers do not match the pending questions", async () => {
+        dbControl.assistantMessageRows = pendingAskInputsAssistantRows();
+
+        const res = await request(app)
+            .post("/chat")
+            .set("Authorization", "Bearer test")
+            .send({
+                ...VALID_BODY,
+                chat_id: "chat-1",
+                ask_inputs_response: {
+                    assistant_message_id: "assistant-real",
+                    ask_event_id: "ask-1",
+                    responses: [
+                        {
+                            id: "choice-1",
+                            kind: "choice",
+                            question: "Continue?",
+                            answer: "Maybe",
+                        },
+                    ],
+                },
+            });
+
+        expect(res.status).toBe(400);
+        expect(res.body.detail).toBe(
+            "The answers do not match the pending questions",
+        );
+        expect(
+            dbRpcCalls.some(
+                ({ name }) => name === "append_chat_ask_inputs_response",
+            ),
+        ).toBe(false);
+        expect(runLLMStream).not.toHaveBeenCalled();
+    });
+
+    it("returns 409 when the append RPC reports the questions are stale", async () => {
+        dbControl.assistantMessageRows = pendingAskInputsAssistantRows();
+        dbControl.appendAskInputsResult = "stale";
+
+        const res = await request(app)
+            .post("/chat")
+            .set("Authorization", "Bearer test")
+            .send({
+                ...VALID_BODY,
+                chat_id: "chat-1",
+                ask_inputs_response: {
+                    assistant_message_id: "assistant-real",
+                    ask_event_id: "ask-1",
+                    responses: [
+                        {
+                            id: "choice-1",
+                            kind: "choice",
+                            question: "Continue?",
+                            answer: "Yes",
+                        },
+                    ],
+                },
+            });
+
+        expect(res.status).toBe(409);
+        expect(res.body).toEqual({
+            code: "ask_inputs_stale",
+            detail:
+                "These questions have already been answered or are no longer active",
+        });
+        expect(runLLMStream).not.toHaveBeenCalled();
+    });
+
     it("returns 400 on an empty messages array (never starts a stream)", async () => {
         const res = await request(app)
             .post("/chat")
@@ -1217,6 +1407,27 @@ describe("POST /chat — streaming endpoint", () => {
         );
     });
 
+    it("marks a standalone chat with a direct grant as shared memory context", async () => {
+        // The creator keeps owner standing, but a chat_access_grants row means
+        // someone else can read the conversation. App memory must stay out even
+        // though the active actor is the author.
+        dbControl.chatGrantRows = [{ id: "cg-1", chat_id: "chat-1" }];
+
+        const res = await request(app)
+            .post("/chat")
+            .set("Authorization", "Bearer test")
+            .send({ ...VALID_BODY, chat_id: "chat-1" });
+
+        expect(res.status).toBe(200);
+        expect(runLLMStream).toHaveBeenCalledWith(
+            expect.objectContaining({
+                includeMemory: true,
+                memorySharedAudience: true,
+                memoryProjectId: null,
+            }),
+        );
+    });
+
     it("rejects a project chat once its author lost access to the project", async () => {
         // Revoking a member's project access must also remove them from the
         // project's conversations. Current project members still read this
@@ -1339,6 +1550,11 @@ describe("POST /chat — streaming endpoint", () => {
         expect(res.status).toBe(500);
         expect(res.body.detail).toBe("Something went wrong. Please try again.");
         expect(runLLMStream).not.toHaveBeenCalled();
+        expect(
+            dbRpcCalls.some(
+                ({ name }) => name === "schedule_memory_consolidation",
+            ),
+        ).toBe(false);
         errorSpy.mockRestore();
     });
 });

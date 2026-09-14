@@ -6,25 +6,42 @@ const {
     checkProjectAccess,
     buildMessages,
     buildProjectDocContext,
+    beginMemoryConversationTurn,
+    releaseMemoryConversationTurn,
+    scheduleMemoryConsolidation,
+    dbInserts,
 } = vi.hoisted(() => ({
     runLLMStream: vi.fn(),
     checkProjectAccess: vi.fn(),
     buildMessages: vi.fn(),
     buildProjectDocContext: vi.fn(),
+    beginMemoryConversationTurn: vi.fn().mockResolvedValue({
+        activityId: "activity-1",
+    }),
+    releaseMemoryConversationTurn: vi.fn().mockResolvedValue(undefined),
+    scheduleMemoryConsolidation: vi.fn().mockResolvedValue({
+        job_id: "job-1",
+        generation: 1,
+    }),
+    dbInserts: [] as { table: string; value: unknown }[],
 }));
 
-function makeQuery() {
+function makeQuery(table: string) {
     const result = {
         data: { id: "chat-1", title: null, project_id: "p1" },
         error: null,
     };
     const q: Record<string, unknown> = {};
     const chain = [
-        "select", "insert", "update", "delete", "upsert",
+        "select", "update", "delete", "upsert",
         "eq", "neq", "in", "is", "or", "lt", "gt", "gte", "lte",
         "filter", "order", "limit", "range", "contains",
     ];
     for (const m of chain) q[m] = vi.fn(() => q);
+    q.insert = vi.fn((value: unknown) => {
+        dbInserts.push({ table, value });
+        return q;
+    });
     q.single = vi.fn(() => Promise.resolve(result));
     q.maybeSingle = vi.fn(() => Promise.resolve(result));
     q.then = (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
@@ -34,7 +51,7 @@ function makeQuery() {
 
 function mockSupabase() {
     return {
-        from: vi.fn(() => makeQuery()),
+        from: vi.fn((table: string) => makeQuery(table)),
         rpc: vi.fn(() => Promise.resolve({ data: null, error: null })),
         auth: {
             getUser: () =>
@@ -117,6 +134,15 @@ vi.mock("../../lib/access", () => ({
     ORG_ROLES: ["org_owner", "workspace_admin", "editor", "viewer", "technical_operator"],
 }));
 
+vi.mock("../../lib/memory/schedule", () => ({
+    beginMemoryConversationTurn: (...args: unknown[]) =>
+        beginMemoryConversationTurn(...args),
+    releaseMemoryConversationTurn: (...args: unknown[]) =>
+        releaseMemoryConversationTurn(...args),
+    scheduleMemoryConsolidation: (...args: unknown[]) =>
+        scheduleMemoryConsolidation(...args),
+}));
+
 import { app } from "../../app";
 import { spotlight } from "../../lib/chat";
 import { createServerSupabase } from "../../lib/supabase";
@@ -129,6 +155,7 @@ const VALID_BODY = {
 describe("POST /projects/:projectId/chat", () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        dbInserts.length = 0;
         buildMessages.mockReturnValue([]);
         buildProjectDocContext.mockResolvedValue({
             docIndex: {},
@@ -219,11 +246,55 @@ describe("POST /projects/:projectId/chat", () => {
         expect(res.text).toContain('"type":"chat_title"');
         expect(runLLMStream).toHaveBeenCalledTimes(1);
         expect(runLLMStream).toHaveBeenCalledWith(
-            expect.objectContaining({ emitDone: false }),
+            expect.objectContaining({
+                emitDone: false,
+                memorySharedAudience: false,
+            }),
         );
         const systemPromptExtra = buildMessages.mock.calls[0]?.[2] as string;
         expect(systemPromptExtra).toContain("USER PERSONALISATION");
         expect(systemPromptExtra).toContain('"organisation": "Acme LLP"');
+        expect(beginMemoryConversationTurn).toHaveBeenCalledWith({
+            db: expect.anything(),
+            surface: "chat",
+            conversationId: "chat-1",
+            actorUserId: "u1",
+        });
+        const userInsert = dbInserts.find(
+            ({ table, value }) =>
+                table === "chat_messages" &&
+                (value as { role?: unknown }).role === "user",
+        );
+        const assistantInsert = dbInserts.find(
+            ({ table, value }) =>
+                table === "chat_messages" &&
+                (value as { role?: unknown }).role === "assistant",
+        );
+        const inputMessageId = (userInsert?.value as { id?: string } | undefined)
+            ?.id;
+        expect(inputMessageId).toMatch(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+        );
+        expect(assistantInsert?.value).toMatchObject({
+            author_user_id: "u1",
+            memory_input_message_id: inputMessageId,
+        });
+        expect(
+            beginMemoryConversationTurn.mock.invocationCallOrder[0],
+        ).toBeLessThan(buildProjectDocContext.mock.invocationCallOrder[0]);
+        expect(scheduleMemoryConsolidation).toHaveBeenCalledWith({
+            db: expect.anything(),
+            surface: "chat",
+            conversationId: "chat-1",
+            actorUserId: "u1",
+            projectId: "p1",
+            turnId: expect.stringMatching(
+                /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+            ),
+            turn: { activityId: "activity-1" },
+        });
+        expect(scheduleMemoryConsolidation).toHaveBeenCalledTimes(1);
+        expect(releaseMemoryConversationTurn).not.toHaveBeenCalled();
     });
 
     it("uses the shared last-selected model when a new project chat omits model", async () => {
@@ -441,5 +512,12 @@ describe("POST /projects/:projectId/chat", () => {
         expect(res.status).toBe(200);
         expect(res.text).toContain('"type":"error"');
         expect(res.text).toContain("[DONE]");
+        expect(releaseMemoryConversationTurn).toHaveBeenCalledWith({
+            db: expect.anything(),
+            surface: "chat",
+            conversationId: "chat-1",
+            turn: { activityId: "activity-1" },
+        });
+        expect(scheduleMemoryConsolidation).not.toHaveBeenCalled();
     });
 });
