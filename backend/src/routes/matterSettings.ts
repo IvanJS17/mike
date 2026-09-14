@@ -113,10 +113,10 @@ async function loadMatter(
 function requestIds(
   req: Request,
 ): { projectId: string; matterId: string } | null {
-  const projectId = req.params.projectId;
-  const matterId = req.params.matterId;
+  const projectId = String(req.params.projectId);
+  const matterId = String(req.params.matterId);
   if (!UUID_RE.test(projectId) || !UUID_RE.test(matterId)) return null;
-  return { projectId: String(projectId), matterId: String(matterId) };
+  return { projectId, matterId };
 }
 
 async function authorize(
