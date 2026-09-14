@@ -323,6 +323,14 @@ describe("chat request validation", () => {
             },
             "ask_inputs_response.responses[0].filenames[1] must be a non-empty string",
         ],
+        [
+            { ...ASK_RESPONSE_IDS, assistant_message_id: undefined },
+            "ask_inputs_response.assistant_message_id must be a non-empty string",
+        ],
+        [
+            { ...ASK_RESPONSE_IDS, ask_event_id: undefined },
+            "ask_inputs_response.ask_event_id must be a non-empty string",
+        ],
     ])("rejects an invalid ask-input response", (value, detail) => {
         expect(parseOptionalAskInputsResponse(value)).toEqual({
             ok: false,

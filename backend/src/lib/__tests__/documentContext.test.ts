@@ -289,6 +289,40 @@ describe("null-content assistant reservations", () => {
         expect(enriched).toEqual(messages);
     });
 
+    it("ends skipped ask-input context with the no-repeat placeholder instruction", async () => {
+        const { db } = makeFakeMessagesDb([
+            realAssistantRow([
+                { type: "ask_inputs", items: [] },
+                {
+                    type: "ask_inputs_response",
+                    responses: [
+                        {
+                            id: "law",
+                            kind: "text",
+                            question: "Governing law?",
+                            skipped: true,
+                        },
+                    ],
+                },
+            ]),
+        ]);
+
+        const enriched = await enrichWithPriorEvents(
+            [
+                { role: "assistant", content: "I need your input." },
+                { role: "user", content: "I skipped governing law." },
+            ],
+            "chat-1",
+            db,
+            {},
+        );
+
+        expect(enriched[0].content).toContain('user skipped: "Governing law?"');
+        expect(enriched[0].content).toMatch(
+            /Instruction: do not ask for any skipped input again.*placeholder in square brackets/,
+        );
+    });
+
     it("ask-input responses append to their exact parent, never a reservation", async () => {
         const rows = [
             realAssistantRow([
