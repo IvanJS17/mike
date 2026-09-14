@@ -123,6 +123,15 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     );
     if (!projectAccess.ok)
         return void res.status(404).json({ detail: "Project not found" });
+    // Writing to a project chat is an edit to the project: a viewer may reach
+    // the project and read its chats, but POSTing would create or append to a
+    // chat. This verdict precedes every side effect — in particular the
+    // model/reasoning UPDATE on an existing chats row and the new-chat INSERT —
+    // so a refused caller writes nothing.
+    if (!can(projectAccess.projectRole, "content.edit"))
+        return void res.status(403).json({
+            detail: "You do not have permission to write in this project.",
+        });
     let memorySharedAudience = await projectHasSharedAudience(
         db,
         projectId,
