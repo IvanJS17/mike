@@ -20,6 +20,7 @@ const {
     deleteAllUserTabularReviews,
     deleteUserAccountData,
     deleteUserProjects,
+    deleteUserPrivateMemories,
     buildUserAccountExport,
     buildUserChatsExport,
     buildUserTabularReviewsExport,
@@ -35,6 +36,7 @@ const {
     deleteAllUserTabularReviews: vi.fn(),
     deleteUserAccountData: vi.fn(),
     deleteUserProjects: vi.fn(),
+    deleteUserPrivateMemories: vi.fn(),
     buildUserAccountExport: vi.fn(),
     buildUserChatsExport: vi.fn(),
     buildUserTabularReviewsExport: vi.fn(),
@@ -201,6 +203,11 @@ vi.mock("../../lib/memory/archive", () => ({
     buildMemoryArchive: (...args: unknown[]) => buildMemoryArchive(...args),
 }));
 
+vi.mock("../../lib/memory/bulk", () => ({
+    deleteUserPrivateMemories: (...args: unknown[]) =>
+        deleteUserPrivateMemories(...args),
+}));
+
 import { app } from "../../app";
 
 const AUTH = ["Authorization", "Bearer test"] as const;
@@ -222,6 +229,7 @@ function profileRow(overrides: Record<string, unknown> = {}) {
         tier: "Pro",
         title_model: null,
         tabular_model: "gemini-3-flash-preview",
+        memory_curator_model: null,
         last_selected_chat_model: null,
         mfa_on_login: false,
         legal_research_us: true,
@@ -395,6 +403,34 @@ describe("user.routes", () => {
             });
         });
 
+        it("keeps existing preferences before the memory curator migration", async () => {
+            const preMigrationRow = profileRow({
+                title_model: "gpt-5.4-mini",
+            });
+            delete (preMigrationRow as Record<string, unknown>)
+                .memory_curator_model;
+            supabaseState.tables.user_profiles = [
+                {
+                    data: null,
+                    error: {
+                        code: "42703",
+                        message:
+                            "column user_profiles.memory_curator_model does not exist",
+                    },
+                },
+                { data: preMigrationRow, error: null },
+            ];
+
+            const res = await request(app)
+                .get("/user/profile")
+                .set(...AUTH);
+
+            expect(res.status).toBe(200);
+            expect(res.body.titleModel).toBe("gpt-5.4-mini");
+            expect(res.body.memoryCuratorModel).toBeNull();
+            expect(res.body.projectMemoryDefault).toBe(true);
+        });
+
         it("keeps live onboarding columns when only migration 02 is missing", async () => {
             // password_set_at (20260821_02) missing must NOT drop the
             // migration-01 columns that DO exist — otherwise a new user on
@@ -468,6 +504,36 @@ describe("user.routes", () => {
 
             expect(res.status).toBe(400);
             expect(res.body.detail).toMatch(/darkMode must be a boolean/);
+        });
+
+        it("persists and returns the project memory default", async () => {
+            supabaseState.tables.user_profiles = {
+                data: profileRow({ project_memory_default: false }),
+                error: null,
+            };
+
+            const res = await request(app)
+                .patch("/user/profile")
+                .set(...AUTH)
+                .send({ projectMemoryDefault: false });
+
+            expect(res.status).toBe(200);
+            expect(res.body.projectMemoryDefault).toBe(false);
+            expect(supabaseState.updates.user_profiles).toContainEqual(
+                expect.objectContaining({ project_memory_default: false }),
+            );
+        });
+
+        it("rejects a non-boolean projectMemoryDefault value", async () => {
+            const res = await request(app)
+                .patch("/user/profile")
+                .set(...AUTH)
+                .send({ projectMemoryDefault: "yes" });
+
+            expect(res.status).toBe(400);
+            expect(res.body.detail).toMatch(
+                /projectMemoryDefault must be a boolean/,
+            );
         });
     });
 
@@ -684,6 +750,36 @@ describe("user.routes", () => {
             expect(res.body.detail).toBe(
                 "quickActionsVisible must be a boolean",
             );
+        });
+
+        it("persists and returns the memory curator model", async () => {
+            supabaseState.tables.user_profiles = {
+                data: profileRow({ memory_curator_model: "gpt-5.4-mini" }),
+                error: null,
+            };
+
+            const res = await request(app)
+                .patch("/user/profile")
+                .set(...AUTH)
+                .send({ memoryCuratorModel: "gpt-5.4-mini" });
+
+            expect(res.status).toBe(200);
+            expect(res.body.memoryCuratorModel).toBe("gpt-5.4-mini");
+            expect(supabaseState.updates.user_profiles).toContainEqual(
+                expect.objectContaining({
+                    memory_curator_model: "gpt-5.4-mini",
+                }),
+            );
+        });
+
+        it("rejects an unsupported memory curator model", async () => {
+            const res = await request(app)
+                .patch("/user/profile")
+                .set(...AUTH)
+                .send({ memoryCuratorModel: "unknown-model" });
+
+            expect(res.status).toBe(400);
+            expect(res.body.detail).toBe("Unsupported memoryCuratorModel");
         });
 
         it("allows personalisation fields to be cleared", async () => {
@@ -1060,6 +1156,18 @@ describe("user.routes", () => {
             );
         });
 
+        it("DELETE /user/memories wipes app and private-project memory", async () => {
+            const res = await request(app)
+                .delete("/user/memories")
+                .set(...AUTH);
+
+            expect(res.status).toBe(204);
+            expect(deleteUserPrivateMemories).toHaveBeenCalledWith(
+                expect.anything(),
+                "u1",
+            );
+        });
+
         it("DELETE /user/account purges data then deletes the auth user (204)", async () => {
             const res = await request(app)
                 .delete("/user/account")
@@ -1106,6 +1214,18 @@ describe("user.routes", () => {
             expect(res.status).toBe(403);
             expect(res.body.code).toBe("mfa_verification_required");
             expect(deleteUserAccountData).not.toHaveBeenCalled();
+        });
+
+        it("DELETE /user/memories is rejected when MFA is unsatisfied", async () => {
+            requireMfaIfEnrolled.mockImplementation(rejectMfa);
+
+            const res = await request(app)
+                .delete("/user/memories")
+                .set(...AUTH);
+
+            expect(res.status).toBe(403);
+            expect(res.body.code).toBe("mfa_verification_required");
+            expect(deleteUserPrivateMemories).not.toHaveBeenCalled();
         });
     });
 

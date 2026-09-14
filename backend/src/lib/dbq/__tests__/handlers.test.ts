@@ -36,6 +36,13 @@ vi.mock("../../auditExport", async (importOriginal) => {
     };
 });
 
+const buildMemoryArchive = vi.fn(async (..._a: unknown[]) =>
+    Buffer.from("memory-zip"),
+);
+vi.mock("../../memory/archive", () => ({
+    buildMemoryArchive: (...a: unknown[]) => buildMemoryArchive(...a),
+}));
+
 const ACTIVE_VERSION = {
     id: "v1",
     storage_path: "docs/d1/v1.docx",
@@ -173,6 +180,7 @@ beforeEach(() => {
     buildAuditCsv
         .mockReset()
         .mockResolvedValue("created_at,user\n2026-01-01,a@b.test");
+    buildMemoryArchive.mockReset().mockResolvedValue(Buffer.from("memory-zip"));
     ensureDocAccess.mockReset().mockResolvedValue({ ok: true });
     loadActiveVersion.mockReset().mockResolvedValue(ACTIVE_VERSION);
 });
@@ -190,6 +198,12 @@ describe("handleAccountDelete", () => {
         // jobs by actor), all excluding the running job's own row.
         expect(db.deletes).toHaveLength(3);
         for (const d of db.deletes) expect(d["neq:id"]).toBe("job-1");
+        expect(db.deletes).toContainEqual(
+            expect.objectContaining({
+                kind: "memory.consolidate",
+                "payload->>actorUserId": "u1",
+            }),
+        );
     });
 
     // documents.user_id references auth.users ON DELETE CASCADE, and
@@ -345,6 +359,34 @@ describe("handleExportBuild", () => {
                 JOB("export.build", { userId: "u1", type: "everything" }),
             ),
         ).rejects.toThrow(/malformed payload/);
+    });
+
+    it("builds and audits the memory ZIP", async () => {
+        const db = makeDb();
+        const out = await handleExportBuild(
+            db as never,
+            JOB("export.build", {
+                userId: "u1",
+                userEmail: "u@x.test",
+                type: "memory-zip",
+            }),
+        );
+
+        expect(buildMemoryArchive).toHaveBeenCalledWith(
+            db,
+            "u1",
+            "u@x.test",
+        );
+        const [path, , contentType] = uploadFile.mock.calls[0];
+        expect(path).toBe(
+            "exports/u1/job-1-mike-memory-export.zip",
+        );
+        expect(contentType).toBe("application/zip");
+        expect(out.filename).toBe("mike-memory-export.zip");
+        expect(recordAudit).toHaveBeenCalledWith(
+            db,
+            expect.objectContaining({ action: "export.memory" }),
+        );
     });
 
 
