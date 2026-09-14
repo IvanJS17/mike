@@ -10,7 +10,11 @@ Route/fixture provenance at the recorded source revision:
   docker/staging/proxy.conf -> frontend/src/app/api/[...path]/route.ts (Next BFF)
   backend/src/routes/auth.ts: signup/login/session/logout (cookie sessions)
   backend/src/routes/user.ts: profile/onboarding; e2e/onboarding.ts: skip with {}
-  backend/src/routes/projects.ts: POST /, POST/GET /:projectId/documents
+  backend/src/routes/projects.ts: POST /, GET /:projectId/documents
+  backend/src/routes/uploadSessions.ts: POST /upload-sessions -> signed PUT via the
+    loopback proxy relay (/storage/*; Host storage:9000 preserved for SigV4) ->
+    files/:fileId/complete -> session poll (upload-sessions contract; the former
+    multipart endpoints answer 410 by design)
   backend/src/routes/documents.ts: GET /:documentId/docx (original stored bytes)
   backend/src/lib/convert.ts: local LibreOffice only, conversion is best effort.
 The minimal synthetic DOCX below is generated, not a private repository fixture.
@@ -20,6 +24,7 @@ import base64
 import errno
 import hashlib
 import hmac
+import http.client
 import http.cookiejar
 import io
 import json
@@ -33,6 +38,7 @@ import socket
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import zipfile
@@ -414,7 +420,8 @@ class Runner:
             with response:
                 code = response.code
                 # Failed bodies can contain secrets. Do not read or report them.
-                self.check(name, code == expected, http_code=code)
+                accepted = expected if isinstance(expected, (tuple, list)) else (expected,)
+                self.check(name, code in accepted, http_code=code)
                 raw = response.read(4 * 1024 * 1024 + 1)
                 if len(raw) > 4 * 1024 * 1024:
                     raise SmokeFailure('response_too_large')
@@ -426,6 +433,43 @@ class Runner:
         except urllib.error.URLError as error:
             code = 'http_socket_timeout' if isinstance(error.reason, TimeoutError) else 'http_transport_error'
             raise SmokeFailure(code) from None
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+
+    def signed_put(self, name, url, body, headers):
+        """PUT bytes to the session's signed storage URL.
+
+        The signature binds the internal host (storage:9000) and the canonical
+        path. The loopback-published proxy relays /storage/* to MinIO presenting
+        exactly that signed host, so the signature validates end to end while
+        storage stays off the published topology (only the proxy faces loopback).
+        """
+        self.stage(name)
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme != 'http' or parsed.netloc != 'storage:9000' or not parsed.path:
+            raise SmokeFailure('unexpected_storage_host')
+        target = '/storage' + parsed.path + (('?' + parsed.query) if parsed.query else '')
+        duration = min(90, self.deadline - time.monotonic())
+        if duration <= 0:
+            raise SmokeFailure('stage_deadline')
+        signal.setitimer(signal.ITIMER_REAL, duration)
+        try:
+            connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=duration)
+            try:
+                connection.putrequest('PUT', target)
+                for key, value in {'Content-Length': str(len(body)), **headers}.items():
+                    connection.putheader(key, value)
+                connection.endheaders(body)
+                response = connection.getresponse()
+                code = response.status
+                response.read()
+                self.check(name, code in (200, 201), http_code=code)
+            finally:
+                connection.close()
+        except TimeoutError:
+            raise SmokeFailure('http_socket_timeout') from None
+        except OSError:
+            raise SmokeFailure('http_transport_error') from None
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
 
@@ -461,14 +505,42 @@ class Runner:
                             body={'name': 'Synthetic Smoke'})
         project_id = str(uuid.UUID(project['id']))
         document = synthetic_docx()
-        boundary = secrets.token_hex(24)
-        multipart = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="synthetic.docx"\r\n'
-                     'Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document\r\n\r\n').encode()
-        multipart += document + f'\r\n--{boundary}--\r\n'.encode()
-        uploaded = self.http('document_upload', 'POST', f'/api/projects/{project_id}/documents',
-                             expected=201, body=multipart, content_type='multipart/form-data; boundary=' + boundary)
-        document_id = str(uuid.UUID(uploaded['id']))
-        self.check('document_ready', uploaded.get('status') == 'ready')
+        created = self.http('document_upload_session', 'POST', '/api/upload-sessions', expected=201, body={
+            'purpose': 'document_create',
+            'destination': {'scope': 'project', 'project_id': project_id},
+            'files': [{'client_id': 'synthetic-docx', 'filename': 'synthetic.docx',
+                       'size_bytes': len(document)}],
+        })
+        upload_session_id = str(uuid.UUID(created['session']['id']))
+        upload_file = created['files'][0]
+        upload_file_id = str(uuid.UUID(upload_file['id']))
+        signed = upload_file.get('upload') or {}
+        if signed.get('method') != 'PUT' or not signed.get('url'):
+            raise SmokeFailure('upload_descriptor_missing')
+        self.signed_put('document_upload', signed['url'], document, signed.get('headers') or {})
+        completed = self.http('document_upload_complete', 'POST',
+                              f'/api/upload-sessions/{upload_session_id}/files/{upload_file_id}/complete',
+                              expected=(200, 202), body={'failed': False})
+        entry = next((row for row in completed.get('files', []) if row.get('id') == upload_file_id), None)
+        document_id = None
+        poll_deadline = min(self.deadline, time.monotonic() + 120)
+        while True:
+            if entry is not None and entry.get('status') == 'completed':
+                result = entry.get('result')
+                resource = entry.get('resource_id')
+                if not resource and isinstance(result, dict):
+                    resource = result.get('documentId')
+                if resource:
+                    document_id = str(uuid.UUID(str(resource)))
+                break
+            if entry is not None and entry.get('status') in ('failed', 'rejected', 'cancelled'):
+                raise SmokeFailure('upload_session_file_failed')
+            if time.monotonic() >= poll_deadline:
+                raise SmokeFailure('upload_session_timeout')
+            time.sleep(2)
+            status = self.http('document_upload_status', 'GET', f'/api/upload-sessions/{upload_session_id}')
+            entry = next((row for row in status.get('files', []) if row.get('id') == upload_file_id), None)
+        self.check('document_ready', document_id is not None)
         listing = self.http('document_list', 'GET', f'/api/projects/{project_id}/documents')
         self.check('document_listed', any(row.get('id') == document_id for row in listing))
         downloaded = self.http('document_download', 'GET', f'/api/single-documents/{document_id}/docx', binary=True)
