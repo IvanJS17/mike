@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 // `node dist/worker.js` is the documented standalone-worker topology
 // (WORKERS_MODE=none on the API, workers on their own container). Everything
@@ -15,47 +16,132 @@ import path from "node:path";
 // This spawns the real entrypoint against a Supabase URL that does not answer
 // — the runner logs claim failures and keeps polling, which is exactly the
 // behaviour under test — and asserts it is still alive a second later.
+//
+// The entrypoint runs as a single Node process with the same loader hooks the
+// tsx CLI installs, NOT through `tsx/dist/cli.mjs`: that launcher spawns the
+// worker as a *grandchild*, so killing the launcher left the worker running
+// forever (adopted by the init system, still polling). spawnWorker() spawns
+// the worker in its own process group, stopWorker() always signals the whole
+// group, waits for termination and escalates SIGTERM -> SIGKILL, and each
+// test asserts no descendant survived it.
 const backendRoot = path.resolve(__dirname, "../..");
 const ALIVE_AFTER_MS = 1_500;
+const EXIT_WAIT_MS = 5_000;
+const POSIX = process.platform !== "win32";
+
+const TSX_PREFLIGHT = path.join(backendRoot, "node_modules/tsx/dist/preflight.cjs");
+const TSX_LOADER = pathToFileURL(path.join(backendRoot, "node_modules/tsx/dist/loader.mjs")).href;
+const WORKER_ENTRYPOINT = path.join(backendRoot, "src/worker.ts");
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const hasExited = (child: ChildProcess) =>
+    child.exitCode !== null || child.signalCode !== null;
+
+function spawnWorker(env: NodeJS.ProcessEnv, cwd: string): ChildProcess {
+    return spawn(
+        process.execPath,
+        ["--require", TSX_PREFLIGHT, "--import", TSX_LOADER, WORKER_ENTRYPOINT],
+        { cwd, stdio: "ignore", env, detached: POSIX },
+    );
+}
+
+function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+    if (child.pid === undefined) {
+        return;
+    }
+    try {
+        if (POSIX) {
+            process.kill(-child.pid, signal);
+        } else {
+            child.kill(signal);
+        }
+    } catch {
+        // The process (group) is already gone; the awaited exit event settles it.
+    }
+}
+
+// Terminates everything this test started, and only then returns: SIGTERM
+// first, SIGKILL only for what refuses to leave. Runs from a `finally` so a
+// failed assertion or a timeout cannot leak the worker.
+async function stopWorker(child: ChildProcess): Promise<void> {
+    if (child.pid === undefined) {
+        return;
+    }
+    const exited = new Promise<void>((resolve) => {
+        if (hasExited(child)) {
+            resolve();
+        } else {
+            child.once("exit", () => resolve());
+        }
+    });
+    signalGroup(child, "SIGTERM");
+    if (!(await Promise.race([exited.then(() => true), delay(EXIT_WAIT_MS).then(() => false)]))) {
+        signalGroup(child, "SIGKILL");
+        if (!(await Promise.race([exited.then(() => true), delay(EXIT_WAIT_MS).then(() => false)]))) {
+            throw new Error(`worker ${child.pid} survived SIGKILL`);
+        }
+    }
+    // Sweep: if anything else from the group outlived the worker (a stray
+    // subprocess, a future launcher's child), it must not survive the test
+    // either; descendantsGone() below then proves the group is empty.
+    signalGroup(child, "SIGKILL");
+}
+
+// Regression check: the worker's process group must be empty. If any
+// descendant of the spawned process were still alive, the group would still
+// exist and the probe below would find it.
+async function descendantsGone(child: ChildProcess): Promise<boolean> {
+    if (!POSIX || child.pid === undefined) {
+        return true;
+    }
+    const deadline = Date.now() + 2_000;
+    for (;;) {
+        try {
+            process.kill(-child.pid, 0);
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+                return true;
+            }
+        }
+        if (Date.now() > deadline) {
+            return false;
+        }
+        await delay(50);
+    }
+}
 
 describe("standalone worker entrypoint", () => {
     it("stays alive in Postgres mode instead of exiting immediately", async () => {
-        const child = spawn(
-            process.execPath,
-            [
-                path.join(backendRoot, "node_modules/tsx/dist/cli.mjs"),
-                path.join(backendRoot, "src/worker.ts"),
-            ],
+        const child = spawnWorker(
             {
-                cwd: backendRoot,
-                stdio: "ignore",
-                env: {
-                    ...process.env,
-                    QUEUE_DRIVER: "postgres",
-                    DB_JOBS_POLL_MS: "60000",
-                    SUPABASE_URL: "http://127.0.0.1:9",
-                    SUPABASE_SECRET_KEY: "not-a-real-key",
-                },
+                ...process.env,
+                QUEUE_DRIVER: "postgres",
+                DB_JOBS_POLL_MS: "60000",
+                SUPABASE_URL: "http://127.0.0.1:9",
+                SUPABASE_SECRET_KEY: "not-a-real-key",
             },
+            backendRoot,
         );
 
-        const exited = new Promise<number | null>((resolve) =>
-            child.on("exit", (code) => resolve(code)),
-        );
-        const stillRunning = Symbol("alive");
-        const outcome = await Promise.race([
-            exited,
-            new Promise<symbol>((resolve) =>
-                setTimeout(() => resolve(stillRunning), ALIVE_AFTER_MS),
-            ),
-        ]);
-
-        child.kill("SIGKILL");
-        expect(
-            outcome,
-            "the worker process exited instead of staying up to poll",
-        ).toBe(stillRunning);
-    }, 20_000);
+        try {
+            const exited = new Promise<number | null>((resolve) =>
+                child.on("exit", (code) => resolve(code)),
+            );
+            const stillRunning = Symbol("alive");
+            const outcome = await Promise.race([
+                exited,
+                delay(ALIVE_AFTER_MS).then(() => stillRunning),
+            ]);
+            expect(
+                outcome,
+                "the worker process exited instead of staying up to poll",
+            ).toBe(stillRunning);
+        } finally {
+            await stopWorker(child);
+        }
+        expect(await descendantsGone(child), "the worker left descendants behind").toBe(true);
+    }, 30_000);
 
     // Bare-metal deployments configure the backend through backend/.env, not
     // through a container's environment block — and the API entrypoint reads
@@ -83,31 +169,28 @@ describe("standalone worker entrypoint", () => {
         delete env.QUEUE_DRIVER;
         delete env.REDIS_URL;
 
-        const child = spawn(
-            process.execPath,
-            [
-                path.join(backendRoot, "node_modules/tsx/dist/cli.mjs"),
-                path.join(backendRoot, "src/worker.ts"),
-            ],
-            { cwd: workDir, stdio: "ignore", env },
-        );
+        const child = spawnWorker(env, workDir);
 
-        const exited = new Promise<number | null>((resolve) =>
-            child.on("exit", (code) => resolve(code)),
-        );
-        const stillRunning = Symbol("alive");
-        const outcome = await Promise.race([
-            exited,
-            new Promise<symbol>((resolve) =>
-                setTimeout(() => resolve(stillRunning), ALIVE_AFTER_MS),
-            ),
-        ]);
-
-        child.kill("SIGKILL");
-        rmSync(workDir, { recursive: true, force: true });
-        expect(
-            outcome,
-            "the worker exited at boot — .env was not loaded",
-        ).toBe(stillRunning);
-    }, 20_000);
+        try {
+            const exited = new Promise<number | null>((resolve) =>
+                child.on("exit", (code) => resolve(code)),
+            );
+            const stillRunning = Symbol("alive");
+            const outcome = await Promise.race([
+                exited,
+                delay(ALIVE_AFTER_MS).then(() => stillRunning),
+            ]);
+            expect(
+                outcome,
+                "the worker exited at boot — .env was not loaded",
+            ).toBe(stillRunning);
+        } finally {
+            try {
+                await stopWorker(child);
+            } finally {
+                rmSync(workDir, { recursive: true, force: true });
+            }
+        }
+        expect(await descendantsGone(child), "the worker left descendants behind").toBe(true);
+    }, 30_000);
 });
