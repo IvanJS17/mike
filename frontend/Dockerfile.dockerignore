@@ -17,3 +17,6 @@
 **/*.log
 **/*.tsbuildinfo
 **/.git
+!word-addin/
+!word-addin/src/
+!word-addin/src/**
