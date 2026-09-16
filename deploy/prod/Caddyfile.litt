@@ -1,0 +1,14 @@
+# BEGIN litt
+# LiTT — litt.asteroitt.com.mx (producción).
+# Bloque administrado por el paquete deploy/prod: editar SOLO entre los
+# marcadores, validar y recargar el Caddy compartido (ver README.md §Caddy).
+litt.asteroitt.com.mx {
+	encode zstd gzip
+	reverse_proxy litt:3000 {
+		# Preservar Host público + X-Forwarded-Host: sin esto, Next standalone
+		# genera URLs con el hostname interno del contenedor.
+		header_up Host {host}
+		header_up X-Forwarded-Host {host}
+	}
+}
+# END litt
