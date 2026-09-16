@@ -41,7 +41,14 @@ function main(){
   const transport=process.argv[2]==='--read-only'?null:createRecordedFakeDrive(process.argv[2]);
   const {app}=require('../src/app.ts');
   if(transport)app.locals.recoveryDriveTransport=transport;
-  app.listen(3001,'0.0.0.0',()=>console.log('Local synthetic Beta server ready'));
+  app.listen(3001,'0.0.0.0',()=>{
+    console.log('Local synthetic Beta server ready');
+    // The production entry (src/index.ts) owns background work, and
+    // upload-session sealing depends on it (lease-based claims over Postgres).
+    // Mirror its inline mode — with no workers the synthetic journey stalls in
+    // document_upload_status forever.
+    require('../src/workerRuntime.ts').startAllWorkers();
+  });
 }
-module.exports={createRecordedFakeDrive,validEnvironment};
+module.exports={createRecordedFakeDrive,validEnvironment,main};
 if(require.main===module){try{main();}catch{console.error('Beta fixture server failed');process.exitCode=1;}}
