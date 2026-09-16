@@ -224,6 +224,12 @@ class BetaRunner(paired.ObservedRunner):
         result = super().http(name, *args, **kwargs)
         if name == "project_create":
             self.setup_tenancy()  # Runs before the inherited DOCX upload.
+        # The session contract materializes the document only after the upload
+        # is sealed, so the legacy `document_upload` handler in the base runner
+        # never sees a response body to publish `fixture['document']` from.
+        # The project listing is authoritative and always runs after the seal.
+        if name == "document_list" and isinstance(result, list) and len(result) == 1:
+            self.fixture["document"] = str(uuid.UUID(str(result[0]["id"])))
         return result
 
     def mfa_session(self, role, identity):
@@ -353,10 +359,27 @@ SELECT count(*) FROM public.matters m JOIN public.workspaces w ON w.id=m.workspa
             workflow_content_hash=entry["content_hash"], workflow_source_commit=entry["source_commit"])
         self.stage("beta_source_provider_persistence")
         f = self.fixture
+
+        def mark(name):
+            self.receipt.setdefault("beta_evidence_trace", []).append(name)
+            self.save()
+
         f["execution"] = str(uuid.uuid4())
+        mark("execution_id")
+        required = ("user", "organization", "matter", "project", "document")
+        missing = [name for name in required if name not in f]
+        if missing:
+            mark("fixture_missing:" + ",".join(missing))
+            raise Failure("fixture_keys_missing")
+        try:
+            owner_token = access_token(self.cookies)
+        except Exception as error:
+            mark("token_error:" + type(error).__name__)
+            raise
+        mark("token_read")
         value = dict(
             owner_user_id=f["user"],
-            owner_access_token=access_token(self.cookies),
+            owner_access_token=owner_token,
             organization_id=f["organization"],
             matter_id=f["matter"],
             project_id=f["project"],
@@ -364,10 +387,13 @@ SELECT count(*) FROM public.matters m JOIN public.workspaces w ON w.id=m.workspa
             execution_id=f["execution"],
             idempotency_key="beta-evidence",
         )
+        mark("input_built")
         local = self.work / "beta-input.json"
         local.write_text(json.dumps(value))
         local.chmod(0o600)
+        mark("input_written")
         self.copy("backend", local, "/tmp/litt-beta-input.json", inbound=True)
+        mark("input_copied")
         backend = self.resource("backend", {"running"})
         # docker cp may retain the host UID. Keep 0600 and the CLI's exact-owner guard.
         self.command(
@@ -383,19 +409,45 @@ SELECT count(*) FROM public.matters m JOIN public.workspaces w ON w.id=m.workspa
                 "chown 0:0 /tmp/litt-beta-input.json && chmod 600 /tmp/litt-beta-input.json",
             ]
         )
-        result = json.loads(
-            self.command(
-                self.docker
-                + [
-                    "exec",
-                    backend,
-                    "node",
-                    "/app/scripts/recovery-beta-evidence.cjs",
-                    "/tmp/litt-beta-input.json",
-                ],
-                timeout=45,
-            )
+        # Capture both streams plus the exit code inside the container: the CLI
+        # classifies its failures on stderr, and a bare `json.loads` over the exec
+        # stdout turns every failure mode into an undiagnosable generic error.
+        # Raw text stays inside the container; the receipt keeps codes only.
+        started = time.monotonic()
+        self.command(
+            self.docker
+            + [
+                "exec",
+                backend,
+                "sh",
+                "-c",
+                "node /app/scripts/recovery-beta-evidence.cjs /tmp/litt-beta-input.json "
+                ">/tmp/litt-beta-evidence.stdout 2>/tmp/litt-beta-evidence.stderr; "
+                "printf '%s' \"$?\" >/tmp/litt-beta-evidence.rc",
+            ],
+            timeout=150,
         )
+        probe = {
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "exit_code": int(self.command(self.docker + ["exec", backend, "cat", "/tmp/litt-beta-evidence.rc"])),
+        }
+        self.receipt.setdefault("beta_evidence_probe", {}).update(probe)
+        self.save()
+        if probe["exit_code"] != 0:
+            raise Failure(
+                "beta_evidence_exit",
+                probe["exit_code"],
+                smoke.failure_signatures(
+                    self.command(self.docker + ["exec", backend, "cat", "/tmp/litt-beta-evidence.stderr"]).encode()
+                ),
+            )
+        output = self.command(self.docker + ["exec", backend, "cat", "/tmp/litt-beta-evidence.stdout"])
+        if not output:
+            raise Failure("beta_evidence_stdout_empty")
+        try:
+            result = json.loads(output)
+        except json.JSONDecodeError:
+            raise Failure("beta_evidence_stdout_malformed") from None
         self.check(
             "beta_one_governed_fake_call",
             result["provider_calls"] == 1
