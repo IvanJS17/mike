@@ -1,0 +1,228 @@
+# LiTT — despliegue de producción (VPS compartido `staging-apps-dev`).
+#
+# Patrón de la casa: la app vive en /srv/litt con su propio proyecto compose
+# (`name: litt`); NINGÚN puerto se publica al host (solo red interna); el borde
+# público 80/443 lo sirve el Caddy compartido con un bloque `litt` en su
+# Caddyfile; el frontend se une a la red del Caddy con el alias `litt`.
+#
+# Almacén de documentos: Cloudflare R2 (externo). No hay object storage local.
+# Secretos: /srv/litt/.env (600, fuera de git) — usar con --env-file en todos
+# los comandos (ver README.md).
+name: litt
+
+services:
+  db:
+    image: supabase/postgres:17.6.1.136
+    restart: unless-stopped
+    mem_limit: 640m
+    memswap_limit: 896m
+    environment:
+      POSTGRES_DB: postgres
+      # pg_ctl's default wait expired while loading extensions on the shared host.
+      PGCTLTIMEOUT: '300'
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      JWT_SECRET: ${JWT_SECRET:?required}
+      JWT_EXP: '3600'
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ../../scripts/staging-db-roles.sh:/docker-entrypoint-initdb.d/zz-litt-roles.sh:ro
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - PGPASSWORD="$$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U supabase_auth_admin
+        -d postgres -tAc "select 1 where to_regclass('auth.users') is not null" |
+        grep -qx 1
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 300s
+
+  auth:
+    image: supabase/gotrue:v2.189.0
+    restart: unless-stopped
+    mem_limit: 192m
+    memswap_limit: 320m
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: '9999'
+      API_EXTERNAL_URL: ${PUBLIC_URL:?required}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD:?required}@db:5432/postgres
+      GOTRUE_SITE_URL: ${PUBLIC_URL:?required}
+      GOTRUE_URI_ALLOW_LIST: ${PUBLIC_URL:?required}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET:?required}
+      GOTRUE_JWT_EXP: '3600'
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      # Signup abierto para el arranque (sin SMTP todavía); ver README §Decisiones.
+      GOTRUE_DISABLE_SIGNUP: ${DISABLE_SIGNUP:-false}
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: 'true'
+      GOTRUE_EXTERNAL_PHONE_ENABLED: 'false'
+      GOTRUE_MAILER_AUTOCONFIRM: 'true'
+      GOTRUE_EXTERNAL_GOOGLE_ENABLED: 'false'
+      GOTRUE_PASSWORD_MIN_LENGTH: '10'
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - wget -q -O /dev/null http://127.0.0.1:9999/health
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+
+  rest:
+    image: postgrest/postgrest:v14.12
+    restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 256m
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:?required}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET:?required}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db-init:
+    image: supabase/postgres:17.6.1.136
+    restart: 'no'
+    mem_limit: 256m
+    environment:
+      PGHOST: db
+      PGPORT: '5432'
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD:?required}
+      PGDATABASE: postgres
+    volumes:
+    - ../../backend/schema.sql:/staging/schema.sql:ro
+    - ../../scripts/staging-db-init.sh:/staging/db-init.sh:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+      rest:
+        condition: service_started
+    entrypoint:
+    - bash
+    - /staging/db-init.sh
+    command:
+    - fresh
+    healthcheck:
+      disable: true
+
+  gateway:
+    image: nginx:1.27.5-alpine
+    restart: unless-stopped
+    mem_limit: 64m
+    memswap_limit: 128m
+    volumes:
+    - ./gateway.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      auth:
+        condition: service_healthy
+      rest:
+        condition: service_started
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - wget -q -O /dev/null http://127.0.0.1:8000/healthz
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 5s
+
+  backend:
+    image: litt-backend:${LITT_RELEASE:?required}
+    restart: unless-stopped
+    mem_limit: 768m
+    memswap_limit: 1088m
+    environment:
+      NODE_ENV: production
+      PORT: '3001'
+      FRONTEND_URL: ${PUBLIC_URL:?required}
+      API_PUBLIC_URL: ${PUBLIC_URL:?required}/api
+      SUPABASE_URL: http://gateway:8000
+      SUPABASE_SECRET_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?required}
+      DOWNLOAD_SIGNING_SECRET: ${DOWNLOAD_SIGNING_SECRET:?required}
+      USER_API_KEYS_ENCRYPTION_SECRET: ${USER_API_KEYS_ENCRYPTION_SECRET:?required}
+      GOTRUE_DISABLE_SIGNUP: ${DISABLE_SIGNUP:-false}
+      R2_ENDPOINT_URL: ${R2_ENDPOINT_URL:?required}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:?required}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:?required}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME:?required}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_ANON_KEY:?required}
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      auth:
+        condition: service_healthy
+      rest:
+        condition: service_started
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - -e
+      - 'fetch(''http://127.0.0.1:3001/health'').then((r) => process.exit(r.ok ? 0
+        : 1)).catch(() => process.exit(1))'
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    # Egreso externo (R2 + proveedores de IA): default es internal y no da
+    # gateway; la red de egreso dedicada sí (mínima exposición).
+    networks:
+    - default
+    - egress
+
+  frontend:
+    image: litt-frontend:${LITT_RELEASE:?required}
+    restart: unless-stopped
+    mem_limit: 320m
+    memswap_limit: 512m
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: '1'
+      API_BASE_URL: http://backend:3001
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - -e
+      - 'fetch(''http://127.0.0.1:3000'').then((r) => process.exit(r.ok ? 0 : 1)).catch(() =>
+        process.exit(1))'
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+    networks:
+      default: {}
+      caddy:
+        aliases:
+        - litt
+
+volumes:
+  db_data:
+
+networks:
+  default:
+    internal: true
+  # Egreso externo del backend (R2 + proveedores de IA).
+  egress:
+  # Red del Caddy compartido (proyecto escrituralab). El frontend entra con el
+  # alias `litt` (lo que el Caddyfile resuelve); el resto del stack queda
+  # aislado en la red interna.
+  caddy:
+    external: true
+    name: escrituralab_default
